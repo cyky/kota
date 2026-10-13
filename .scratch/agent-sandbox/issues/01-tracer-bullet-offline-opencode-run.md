@@ -1,6 +1,7 @@
-# 01 — Tracer bullet: offline opencode session reaching the gateway
+# ✅ DONE — 01 — Tracer bullet: offline opencode session reaching the gateway
 
-Status: ready-for-agent
+Status: done
+Resolved in: `19395a4` (branch `issue-01-tracer-bullet`)
 
 ## Parent
 
@@ -22,13 +23,28 @@ No containment probes yet (slice 02). Only use this against throwaway projects u
 
 ## Acceptance criteria
 
-- [ ] `localllm build` produces the base image with pinned agent versions
-- [ ] `localllm run` in a project starts opencode with `/workspace` = that project; `localllm run <dir>` works too
-- [ ] opencode can complete a prompt using `qwen3.6-coder` through the forwarder
-- [ ] From inside the agent container, `curl https://1.1.1.1` and `curl http://host.docker.internal:8080` fail; `curl http://gateway:<port>/v1/models` succeeds
-- [ ] Files created by the agent are owned by the host user
-- [ ] SandboxSpec unit tests: agent attached only to the internal network; forwarder exposes exactly one port; hardening flags present; gateway URL configurable
+- [x] `localllm build` produces the base image with pinned agent versions
+- [x] `localllm run` in a project starts opencode with `/workspace` = that project; `localllm run <dir>` works too
+- [x] opencode can complete a prompt using `qwen3.6-coder` through the forwarder
+- [x] From inside the agent container, `curl https://1.1.1.1` and `curl http://host.docker.internal:8080` fail; `curl http://gateway:<port>/v1/models` succeeds
+- [x] Files created by the agent are owned by the host user
+- [x] SandboxSpec unit tests: agent attached only to the internal network; forwarder exposes exactly one port; hardening flags present; gateway URL configurable
 
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+**2026-10-13 — Done.** Implemented in `19395a4` on branch `issue-01-tracer-bullet`.
+
+Verified on the host (Rancher Desktop):
+- Internet (`1.1.1.1`) and host (`host.docker.internal`, `192.168.5.2:8080`) unreachable from the agent; `http://gateway:8080/v1/models` reachable.
+- `opencode run` with `qwen3.6-coder` made a tool call that created a file on the host, owned by the host user. Tool calling works without `--jinja`.
+- Unit tests for SandboxSpec and the opencode config pass.
+
+Not verified: the interactive TUI (`localllm run` with no command). Needs a manual try.
+
+Notes for later issues:
+- opencode does not ask before acting by default, so issue 09 must set ask-mode permissions explicitly.
+- opencode's npm postinstall must run (it installs the binary), so it's allowed for that package only. pi's `--ignore-scripts` plan (issue 10) is unaffected.
