@@ -6,14 +6,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"localllm/assets"
+	"localllm/internal/check"
 	"localllm/internal/docker"
 	"localllm/internal/opencode"
+	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
 
@@ -31,10 +35,13 @@ const usage = `usage: localllm <command> [flags]
 commands:
   build                 build the sandbox images
   run [flags] [dir] [-- cmd...]
-                        start opencode offline in dir (default: current dir)
+                        verify containment, then start opencode offline in
+                        dir (default: current dir)
+  check [flags] [dir]   show mounts and run the containment probes
 
-run flags:
+flags:
   --gateway URL         model gateway (default $LOCALLLM_GATEWAY or ` + defaultGateway + `)
+  --unsafe-skip-check   run only: start without the containment probes
 `
 
 func main() {
@@ -48,6 +55,8 @@ func main() {
 		err = cmdBuild()
 	case "run":
 		err = cmdRun(os.Args[2:])
+	case "check":
+		err = cmdCheck(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -76,14 +85,25 @@ func cmdBuild() error {
 	return nil
 }
 
-func cmdRun(args []string) error {
-	fset := flag.NewFlagSet("run", flag.ContinueOnError)
-	gatewayURL := fset.String("gateway", envOr("LOCALLLM_GATEWAY", defaultGateway), "model gateway URL")
+// session holds everything needed to start one sandbox.
+type session struct {
+	spec       sandbox.Compose
+	gateway    sandbox.Gateway
+	sessionDir string
+}
+
+// parseSessionArgs parses [flags] [dir] [-- cmd...] shared by run and check.
+func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (gatewayURL, dir string, command []string, err error) {
+	fset := flag.NewFlagSet(name, flag.ContinueOnError)
+	gw := fset.String("gateway", envOr("LOCALLLM_GATEWAY", defaultGateway), "model gateway URL")
+	if register != nil {
+		register(fset)
+	}
 	if err := fset.Parse(args); err != nil {
-		return err
+		return "", "", nil, err
 	}
 
-	dir, command := ".", []string(nil)
+	dir = "."
 	rest := fset.Args()
 	for i, a := range rest {
 		if a == "--" {
@@ -97,31 +117,36 @@ func cmdRun(args []string) error {
 	case 1:
 		dir = rest[0]
 	default:
-		return errors.New("run takes at most one directory")
+		return "", "", nil, fmt.Errorf("%s takes at most one directory", name)
 	}
+	return *gw, dir, command, nil
+}
 
+// prepareSession resolves inputs, renders the agent config and builds the
+// compose spec. The caller removes sessionDir when done.
+func prepareSession(gatewayURL, dir string, command []string) (*session, error) {
 	project, err := resolveDir(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	gw, err := sandbox.ParseGateway(*gatewayURL)
+	gw, err := sandbox.ParseGateway(gatewayURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	sessionDir, err := newSessionDir(project)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer os.RemoveAll(sessionDir)
-
 	cfg, err := opencode.Render(opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Model: defaultModel})
 	if err != nil {
-		return err
+		os.RemoveAll(sessionDir)
+		return nil, err
 	}
 	cfgFile := filepath.Join(sessionDir, "opencode.json")
 	if err := os.WriteFile(cfgFile, cfg, 0o644); err != nil {
-		return err
+		os.RemoveAll(sessionDir)
+		return nil, err
 	}
 
 	spec := sandbox.Build(sandbox.Inputs{
@@ -135,7 +160,108 @@ func cmdRun(args []string) error {
 		Env:            opencode.Env(agentConfigPath),
 		Command:        command,
 	})
-	return docker.RunSession(spec, sessionDir)
+	return &session{spec: spec, gateway: gw, sessionDir: sessionDir}, nil
+}
+
+func cmdRun(args []string) error {
+	var skipCheck bool
+	gatewayURL, dir, command, err := parseSessionArgs("run", args, func(f *flag.FlagSet) {
+		f.BoolVar(&skipCheck, "unsafe-skip-check", false, "start without running the containment probes")
+	})
+	if err != nil {
+		return err
+	}
+	sess, err := prepareSession(gatewayURL, dir, command)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(sess.sessionDir)
+
+	ds, err := docker.Start(sess.spec, sess.sessionDir)
+	if err != nil {
+		return err
+	}
+	defer ds.Close()
+
+	if skipCheck {
+		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
+	} else {
+		results, err := check.Run(ds, sess.gateway)
+		if err != nil {
+			return fmt.Errorf("containment probes: %w", err)
+		}
+		if failed := probe.Failed(results); len(failed) > 0 {
+			printResults(os.Stderr, failed)
+			return fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'localllm check' for details)", len(failed), len(results))
+		}
+		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
+	}
+	return ds.Interactive()
+}
+
+func cmdCheck(args []string) error {
+	gatewayURL, dir, _, err := parseSessionArgs("check", args, nil)
+	if err != nil {
+		return err
+	}
+	sess, err := prepareSession(gatewayURL, dir, nil)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(sess.sessionDir)
+
+	printMounts(os.Stdout, sess.spec)
+
+	ds, err := docker.Start(sess.spec, sess.sessionDir)
+	if err != nil {
+		return err
+	}
+	defer ds.Close()
+
+	start := time.Now()
+	results, err := check.Run(ds, sess.gateway)
+	if err != nil {
+		return fmt.Errorf("containment probes: %w", err)
+	}
+	fmt.Println("\nprobes:")
+	printResults(os.Stdout, results)
+
+	failed := probe.Failed(results)
+	fmt.Printf("\n%d passed, %d failed (%s)\n", len(results)-len(failed), len(failed), time.Since(start).Round(10*time.Millisecond))
+	if len(failed) > 0 {
+		return errors.New("sandbox is not contained")
+	}
+	return nil
+}
+
+func printMounts(w io.Writer, spec sandbox.Compose) {
+	fmt.Fprintln(w, "mounts:")
+	for _, v := range spec.Services[sandbox.AgentService].Volumes {
+		mode := "rw"
+		if v.ReadOnly {
+			mode = "ro"
+		}
+		fmt.Fprintf(w, "  %s  %s -> %s\n", mode, v.Source, v.Target)
+	}
+	fmt.Fprintf(w, "gateway (in sandbox): %s\n", sandbox.AgentGatewayURL())
+}
+
+func printResults(w io.Writer, results []probe.Result) {
+	for _, r := range results {
+		status := "PASS"
+		if !r.Passed() {
+			status = "FAIL"
+		}
+		want := "must fail"
+		if r.MustSucceed {
+			want = "must succeed"
+		}
+		outcome := fmt.Sprintf("exit %d", r.ExitCode)
+		if r.Missing {
+			outcome = "no result"
+		}
+		fmt.Fprintf(w, "  %s  %-34s %-13s %s\n", status, r.Name, want, outcome)
+	}
 }
 
 func resolveDir(dir string) (string, error) {

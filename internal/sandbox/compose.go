@@ -38,5 +38,6 @@ type NetworkAttach struct {
 }
 
 type Network struct {
-	Internal bool `json:"internal,omitempty"`
+	Internal   bool              `json:"internal,omitempty"`
+	DriverOpts map[string]string `json:"driver_opts,omitempty"`
 }

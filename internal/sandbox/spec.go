@@ -30,10 +30,11 @@ const (
 
 	// AgentService is the compose service name of the agent container.
 	AgentService = "agent"
+	// ForwarderService is the compose service name of the forwarder.
+	ForwarderService = "forwarder"
 
 	internalNetwork = "sandbox"
 	egressNetwork   = "egress"
-	forwarderSvc    = "forwarder"
 )
 
 // Gateway is the host-side model gateway the forwarder connects to.
@@ -147,7 +148,7 @@ func Build(in Inputs) Compose {
 	agent.Volumes = volumes
 	agent.Tmpfs = []string{fmt.Sprintf("%s:uid=%d,gid=%d,mode=0700", Home, in.UID, in.GID)}
 	agent.Networks = map[string]*NetworkAttach{internalNetwork: {}}
-	agent.DependsOn = []string{forwarderSvc}
+	agent.DependsOn = []string{ForwarderService}
 	agent.StdinOpen = true
 	agent.Tty = true
 	if len(in.Command) > 0 {
@@ -157,12 +158,17 @@ func Build(in Inputs) Compose {
 	return Compose{
 		Name: ProjectName(in.ProjectDir),
 		Services: map[string]Service{
-			AgentService: agent,
-			forwarderSvc: forwarder,
+			AgentService:     agent,
+			ForwarderService: forwarder,
 		},
 		Networks: map[string]Network{
-			internalNetwork: {Internal: true},
-			egressNetwork:   {},
+			// Isolated gateway mode leaves the bridge without an address, so
+			// the Docker VM's own services (e.g. its sshd) can't be reached
+			// from the internal network. "internal" alone only blocks routing.
+			internalNetwork: {Internal: true, DriverOpts: map[string]string{
+				"com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+			}},
+			egressNetwork: {},
 		},
 	}
 }

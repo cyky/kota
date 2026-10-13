@@ -27,15 +27,19 @@ func TestAgentIsOnlyOnInternalNetwork(t *testing.T) {
 		t.Fatalf("agent networks = %v, want exactly one", agent.Networks)
 	}
 	for name := range agent.Networks {
-		if !spec.Networks[name].Internal {
+		net := spec.Networks[name]
+		if !net.Internal {
 			t.Errorf("agent network %q is not internal", name)
+		}
+		if net.DriverOpts["com.docker.network.bridge.gateway_mode_ipv4"] != "isolated" {
+			t.Errorf("agent network %q has a gateway address on the Docker VM", name)
 		}
 	}
 }
 
 func TestForwarderBridgesToGatewayOnly(t *testing.T) {
 	spec := Build(testInputs())
-	fwd := spec.Services[forwarderSvc]
+	fwd := spec.Services[ForwarderService]
 
 	var internal, external int
 	for name, attach := range fwd.Networks {
@@ -61,7 +65,7 @@ func TestForwarderBridgesToGatewayOnly(t *testing.T) {
 func TestGatewayIsConfigurable(t *testing.T) {
 	in := testInputs()
 	in.Gateway = Gateway{Host: "10.0.0.5", Port: 9292}
-	fwd := Build(in).Services[forwarderSvc]
+	fwd := Build(in).Services[ForwarderService]
 
 	if got := fwd.Command[len(fwd.Command)-1]; got != "TCP:10.0.0.5:9292" {
 		t.Errorf("forwarder target = %q", got)
@@ -78,7 +82,7 @@ func TestServicesAreHardened(t *testing.T) {
 			t.Errorf("%s lacks no-new-privileges", name)
 		}
 	}
-	if !spec.Services[forwarderSvc].ReadOnly {
+	if !spec.Services[ForwarderService].ReadOnly {
 		t.Error("forwarder root filesystem is writable")
 	}
 }
