@@ -1,4 +1,4 @@
-# ✅ DONE — 01 — Tracer bullet: offline opencode session reaching the gateway
+# DONE — 01 — Tracer bullet: offline opencode session reaching the gateway
 
 Status: done
 Resolved in: `19395a4` (branch `issue-01-tracer-bullet`)
