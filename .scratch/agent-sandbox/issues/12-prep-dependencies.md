@@ -48,3 +48,13 @@ Verified:
 - CLI smoke run of `localllm prep` on a throwaway npm + Go project under `~/Library/Caches`: install ran, the `node_modules` mount point and placeholders were removed from the host.
 
 Not covered: no containment probes in prep (it has a normal network by design, which also reaches host loopback services and the LAN). Python/Rust dependency dirs are only via `prep.dirs`. A husky `prepare` script can't set `core.hooksPath` during prep. `.npmrc` stays masked unless unmasked. No real-project trial yet (issue 17).
+
+**2026-10-14 — Follow-up: security fix in `652b1fa`.** Background reviews flagged two problems with `a8dc094`: install scripts ran with the shared caches writable (cross-project poisoning), and an agent session could write manifests, scripts or `node_modules` that the next prep ran with network access.
+
+- Two-phase prep: `ModeFetch` runs only package manager commands (`corepack install`, `pnpm fetch --ignore-pnpmfile`, `go mod download`) with the caches writable and fresh dependency volumes; `ModePrep` runs the installs (`pnpm install --offline`, `yarn install`, `npm ci`, the `localllm.yaml` command) with all shared caches read-only. pnpm without a lockfile installs into a private store. `packageManager` must be a plain version (no URLs). `COREPACK_ENABLE_AUTO_PIN=0` everywhere.
+- Dependency volumes are deleted and recreated before each prep.
+- `internal/prepgate` records the project after each successful prep under the user cache dir. The next prep asks for `y` on the first run, when prep inputs changed (manifests, lockfiles, pnpm/yarn config and releases, patches, Go module files, `localllm.yaml`), or when the install runs project code (lifecycle scripts, pnpmfile, `yarnPath`, the config command) and any other file changed. No terminal aborts.
+
+Verified: unit tests for cache access per mode, fetch/install commands, `packageManager` refusals, hooks, gate decisions and prompt output; integration tests that the install phase can't write the caches and the fetch phase can, that a file planted in `node_modules` by a run session is gone after prep, plus the earlier pnpm/Go/offline-reuse tests (pnpm now installs offline from the read-only store); CLI smoke run of the prompt (first run, decline, accept, unchanged rerun, changed `setup.js`). Full `-tags integration` suite passes.
+
+Not covered: changes in dependency and build directories (`dist`, `build`, `vendor`, ...) don't count for the confirmation; the confirmation relies on the user's review; registry packages can still run their own install scripts during their project's prep. `go.sum` must be complete before prep (fetch doesn't run `go mod tidy`). `clean` (issue 16) should also remove the prep record.
