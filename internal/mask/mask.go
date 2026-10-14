@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 
+	"localllm/internal/deps"
 	"localllm/internal/sandbox"
 )
 
@@ -111,6 +112,10 @@ func Plan(project string, defaults []string) (Layout, error) {
 	// The rules file decides what the next session hides, so the agent
 	// mustn't edit it.
 	if err := p.file(IgnoreFile); err != nil {
+		return Layout{}, err
+	}
+	// The project config decides what prep runs with network access.
+	if err := p.file(deps.ConfigFile); err != nil {
 		return Layout{}, err
 	}
 	if err := p.git(); err != nil {

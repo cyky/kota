@@ -41,11 +41,18 @@ type Session struct {
 	env []string
 	// gatewayKey reports whether a gateway key is in env.
 	gatewayKey bool
+	emptyDeps  []string
 }
 
-// Start writes spec into sessionDir and brings up the forwarder and networks.
-// gatewayKey, when not empty, is passed to compose in its environment as
-// sandbox.GatewayKeyEnv, never in the compose file or on a command line.
+// EmptyDeps returns the in-sandbox targets of the dependency volumes that
+// were empty when the session started.
+func (s *Session) EmptyDeps() []string { return s.emptyDeps }
+
+// Start writes spec into sessionDir, creates its shared volumes, gives its
+// dependency volumes to the session user, and brings up the forwarder and
+// networks. gatewayKey, when not empty, is passed to compose in its
+// environment as sandbox.GatewayKeyEnv, never in the compose file or on a
+// command line.
 func Start(spec sandbox.Compose, sessionDir, gatewayKey string) (*Session, error) {
 	data, err := json.MarshalIndent(spec.Literal(), "", "  ")
 	if err != nil {
@@ -60,9 +67,31 @@ func Start(spec sandbox.Compose, sessionDir, gatewayKey string) (*Session, error
 		s.env = append(s.env, sandbox.GatewayKeyEnv+"="+gatewayKey)
 		s.gatewayKey = true
 	}
-	if _, err := s.output("up", "-d", "--quiet-pull", sandbox.ForwarderService); err != nil {
-		s.Close()
-		return nil, fmt.Errorf("start forwarder: %w", err)
+	for _, v := range spec.Volumes {
+		if !v.External {
+			continue
+		}
+		if out, err := exec.Command("docker", "volume", "create", v.Name).CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("create volume %s: %w: %s", v.Name, err, strings.TrimSpace(string(out)))
+		}
+	}
+	if _, ok := spec.Services[sandbox.VolumesService]; ok {
+		out, err := s.output("run", "--rm", "-T", sandbox.VolumesService)
+		if err != nil {
+			s.Close()
+			return nil, fmt.Errorf("prepare dependency volumes: %w", err)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if line != "" {
+				s.emptyDeps = append(s.emptyDeps, line)
+			}
+		}
+	}
+	if _, ok := spec.Services[sandbox.ForwarderService]; ok {
+		if _, err := s.output("up", "-d", "--quiet-pull", sandbox.ForwarderService); err != nil {
+			s.Close()
+			return nil, fmt.Errorf("start forwarder: %w", err)
+		}
 	}
 	return s, nil
 }

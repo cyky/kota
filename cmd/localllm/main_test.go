@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"localllm/internal/deps"
 	"localllm/internal/opencode"
 	"localllm/internal/pi"
 	"localllm/internal/sandbox"
@@ -58,7 +60,7 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 				agent:      c.agent,
 				gatewayURL: defaultGateway,
 				dir:        filepath.Join(home, "Projects/app"),
-			})
+			}, sandbox.ModeRun)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +128,7 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sess, err := prepareSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project})
+	sess, err := prepareSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +154,124 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 	}
 }
 
+// fakeHome points HOME at a temp dir with a project under ~/Projects, and
+// returns the resolved project path.
+func fakeHome(t *testing.T, files map[string]string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALLLM_ALLOWED_ROOT", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	project := filepath.Join(home, "Projects/app")
+	for rel, content := range files {
+		p := filepath.Join(project, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "init", "-q", project).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	project, _ = filepath.EvalSymlinks(project)
+	return project
+}
+
+// TestPrepSession checks prep gets the same protections as run, the
+// dependency volumes, the install script, and no key or agent state.
+func TestPrepSession(t *testing.T) {
+	project := fakeHome(t, map[string]string{
+		"package.json":   "{}",
+		"pnpm-lock.yaml": "",
+		".env":           "SECRET=1\n",
+	})
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "sk-unit-test-secret")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+
+	sess, err := prepareSession(sessionArgs{dir: project}, sandbox.ModePrep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.gatewayKey != "" {
+		t.Error("prep loaded the gateway key")
+	}
+	spec := sess.spec
+	agent := spec.Services[sandbox.AgentService]
+	if len(agent.PassEnv) > 0 {
+		t.Errorf("pass env = %v", agent.PassEnv)
+	}
+	if _, ok := spec.Services[sandbox.ForwarderService]; ok {
+		t.Error("prep has a forwarder")
+	}
+	readOnly := map[string]bool{}
+	var depVolume string
+	for _, v := range agent.Volumes {
+		if v.ReadOnly {
+			readOnly[v.Target] = true
+		}
+		if v.Target == sandbox.Workspace+"/node_modules" {
+			depVolume = spec.Volumes[v.Source].Name
+		}
+		if v.Target == sandbox.StateDir {
+			t.Errorf("prep mounts agent state: %+v", v)
+		}
+	}
+	for _, target := range []string{"/workspace/.env", "/workspace/.git/hooks", "/workspace/.git/config", "/workspace/.envrc", "/workspace/localllm.yaml"} {
+		if !readOnly[target] {
+			t.Errorf("%s is not read-only in prep", target)
+		}
+	}
+	if depVolume != sandbox.DepVolume(project, "node_modules") {
+		t.Errorf("node_modules volume = %q", depVolume)
+	}
+	if len(agent.Command) != 3 || !strings.Contains(agent.Command[2], "pnpm install --store-dir "+sandbox.PnpmStore+" --frozen-lockfile") {
+		t.Errorf("command = %q", agent.Command)
+	}
+
+	// Docker creates the mount point; cleanup removes it while empty.
+	nm := filepath.Join(project, "node_modules")
+	if err := os.Mkdir(nm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess.cleanup()
+	if _, err := os.Lstat(nm); !os.IsNotExist(err) {
+		t.Errorf("node_modules mount point left behind: %v", err)
+	}
+}
+
+// TestHostDependencyDirKept checks cleanup never removes a dependency
+// directory the host already had.
+func TestHostDependencyDirKept(t *testing.T) {
+	project := fakeHome(t, map[string]string{"package.json": "{}"})
+	nm := filepath.Join(project, "node_modules")
+	if err := os.Mkdir(nm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := prepareSession(sessionArgs{dir: project}, sandbox.ModePrep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.cleanup()
+	if _, err := os.Stat(nm); err != nil {
+		t.Errorf("host node_modules removed: %v", err)
+	}
+}
+
+func TestPrepRefusesVolumeOverProtectedPath(t *testing.T) {
+	project := fakeHome(t, map[string]string{deps.ConfigFile: "prep:\n  dirs: [.husky]\n", ".husky/_/h": ""})
+	if out, err := exec.Command("git", "-C", project, "config", "core.hooksPath", ".husky/_").CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, err := prepareSession(sessionArgs{dir: project}, sandbox.ModePrep); err == nil || !strings.Contains(err.Error(), ".husky") {
+		t.Errorf("err = %v, want refusal of the volume over .husky", err)
+	}
+}
+
 func TestUnknownAgentRefused(t *testing.T) {
-	_, err := prepareSession(sessionArgs{agent: "claude", gatewayURL: defaultGateway, dir: t.TempDir()})
+	_, err := prepareSession(sessionArgs{agent: "claude", gatewayURL: defaultGateway, dir: t.TempDir()}, sandbox.ModeRun)
 	if err == nil || !strings.Contains(err.Error(), "opencode, pi") {
 		t.Errorf("err = %v, want unknown agent listing opencode, pi", err)
 	}

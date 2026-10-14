@@ -129,7 +129,7 @@ func TestMounts(t *testing.T) {
 		{Type: "bind", Source: "/Users/me/Projects/foo/.git", Target: "/workspace/.git"},
 		{Type: "bind", Source: "/tmp/cfg.json", Target: "/etc/localllm/opencode.json", ReadOnly: true},
 	}
-	if !slices.Equal(agent.Volumes, want) {
+	if binds := slices.DeleteFunc(slices.Clone(agent.Volumes), func(v Volume) bool { return v.Type != "bind" }); !slices.Equal(binds, want) {
 		t.Errorf("volumes = %+v, want %+v", agent.Volumes, want)
 	}
 }
@@ -231,7 +231,7 @@ func TestStateVolumeMount(t *testing.T) {
 		}
 	}
 
-	if spec := Build(testInputs()); spec.Volumes != nil || spec.Services[AgentService].Environment["XDG_DATA_HOME"] != "" {
+	if spec := Build(testInputs()); spec.Volumes[stateKey].Name != "" || spec.Services[AgentService].Environment["XDG_DATA_HOME"] != "" {
 		t.Errorf("state volume without StateVolume: %+v", spec.Volumes)
 	}
 }
@@ -316,5 +316,161 @@ func TestGatewayKeyOnlyInRunMode(t *testing.T) {
 				t.Errorf("compose environment = %v", env)
 			}
 		})
+	}
+}
+
+// volumeAt returns the agent's volume mounted at target and the named
+// volume behind it.
+func volumeAt(spec Compose, service, target string) (Volume, NamedVolume, bool) {
+	for _, v := range spec.Services[service].Volumes {
+		if v.Target == target {
+			return v, spec.Volumes[v.Source], true
+		}
+	}
+	return Volume{}, NamedVolume{}, false
+}
+
+func depInputs(mode Mode) Inputs {
+	in := testInputs()
+	in.Mode = mode
+	in.GatewayKey = true
+	in.Deps = []Mount{
+		{Source: DepVolume(in.ProjectDir, "node_modules"), Target: Workspace + "/node_modules"},
+		{Source: DepVolume(in.ProjectDir, "packages/a/node_modules"), Target: Workspace + "/packages/a/node_modules"},
+	}
+	return in
+}
+
+func TestPrepHasNetworkButNoGateway(t *testing.T) {
+	spec := Build(depInputs(ModePrep))
+	agent := spec.Services[AgentService]
+
+	if _, ok := spec.Services[ForwarderService]; ok {
+		t.Error("prep has a forwarder")
+	}
+	if len(agent.Networks) != 1 {
+		t.Fatalf("agent networks = %v", agent.Networks)
+	}
+	for name := range agent.Networks {
+		if spec.Networks[name].Internal {
+			t.Errorf("prep agent is on internal network %q", name)
+		}
+	}
+	for name, n := range spec.Networks {
+		if n.Internal {
+			t.Errorf("prep spec has internal network %q", name)
+		}
+	}
+	if len(agent.DependsOn) > 0 || len(agent.PassEnv) > 0 {
+		t.Errorf("prep depends_on = %v, pass env = %v", agent.DependsOn, agent.PassEnv)
+	}
+	if v, ok := agent.Environment["GOPROXY"]; ok {
+		t.Errorf("prep GOPROXY = %q", v)
+	}
+}
+
+func TestRunIsOfflineForPackageManagers(t *testing.T) {
+	env := Build(depInputs(ModeRun)).Services[AgentService].Environment
+	if env["GOPROXY"] != "off" || env["COREPACK_ENABLE_NETWORK"] != "0" {
+		t.Errorf("run environment = %v", env)
+	}
+}
+
+func TestDependencyVolumes(t *testing.T) {
+	for _, mode := range []Mode{ModeRun, ModePrep} {
+		in := depInputs(mode)
+		spec := Build(in)
+		for _, d := range in.Deps {
+			v, named, ok := volumeAt(spec, AgentService, d.Target)
+			if !ok || v.Type != "volume" || v.ReadOnly || named.Name != d.Source || named.External {
+				t.Errorf("mode %d: mount at %s = %+v (%+v, found %v), want writable per-project volume %s", mode, d.Target, v, named, ok, d.Source)
+			}
+		}
+	}
+}
+
+func TestSharedCaches(t *testing.T) {
+	cases := []struct {
+		mode   Mode
+		target string
+		env    string
+		// mounted and readOnly are what the mode should get.
+		mounted, readOnly bool
+	}{
+		{ModePrep, GoModCache, "GOMODCACHE", true, false},
+		{ModePrep, CorepackHome, "COREPACK_HOME", true, false},
+		{ModePrep, PnpmStore, "", true, false},
+		{ModeRun, GoModCache, "GOMODCACHE", true, true},
+		{ModeRun, CorepackHome, "COREPACK_HOME", true, true},
+		{ModeRun, PnpmStore, "", false, false},
+	}
+	for _, c := range cases {
+		spec := Build(depInputs(c.mode))
+		v, named, ok := volumeAt(spec, AgentService, c.target)
+		if ok != c.mounted {
+			t.Errorf("mode %d: %s mounted = %v, want %v", c.mode, c.target, ok, c.mounted)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if v.ReadOnly != c.readOnly || !named.External || !slices.Contains(SharedCacheVolumes(), named.Name) {
+			t.Errorf("mode %d: %s = %+v (%+v), want read-only %v, shared", c.mode, c.target, v, named, c.readOnly)
+		}
+		if c.env != "" && spec.Services[AgentService].Environment[c.env] != c.target {
+			t.Errorf("mode %d: %s = %q", c.mode, c.env, spec.Services[AgentService].Environment[c.env])
+		}
+	}
+}
+
+func TestVolumesServiceOnlyChowns(t *testing.T) {
+	if _, ok := Build(testInputs()).Services[VolumesService]; ok {
+		t.Error("volumes service without dependency volumes")
+	}
+	for _, mode := range []Mode{ModeRun, ModePrep} {
+		in := depInputs(mode)
+		spec := Build(in)
+		s, ok := spec.Services[VolumesService]
+		if !ok {
+			t.Fatalf("mode %d: no %s service", mode, VolumesService)
+		}
+		if !slices.Equal(s.CapAdd, []string{"CHOWN"}) || !slices.Equal(s.CapDrop, []string{"ALL"}) || s.NetworkMode != "none" || len(s.Networks) > 0 || !s.ReadOnly {
+			t.Errorf("mode %d: volumes service = %+v", mode, s)
+		}
+		if len(s.Volumes) != len(in.Deps) {
+			t.Errorf("mode %d: volumes service mounts %+v, want only the dependency volumes", mode, s.Volumes)
+		}
+		for i, v := range s.Volumes {
+			if v.Type != "volume" || spec.Volumes[v.Source].Name != in.Deps[i].Source || strings.HasPrefix(v.Target, Workspace) {
+				t.Errorf("mode %d: volumes service mount %+v", mode, v)
+			}
+		}
+		if s.Command[4] != "501:20" || !slices.Contains(s.Command, in.Deps[1].Target) {
+			t.Errorf("mode %d: command = %q", mode, s.Command)
+		}
+		if slices.Contains(spec.Services[AgentService].DependsOn, VolumesService) {
+			t.Errorf("mode %d: agent waits for the volumes service; the driver runs it once", mode)
+		}
+	}
+}
+
+func TestDepVolume(t *testing.T) {
+	a := DepVolume("/Users/me/Projects/a", "node_modules")
+	if a != DepVolume("/Users/me/Projects/a", "node_modules") {
+		t.Error("dependency volume name not stable")
+	}
+	for _, other := range []string{
+		DepVolume("/Users/me/Projects/b", "node_modules"),
+		DepVolume("/Users/me/Projects/a", "packages/x/node_modules"),
+	} {
+		if other == a {
+			t.Errorf("%q is shared", a)
+		}
+	}
+	if !strings.HasPrefix(a, DepVolumePrefix("/Users/me/Projects/a")) || strings.HasPrefix(a, DepVolumePrefix("/Users/me/Projects/b")) {
+		t.Errorf("prefix of %q", a)
+	}
+	if !regexp.MustCompile(`^localllm-deps-[0-9a-f]{32}-[0-9a-f]{12}$`).MatchString(a) {
+		t.Errorf("dependency volume = %q", a)
 	}
 }

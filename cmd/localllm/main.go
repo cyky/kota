@@ -22,6 +22,7 @@ import (
 	"localllm/internal/approval"
 	"localllm/internal/changereport"
 	"localllm/internal/check"
+	"localllm/internal/deps"
 	"localllm/internal/docker"
 	"localllm/internal/gatewaykey"
 	"localllm/internal/mask"
@@ -52,6 +53,8 @@ const usage = `usage: localllm <command> [flags]
 
 commands:
   build                 build the sandbox images
+  prep [dir]            install dir's dependencies with network access and
+                        no agent, into volumes that run mounts offline
   run [flags] [dir] [-- cmd...]
                         verify containment, then start the agent offline in
                         dir (default: current dir)
@@ -82,6 +85,8 @@ func main() {
 	switch os.Args[1] {
 	case "build":
 		err = cmdBuild()
+	case "prep":
+		err = cmdPrep(os.Args[2:])
 	case "run":
 		err = cmdRun(os.Args[2:])
 	case "check":
@@ -199,11 +204,20 @@ type session struct {
 	cfgFiles []string
 	// mounts are what the probes verify.
 	mounts check.Mounts
+	// deps is how prep installs the project's dependencies.
+	deps deps.Plan
+	// mountPoints are directories Docker creates on the host for the
+	// dependency volumes, outermost first.
+	mountPoints []string
 }
 
 // cleanup removes what the session left on the host. Call it after the
 // containers are gone.
 func (s *session) cleanup() {
+	// Innermost first; a directory with content is kept.
+	for _, dir := range slices.Backward(s.mountPoints) {
+		os.Remove(dir)
+	}
 	s.layout.Cleanup(s.project)
 	os.RemoveAll(s.sessionDir)
 }
@@ -266,11 +280,16 @@ func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) 
 
 // prepareSession validates paths and builds the compose spec. The agent
 // config is written later by configure. The caller removes sessionDir when
-// done.
-func prepareSession(sa sessionArgs) (*session, error) {
-	agent, err := agentFor(sa.agent)
-	if err != nil {
-		return nil, err
+// done. A prep session has no agent, gateway or key, and runs the
+// dependency install.
+func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
+	prep := mode == sandbox.ModePrep
+	var agent agentSetup
+	var err error
+	if !prep {
+		if agent, err = agentFor(sa.agent); err != nil {
+			return nil, err
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -281,16 +300,33 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		return nil, err
 	}
 	project := paths.Project
-	gw, err := sandbox.ParseGateway(sa.gatewayURL)
-	if err != nil {
-		return nil, err
-	}
-	key, err := gatewaykey.Load(os.Getenv)
-	if err != nil {
-		return nil, err
+	var gw sandbox.Gateway
+	var key string
+	if !prep {
+		if gw, err = sandbox.ParseGateway(sa.gatewayURL); err != nil {
+			return nil, err
+		}
+		if key, err = gatewaykey.Load(os.Getenv); err != nil {
+			return nil, err
+		}
 	}
 	layout, err := mask.Plan(project, mask.DefaultRules)
 	if err != nil {
+		return nil, err
+	}
+	depPlan, err := deps.Detect(project, deps.Options{PnpmStore: sandbox.PnpmStore})
+	if err != nil {
+		return nil, err
+	}
+	var protected, pinnedPaths []string
+	for _, m := range layout.Mounts {
+		if m.Pin {
+			pinnedPaths = append(pinnedPaths, m.Path)
+		} else {
+			protected = append(protected, m.Path)
+		}
+	}
+	if err := depPlan.Conflict(protected, pinnedPaths); err != nil {
 		return nil, err
 	}
 
@@ -316,8 +352,13 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		return nil, err
 	}
 
-	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles}
-	pinned, protected, err := layout.Bind(project, sessionDir)
+	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan}
+	var depMounts []sandbox.Mount
+	for _, d := range depPlan.Dirs {
+		sess.mountPoints = append(sess.mountPoints, missingDirs(project, d.Path)...)
+		depMounts = append(depMounts, sandbox.Mount{Source: sandbox.DepVolume(project, d.Path), Target: sandbox.Workspace + "/" + d.Path})
+	}
+	pinned, protectedMounts, err := layout.Bind(project, sessionDir)
 	if err == nil {
 		err = layout.Prepare(project)
 	}
@@ -327,34 +368,61 @@ func prepareSession(sa sessionArgs) (*session, error) {
 	}
 	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
 	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, agent.configs...)
-	sess.mounts.State = sandbox.StateDir
+	if !prep {
+		sess.mounts.State = sandbox.StateDir
+	}
 	for _, m := range paths.ReadOnly {
 		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
 	}
 
-	env := maps.Clone(agent.env)
+	env := map[string]string{}
+	maps.Copy(env, agent.env)
 	maps.Copy(env, gitEnv(project))
 	command := sa.command
 	if len(command) == 0 {
 		command = agent.command
 	}
+	stateVolume := ""
+	if prep {
+		command = []string{"sh", "-c", depPlan.Script()}
+	} else {
+		stateVolume = sandbox.StateVolume(project, agent.name)
+	}
 	sess.spec = sandbox.Build(sandbox.Inputs{
 		ProjectDir:     project,
 		UID:            os.Getuid(),
 		GID:            os.Getgid(),
-		Mode:           sandbox.ModeRun,
+		Mode:           mode,
 		Gateway:        gw,
 		GatewayKey:     key != "",
 		AgentImage:     baseImage,
 		ForwarderImage: forwarderImage,
 		Pinned:         pinned,
-		ReadOnly:       append(append(cfgMounts, protected...), paths.ReadOnly...),
+		ReadOnly:       append(append(cfgMounts, protectedMounts...), paths.ReadOnly...),
 		Scratch:        agent.scratch,
-		StateVolume:    sandbox.StateVolume(project, agent.name),
+		StateVolume:    stateVolume,
+		Deps:           depMounts,
 		Env:            env,
 		Command:        command,
 	})
 	return sess, nil
+}
+
+// missingDirs returns the directories on the way to the dependency
+// directory rel that don't exist yet, outermost first. Docker creates them
+// on the host as mount points.
+func missingDirs(project, rel string) []string {
+	var missing []string
+	p := project
+	for _, part := range strings.Split(rel, "/") {
+		p = filepath.Join(p, part)
+		if len(missing) > 0 {
+			missing = append(missing, p)
+		} else if _, err := os.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+			missing = append(missing, p)
+		}
+	}
+	return missing
 }
 
 // gitEnv lets git work inside the sandbox without writing config there:
@@ -386,7 +454,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	sess, err := prepareSession(sa)
+	sess, err := prepareSession(sa, sandbox.ModeRun)
 	if err != nil {
 		return err
 	}
@@ -430,6 +498,7 @@ func runSession(sess *session, model string, auto, skipCheck bool) error {
 		return err
 	}
 	defer ds.Close()
+	printEmptyDeps(os.Stderr, sess, ds.EmptyDeps())
 
 	catalog, err := sess.configure(ds, model, auto)
 	if err != nil {
@@ -481,7 +550,7 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	sa.command = nil
-	sess, err := prepareSession(sa)
+	sess, err := prepareSession(sa, sandbox.ModeRun)
 	if err != nil {
 		return err
 	}
@@ -501,6 +570,7 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	defer ds.Close()
+	printEmptyDeps(os.Stdout, sess, ds.EmptyDeps())
 
 	// A gateway problem is reported here and by the gateway probe; the
 	// other probes still run.
@@ -521,6 +591,74 @@ func cmdCheck(args []string) error {
 		return errors.New("sandbox is not contained")
 	}
 	return modelErr
+}
+
+func cmdPrep(args []string) error {
+	fset := flag.NewFlagSet("prep", flag.ContinueOnError)
+	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	sa := sessionArgs{dir: "."}
+	switch fset.NArg() {
+	case 0:
+	case 1:
+		sa.dir = fset.Arg(0)
+	default:
+		return errors.New("prep takes at most one directory")
+	}
+	sess, err := prepareSession(sa, sandbox.ModePrep)
+	if err != nil {
+		return err
+	}
+	if len(sess.deps.Steps) == 0 {
+		sess.cleanup()
+		return fmt.Errorf("nothing to install in %s: no package.json or go.mod; set prep.command in %s", sess.project, deps.ConfigFile)
+	}
+	before, err := changereport.Snapshot(sess.project)
+	if err != nil {
+		sess.cleanup()
+		return fmt.Errorf("snapshot watched files: %w", err)
+	}
+	err = runPrep(sess)
+	sess.cleanup()
+	reportChanges(os.Stderr, sess.project, before)
+	return err
+}
+
+// runPrep runs the install steps with network access, without an agent,
+// the gateway or its key. The containers are gone when it returns.
+func runPrep(sess *session) error {
+	for _, n := range sess.layout.Notes {
+		fmt.Fprintln(os.Stderr, "note:", n)
+	}
+	for _, w := range sess.layout.Warnings {
+		fmt.Fprintln(os.Stderr, "WARNING:", w)
+	}
+	if n := len(sess.mounts.Masked); n > 0 {
+		fmt.Fprintf(os.Stderr, "masked %d secret path(s); install scripts can't read them\n", n)
+	}
+	for _, d := range sess.deps.Dirs {
+		fmt.Fprintf(os.Stderr, "dependency volume: %s\n", d.Path)
+	}
+	ds, err := docker.Start(sess.spec, sess.sessionDir, "")
+	if err != nil {
+		return err
+	}
+	defer ds.Close()
+	if err := ds.Interactive(); err != nil {
+		return fmt.Errorf("prep failed: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "dependencies installed; 'localllm run' uses them offline")
+	return nil
+}
+
+// printEmptyDeps hints at prep for each dependency volume that is empty.
+func printEmptyDeps(w io.Writer, sess *session, empty []string) {
+	for _, d := range sess.deps.Dirs {
+		if slices.Contains(empty, sandbox.Workspace+"/"+d.Path) {
+			fmt.Fprintf(w, "hint: %s is empty although %s exists; run 'localllm prep %s' to install dependencies\n", d.Path, d.Manifest, sess.project)
+		}
+	}
 }
 
 // configure resolves the session's models from the gateway, through the
@@ -624,7 +762,11 @@ func printMounts(w io.Writer, spec sandbox.Compose) {
 		if v.ReadOnly {
 			mode = "ro"
 		}
-		fmt.Fprintf(w, "  %s  %s -> %s\n", mode, v.Source, v.Target)
+		source := v.Source
+		if v.Type == "volume" {
+			source = "volume " + spec.Volumes[v.Source].Name
+		}
+		fmt.Fprintf(w, "  %s  %s -> %s\n", mode, source, v.Target)
 	}
 	fmt.Fprintf(w, "gateway (in sandbox): %s\n", sandbox.AgentGatewayURL())
 	key := "none"

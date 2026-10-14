@@ -28,8 +28,10 @@ type Service struct {
 	Volumes     []Volume                  `json:"volumes,omitempty"`
 	Tmpfs       []string                  `json:"tmpfs,omitempty"`
 	Networks    map[string]*NetworkAttach `json:"networks,omitempty"`
+	NetworkMode string                    `json:"network_mode,omitempty"`
 	DependsOn   []string                  `json:"depends_on,omitempty"`
 	CapDrop     []string                  `json:"cap_drop,omitempty"`
+	CapAdd      []string                  `json:"cap_add,omitempty"`
 	SecurityOpt []string                  `json:"security_opt,omitempty"`
 	ReadOnly    bool                      `json:"read_only,omitempty"`
 	StdinOpen   bool                      `json:"stdin_open,omitempty"`
@@ -73,9 +75,11 @@ type Network struct {
 }
 
 // NamedVolume is a top-level volume. Name fixes the Docker volume name
-// instead of prefixing it with the compose project.
+// instead of prefixing it with the compose project. External volumes are
+// shared across projects and created outside compose.
 type NamedVolume struct {
-	Name string `json:"name"`
+	Name     string `json:"name"`
+	External bool   `json:"external,omitempty"`
 }
 
 // Literal returns a copy of c to write to a compose file: compose expands
@@ -114,7 +118,7 @@ func (c Compose) Literal() Compose {
 	if c.Volumes != nil {
 		out.Volumes = make(map[string]NamedVolume, len(c.Volumes))
 		for k, v := range c.Volumes {
-			out.Volumes[k] = NamedVolume{Name: literal(v.Name)}
+			out.Volumes[k] = NamedVolume{Name: literal(v.Name), External: v.External}
 		}
 	}
 	return out

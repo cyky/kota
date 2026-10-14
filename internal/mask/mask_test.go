@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"localllm/internal/deps"
 	"localllm/internal/sandbox"
 )
 
@@ -226,8 +227,9 @@ func TestPlan(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := mustPlan(t, tt.setup(t))
-			// Every project gets the rules file protected.
-			want := append(slices.Clone(tt.want), Mount{Path: IgnoreFile, Placeholder: true})
+			// Every project gets the rules file and the project config
+			// protected.
+			want := append(slices.Clone(tt.want), Mount{Path: IgnoreFile, Placeholder: true}, Mount{Path: deps.ConfigFile, Placeholder: true})
 			slices.SortStableFunc(want, func(a, b Mount) int { return strings.Compare(a.Path, b.Path) })
 			if !slices.Equal(p.Mounts, want) {
 				t.Errorf("mounts:\n got %+v\nwant %+v", p.Mounts, want)

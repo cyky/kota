@@ -25,9 +25,13 @@ RUN corepack enable \
  && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
  && npm cache clean --force
 
-# The per-project state volume is mounted here. Docker copies this mode into
-# a new volume, so the session's UID (not known at build time) can write it.
-RUN mkdir -p /var/lib/localllm/state && chmod 1777 /var/lib/localllm/state
+# The per-project state volume and the shared caches (Go modules, corepack,
+# pnpm store) are mounted here. Docker copies this mode into a new volume,
+# so the session's UID (not known at build time) can write it.
+RUN mkdir -p /var/lib/localllm/state /var/lib/localllm/gomod \
+      /var/lib/localllm/corepack /var/lib/localllm/pnpm-store \
+ && chmod 1777 /var/lib/localllm/state /var/lib/localllm/gomod \
+      /var/lib/localllm/corepack /var/lib/localllm/pnpm-store
 
 # Sessions run as the host UID with HOME on a tmpfs; nothing here needs root.
 WORKDIR /workspace

@@ -14,6 +14,7 @@ Status: early. Network containment, secret masking and git-hook protection are v
 ```sh
 go install ./cmd/localllm
 localllm build                         # build the sandbox images
+localllm prep [dir]                    # install dependencies (network, no agent)
 localllm run [dir]                     # opencode in dir (default: current dir)
 localllm run [dir] -- opencode run "…" # any command inside the sandbox
 localllm run --ro ../specs [dir]       # also mount ../specs read-only at /ro/specs
@@ -27,9 +28,7 @@ localllm check [dir]                   # show mounts and run the containment pro
 
 Set the gateway with `--gateway URL` or `LOCALLLM_GATEWAY` (default `http://host.docker.internal:8080`).
 
-If llama-swap has `apiKeys` enabled, give localllm the key with `LOCALLLM_GATEWAY_KEY`, or with `LOCALLLM_GATEWAY_KEY_FILE` pointing to a file that contains it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. The key is handed to `docker compose` in its environment only: the compose file names the variable without a value, so the key isn't written to disk or put on a command line. Inside the sandbox it is `$LOCALLLM_GATEWAY_KEY`, which the agent configs refer to by name (`{env:...}` for opencode, `$...` for pi), and the model list fetch and gateway probe send it as `Authorization: Bearer`. The agent can read it, so use a key meant only for the gateway. `check` shows whether a key is configured, never its value. If the gateway answers 401, `run` and `check` say so and point to these variables. The future `prep` command never gets the key, so install scripts can't reach your models.
-
-If llama-swap has `apiKeys` enabled, give localllm the key with `LOCALLLM_GATEWAY_KEY`, or with `LOCALLLM_GATEWAY_KEY_FILE` pointing to a file that contains it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. The key is handed to `docker compose` in its environment only: the compose file names the variable without a value, so the key isn't written to disk or put on a command line. Inside the sandbox it is `$LOCALLLM_GATEWAY_KEY`, which the agent configs refer to by name (`{env:...}` for opencode, `$...` for pi), and the model list fetch and gateway probe send it as `Authorization: Bearer`. The agent can read it, so use a key meant only for the gateway. `check` shows whether a key is configured, never its value. If the gateway answers 401, `run` and `check` say so and point to these variables. The future `prep` command never gets the key, so install scripts can't reach your models.
+If llama-swap has `apiKeys` enabled, give localllm the key with `LOCALLLM_GATEWAY_KEY`, or with `LOCALLLM_GATEWAY_KEY_FILE` pointing to a file that contains it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. The key is handed to `docker compose` in its environment only: the compose file names the variable without a value, so the key isn't written to disk or put on a command line. Inside the sandbox it is `$LOCALLLM_GATEWAY_KEY`, which the agent configs refer to by name (`{env:...}` for opencode, `$...` for pi), and the model list fetch and gateway probe send it as `Authorization: Bearer`. The agent can read it, so use a key meant only for the gateway. `check` shows whether a key is configured, never its value. If the gateway answers 401, `run` and `check` say so and point to these variables. `prep` never gets the key, so install scripts can't use your models through it.
 
 The project must be inside the allowed root, `~/Projects` by default (set `LOCALLLM_ALLOWED_ROOT` to change it). Paths are resolved through symlinks first. `$HOME`, `/` and the allowed root itself are refused. `--ro PATH` (repeatable) can point anywhere except at or around `$HOME`, the project, `~/.ssh`, `~/.config`, other credential directories, or Docker socket locations. Each `--ro` path is mounted at `/ro/<name>`.
 
@@ -73,4 +72,32 @@ Other files that run things can't be locked without breaking normal work, so `ru
 - Dependency and build directories are skipped, as for masks. So is `.git`, which is protected by mounts.
 - `check` doesn't report changes, and nothing is reported if `localllm` itself is killed mid-session.
 
-Integration tests need Docker: `go test -tags integration ./...`.
+## Dependencies
+
+`run` is offline, so dependencies are installed beforehand with `localllm prep [dir]`. It runs the install in the same image, with the same masks and read-only `.git/hooks`, `.git/config`, `.envrc` and `localllm.yaml` as `run`, but on a normal network so registries are reachable, and without an agent, the forwarder or the gateway key. Run it again after changing a manifest. When the agent needs a new dependency, add it to the manifest on the host and re-run `prep`.
+
+What it runs is detected from the project root:
+- `package.json`: pnpm, yarn or npm, chosen by the `packageManager` field, else by lockfile (`pnpm-lock.yaml`, `yarn.lock`, otherwise npm). pnpm and yarn come from corepack. With a lockfile, the install is frozen (`pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` or `--immutable`, `npm ci`).
+- `go.mod`: `go mod download`, in every module directory, or once at the root with a `go.work`.
+
+To run something else, put the command in `localllm.yaml` at the project root:
+
+```yaml
+prep:
+  command: pnpm install && pnpm build   # replaces the detected commands; run by sh in /workspace
+  dirs: [.venv]                         # extra dependency directories (see below)
+```
+
+The command runs with network access, so `localllm.yaml` is read-only inside the sandbox, like `.localllmignore`.
+
+Dependency directories (`node_modules` at the root and in each workspace package, plus `prep.dirs`) are Docker volumes per project, `localllm-deps-<hash of the project path>-<hash of the directory>`, mounted over those paths in `prep`, `run` and `check`. Linux binaries never land in your project directory. A `node_modules` you have on the host stays untouched and isn't visible in the sandbox. A dependency directory may not be or contain a protected or masked path, or lie inside one, and may not go through a symlink.
+
+Caches are shared by all projects: the Go module cache (`localllm-cache-gomod`, `GOMODCACHE`), corepack's pnpm and yarn releases (`localllm-cache-corepack`), and the pnpm store (`localllm-cache-pnpm-store`, `prep` only). `run` mounts the first two read-only, so one project's agent can't change code that another project uses, and sets `GOPROXY=off` and `COREPACK_ENABLE_NETWORK=0` so a missing dependency fails at once. `run` and `check` print a hint when a dependency directory is empty though its manifest exists.
+
+Limits:
+- `prep` has the same network as any container: the internet, the LAN and the host's loopback services (including the gateway port, but without the key). It runs no containment probes.
+- Install scripts can't change `.git/config`, so a `prepare` script that sets `core.hooksPath` (husky) fails or does nothing; run it on the host.
+- `.npmrc` is masked by default, so registry settings and tokens in it don't apply. Unmask it in `.localllmignore` (`!.npmrc`) if `prep` needs it; the agent can then read it too.
+- `prep` reports changed files that run things, like `run`.
+
+Integration tests need Docker: `go test -tags integration ./...`. The prep tests also need network access.

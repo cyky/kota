@@ -1,9 +1,10 @@
 // Package sandbox turns session inputs into a docker compose spec.
 //
-// The agent container is attached only to an internal network with no route
-// out. A forwarder container joins both that network and a normal one and
-// forwards a single port to the model gateway, which the agent reaches as
-// http://gateway:8080.
+// In a run session the agent container is attached only to an internal
+// network with no route out. A forwarder container joins both that network
+// and a normal one and forwards a single port to the model gateway, which
+// the agent reaches as http://gateway:8080. A prep session has a normal
+// network and no forwarder.
 package sandbox
 
 import (
@@ -37,6 +38,15 @@ const (
 	AgentService = "agent"
 	// ForwarderService is the compose service name of the forwarder.
 	ForwarderService = "forwarder"
+	// VolumesService gives new dependency volumes to the session user and
+	// lists the empty ones, one target per line.
+	VolumesService = "volumes"
+
+	// GoModCache, CorepackHome and PnpmStore hold the caches shared by all
+	// projects. The base image creates them world-writable, like StateDir.
+	GoModCache   = "/var/lib/localllm/gomod"
+	CorepackHome = "/var/lib/localllm/corepack"
+	PnpmStore    = "/var/lib/localllm/pnpm-store"
 
 	// GatewayKeyEnv carries the gateway API key into the agent container.
 	GatewayKeyEnv = "LOCALLLM_GATEWAY_KEY"
@@ -91,10 +101,47 @@ type Mode int
 const (
 	// ModeRun is an agent session (run, check): offline, with the gateway.
 	ModeRun Mode = iota
-	// ModePrep installs dependencies. It never gets the gateway key, so
-	// install scripts can't reach the models.
+	// ModePrep installs dependencies: a normal network, so package
+	// registries are reachable, and no forwarder or gateway key, so install
+	// scripts don't get the models.
 	ModePrep
 )
+
+// sharedCache is a volume every project shares.
+type sharedCache struct {
+	key, name, target, env string
+	// inRun is how a run session mounts it: read-only, so one project's
+	// agent can't plant code in another project's dependencies, or not at
+	// all.
+	inRun cacheAccess
+}
+
+type cacheAccess int
+
+const (
+	readOnlyInRun cacheAccess = iota
+	prepOnly
+)
+
+var sharedCaches = []sharedCache{
+	{key: "gomod", name: "localllm-cache-gomod", target: GoModCache, env: "GOMODCACHE", inRun: readOnlyInRun},
+	// corepack keeps the pnpm and yarn releases it downloads here, and the
+	// shims need them offline too.
+	{key: "corepack", name: "localllm-cache-corepack", target: CorepackHome, env: "COREPACK_HOME", inRun: readOnlyInRun},
+	// pnpm copies packages from the store into node_modules, which is a
+	// different volume, so run doesn't need it.
+	{key: "pnpm-store", name: "localllm-cache-pnpm-store", target: PnpmStore, inRun: prepOnly},
+}
+
+// SharedCacheVolumes returns the names of the volumes shared by all
+// projects.
+func SharedCacheVolumes() []string {
+	var names []string
+	for _, c := range sharedCaches {
+		names = append(names, c.name)
+	}
+	return names
+}
 
 // Mount is a bind mount of a host file or directory.
 type Mount struct {
@@ -127,6 +174,10 @@ type Inputs struct {
 	// StateVolume(). XDG data, state and cache point into it, so the agent's
 	// sessions, logs and caches outlive the container. Empty means none.
 	StateVolume string
+	// Deps are the project's dependency volumes: Source is a volume name
+	// from DepVolume(), Target a directory under Workspace. They hide what
+	// the host has there and are writable in every mode.
+	Deps []Mount
 	// Scratch are directories inside Home on their own tmpfs, owned by the
 	// agent user. Read-only mounts can go inside one while the agent still
 	// writes next to them; the contents are discarded with the container.
@@ -157,11 +208,107 @@ func StateVolume(projectDir, agent string) string {
 	return fmt.Sprintf("localllm-state-%s-%s", agent, hex.EncodeToString(sum[:])[:32])
 }
 
+// DepVolume returns the name of the volume for the dependency directory rel
+// (relative to the project) of a project directory. All of a project's
+// dependency volumes share the prefix DepVolumePrefix(projectDir).
+func DepVolume(projectDir, rel string) string {
+	sum := sha256.Sum256([]byte(rel))
+	return DepVolumePrefix(projectDir) + hex.EncodeToString(sum[:])[:12]
+}
+
+// DepVolumePrefix is the name prefix of a project's dependency volumes.
+func DepVolumePrefix(projectDir string) string {
+	sum := sha256.Sum256([]byte(projectDir))
+	return fmt.Sprintf("localllm-deps-%s-", hex.EncodeToString(sum[:])[:32])
+}
+
 // Build produces the compose spec for a session.
 func Build(in Inputs) Compose {
 	hardening := Service{
 		CapDrop:     []string{"ALL"},
 		SecurityOpt: []string{"no-new-privileges:true"},
+	}
+	prep := in.Mode == ModePrep
+
+	env := map[string]string{"HOME": Home}
+	if in.StateVolume != "" {
+		env["XDG_DATA_HOME"] = StateDir + "/data"
+		env["XDG_STATE_HOME"] = StateDir + "/state"
+		env["XDG_CACHE_HOME"] = StateDir + "/cache"
+	}
+	if prep {
+		env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
+	} else {
+		// Fail fast instead of timing out on the missing network.
+		env["GOPROXY"] = "off"
+		env["COREPACK_ENABLE_NETWORK"] = "0"
+	}
+
+	volumes := []Volume{{Type: "bind", Source: in.ProjectDir, Target: Workspace}}
+	for _, m := range in.Pinned {
+		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target})
+	}
+	for _, m := range in.ReadOnly {
+		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target, ReadOnly: true})
+	}
+	named := map[string]NamedVolume{}
+	if in.StateVolume != "" {
+		volumes = append(volumes, Volume{Type: "volume", Source: stateKey, Target: StateDir})
+		named[stateKey] = NamedVolume{Name: in.StateVolume}
+	}
+	for _, c := range sharedCaches {
+		if !prep && c.inRun == prepOnly {
+			continue
+		}
+		volumes = append(volumes, Volume{Type: "volume", Source: c.key, Target: c.target, ReadOnly: !prep})
+		named[c.key] = NamedVolume{Name: c.name, External: true}
+		if c.env != "" {
+			env[c.env] = c.target
+		}
+	}
+	for k, v := range in.Env {
+		env[k] = v
+	}
+
+	services := map[string]Service{}
+	var depKeys []string
+	for i, d := range in.Deps {
+		key := fmt.Sprintf("deps-%d", i)
+		depKeys = append(depKeys, key)
+		volumes = append(volumes, Volume{Type: "volume", Source: key, Target: d.Target})
+		named[key] = NamedVolume{Name: d.Source}
+	}
+	if len(in.Deps) > 0 {
+		services[VolumesService] = volumesService(hardening, in, depKeys)
+	}
+	if len(named) == 0 {
+		named = nil
+	}
+
+	agent := hardening
+	agent.Image = in.AgentImage
+	agent.User = fmt.Sprintf("%d:%d", in.UID, in.GID)
+	agent.WorkingDir = Workspace
+	agent.Environment = env
+	if in.GatewayKey && !prep {
+		agent.PassEnv = []string{GatewayKeyEnv}
+	}
+	agent.Volumes = volumes
+	for _, dir := range append([]string{Home}, in.Scratch...) {
+		agent.Tmpfs = append(agent.Tmpfs, fmt.Sprintf("%s:uid=%d,gid=%d,mode=0700", dir, in.UID, in.GID))
+	}
+	agent.StdinOpen = true
+	agent.Tty = true
+	if len(in.Command) > 0 {
+		agent.Command = in.Command
+	}
+
+	spec := Compose{Name: ProjectName(in.ProjectDir), Volumes: named, Services: services}
+	if prep {
+		agent.Networks = map[string]*NetworkAttach{egressNetwork: {}}
+		spec.Networks = map[string]Network{egressNetwork: {}}
+		services[AgentService] = agent
+		return spec
 	}
 
 	forwarder := hardening
@@ -175,65 +322,44 @@ func Build(in Inputs) Compose {
 		internalNetwork: {Aliases: []string{GatewayHost}},
 		egressNetwork:   {},
 	}
-
-	env := map[string]string{"HOME": Home}
-	if in.StateVolume != "" {
-		env["XDG_DATA_HOME"] = StateDir + "/data"
-		env["XDG_STATE_HOME"] = StateDir + "/state"
-		env["XDG_CACHE_HOME"] = StateDir + "/cache"
-	}
-	for k, v := range in.Env {
-		env[k] = v
-	}
-
-	volumes := []Volume{{Type: "bind", Source: in.ProjectDir, Target: Workspace}}
-	for _, m := range in.Pinned {
-		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target})
-	}
-	for _, m := range in.ReadOnly {
-		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target, ReadOnly: true})
-	}
-	var named map[string]NamedVolume
-	if in.StateVolume != "" {
-		volumes = append(volumes, Volume{Type: "volume", Source: stateKey, Target: StateDir})
-		named = map[string]NamedVolume{stateKey: {Name: in.StateVolume}}
-	}
-
-	agent := hardening
-	agent.Image = in.AgentImage
-	agent.User = fmt.Sprintf("%d:%d", in.UID, in.GID)
-	agent.WorkingDir = Workspace
-	agent.Environment = env
-	if in.GatewayKey && in.Mode != ModePrep {
-		agent.PassEnv = []string{GatewayKeyEnv}
-	}
-	agent.Volumes = volumes
-	for _, dir := range append([]string{Home}, in.Scratch...) {
-		agent.Tmpfs = append(agent.Tmpfs, fmt.Sprintf("%s:uid=%d,gid=%d,mode=0700", dir, in.UID, in.GID))
-	}
 	agent.Networks = map[string]*NetworkAttach{internalNetwork: {}}
 	agent.DependsOn = []string{ForwarderService}
-	agent.StdinOpen = true
-	agent.Tty = true
-	if len(in.Command) > 0 {
-		agent.Command = in.Command
+	services[AgentService] = agent
+	services[ForwarderService] = forwarder
+	spec.Networks = map[string]Network{
+		// Isolated gateway mode leaves the bridge without an address, so
+		// the Docker VM's own services (e.g. its sshd) can't be reached
+		// from the internal network. "internal" alone only blocks routing.
+		internalNetwork: {Internal: true, DriverOpts: map[string]string{
+			"com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+		}},
+		egressNetwork: {},
 	}
+	return spec
+}
 
-	return Compose{
-		Name:    ProjectName(in.ProjectDir),
-		Volumes: named,
-		Services: map[string]Service{
-			AgentService:     agent,
-			ForwarderService: forwarder,
-		},
-		Networks: map[string]Network{
-			// Isolated gateway mode leaves the bridge without an address, so
-			// the Docker VM's own services (e.g. its sshd) can't be reached
-			// from the internal network. "internal" alone only blocks routing.
-			internalNetwork: {Internal: true, DriverOpts: map[string]string{
-				"com.docker.network.bridge.gateway_mode_ipv4": "isolated",
-			}},
-			egressNetwork: {},
-		},
+// volumesService chowns each dependency volume's root to the session user:
+// a new volume mounted under the project starts out owned by root. It then
+// prints the agent-side target of each volume that is empty. It runs as
+// root with only CAP_CHOWN, no network and without the project.
+func volumesService(hardening Service, in Inputs, keys []string) Service {
+	const script = `owner=$1; shift
+while [ $# -gt 0 ]; do
+  chown "$owner" "$1"
+  [ -n "$(ls -A "$1")" ] || printf '%s\n' "$2"
+  shift 2
+done`
+	s := hardening
+	s.Image = in.AgentImage
+	s.User = "0:0"
+	s.CapAdd = []string{"CHOWN"}
+	s.ReadOnly = true
+	s.NetworkMode = "none"
+	s.Command = []string{"sh", "-c", script, "sh", fmt.Sprintf("%d:%d", in.UID, in.GID)}
+	for i, d := range in.Deps {
+		dir := fmt.Sprintf("/deps/%d", i)
+		s.Volumes = append(s.Volumes, Volume{Type: "volume", Source: keys[i], Target: dir})
+		s.Command = append(s.Command, dir, d.Target)
 	}
+	return s
 }
