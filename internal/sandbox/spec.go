@@ -29,11 +29,16 @@ const (
 	ReadOnlyRoot = "/ro"
 	// Home is the agent user's HOME, backed by a tmpfs.
 	Home = "/home/agent"
+	// StateDir holds the agent's state volume. The base image creates it
+	// world-writable, and Docker copies that mode into a new volume.
+	StateDir = "/var/lib/localllm/state"
 
 	// AgentService is the compose service name of the agent container.
 	AgentService = "agent"
 	// ForwarderService is the compose service name of the forwarder.
 	ForwarderService = "forwarder"
+
+	stateKey = "state"
 
 	internalNetwork = "sandbox"
 	egressNetwork   = "egress"
@@ -99,6 +104,10 @@ type Inputs struct {
 	Pinned []Mount
 	// ReadOnly are extra read-only mounts, e.g. the rendered agent config.
 	ReadOnly []Mount
+	// StateVolume is the named volume mounted at StateDir, from
+	// StateVolume(). XDG data, state and cache point into it, so the agent's
+	// sessions, logs and caches outlive the container. Empty means none.
+	StateVolume string
 	// Env is passed to the agent container in addition to HOME.
 	Env map[string]string
 	// Command overrides the agent image's default command when non-empty.
@@ -115,6 +124,14 @@ func ProjectName(projectDir string) string {
 		base = "project"
 	}
 	return fmt.Sprintf("localllm-%s-%s", base, hex.EncodeToString(sum[:])[:8])
+}
+
+// StateVolume returns the name of the state volume for an agent in a
+// project directory. It is stable for a path and differs across paths; the
+// hash is long enough that two projects never share one.
+func StateVolume(projectDir, agent string) string {
+	sum := sha256.Sum256([]byte(projectDir))
+	return fmt.Sprintf("localllm-state-%s-%s", agent, hex.EncodeToString(sum[:])[:32])
 }
 
 // Build produces the compose spec for a session.
@@ -137,6 +154,11 @@ func Build(in Inputs) Compose {
 	}
 
 	env := map[string]string{"HOME": Home}
+	if in.StateVolume != "" {
+		env["XDG_DATA_HOME"] = StateDir + "/data"
+		env["XDG_STATE_HOME"] = StateDir + "/state"
+		env["XDG_CACHE_HOME"] = StateDir + "/cache"
+	}
 	for k, v := range in.Env {
 		env[k] = v
 	}
@@ -147,6 +169,11 @@ func Build(in Inputs) Compose {
 	}
 	for _, m := range in.ReadOnly {
 		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target, ReadOnly: true})
+	}
+	var named map[string]NamedVolume
+	if in.StateVolume != "" {
+		volumes = append(volumes, Volume{Type: "volume", Source: stateKey, Target: StateDir})
+		named = map[string]NamedVolume{stateKey: {Name: in.StateVolume}}
 	}
 
 	agent := hardening
@@ -165,7 +192,8 @@ func Build(in Inputs) Compose {
 	}
 
 	return Compose{
-		Name: ProjectName(in.ProjectDir),
+		Name:    ProjectName(in.ProjectDir),
+		Volumes: named,
 		Services: map[string]Service{
 			AgentService:     agent,
 			ForwarderService: forwarder,

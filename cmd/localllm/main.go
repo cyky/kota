@@ -181,7 +181,12 @@ func prepareSession(sa sessionArgs) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := opencode.Render(opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Model: defaultModel})
+	base, err := assets.Agents.ReadFile(opencode.BaseConfig)
+	if err != nil {
+		os.RemoveAll(sessionDir)
+		return nil, err
+	}
+	cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Model: defaultModel})
 	if err != nil {
 		os.RemoveAll(sessionDir)
 		return nil, err
@@ -202,6 +207,8 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		return nil, err
 	}
 	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
+	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, agentConfigPath)
+	sess.mounts.State = sandbox.StateDir
 	for _, m := range paths.ReadOnly {
 		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
 	}
@@ -219,6 +226,7 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		ForwarderImage: forwarderImage,
 		Pinned:         pinned,
 		ReadOnly:       append(append([]sandbox.Mount{{Source: cfgFile, Target: agentConfigPath}}, protected...), paths.ReadOnly...),
+		StateVolume:    sandbox.StateVolume(project, opencode.Agent),
 		Env:            env,
 		Command:        sa.command,
 	})

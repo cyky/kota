@@ -4,9 +4,10 @@ package sandbox
 // JSON, so specs are written with encoding/json.
 
 type Compose struct {
-	Name     string             `json:"name"`
-	Services map[string]Service `json:"services"`
-	Networks map[string]Network `json:"networks,omitempty"`
+	Name     string                 `json:"name"`
+	Services map[string]Service     `json:"services"`
+	Networks map[string]Network     `json:"networks,omitempty"`
+	Volumes  map[string]NamedVolume `json:"volumes,omitempty"`
 }
 
 type Service struct {
@@ -40,4 +41,10 @@ type NetworkAttach struct {
 type Network struct {
 	Internal   bool              `json:"internal,omitempty"`
 	DriverOpts map[string]string `json:"driver_opts,omitempty"`
+}
+
+// NamedVolume is a top-level volume. Name fixes the Docker volume name
+// instead of prefixing it with the compose project.
+type NamedVolume struct {
+	Name string `json:"name"`
 }

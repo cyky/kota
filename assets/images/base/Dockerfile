@@ -22,6 +22,10 @@ RUN corepack enable \
  && npm install -g --allow-scripts=@opencode/cli @opencode/cli@${OPENCODE_VERSION} \
  && npm cache clean --force
 
+# The per-project state volume is mounted here. Docker copies this mode into
+# a new volume, so the session's UID (not known at build time) can write it.
+RUN mkdir -p /var/lib/localllm/state && chmod 1777 /var/lib/localllm/state
+
 # Sessions run as the host UID with HOME on a tmpfs; nothing here needs root.
 WORKDIR /workspace
 CMD ["opencode"]

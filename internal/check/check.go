@@ -26,6 +26,9 @@ type Mounts struct {
 	Pinned []string
 	// Masked must read as empty.
 	Masked []string
+	// State is the agent's state directory, which must be writable. Empty
+	// skips the probe.
+	State string
 }
 
 // Run discovers the addresses that lead out of the sandbox, runs the probe
@@ -35,6 +38,7 @@ func Run(s *docker.Session, gw sandbox.Gateway, m Mounts) ([]probe.Result, error
 	t.ReadOnly = m.ReadOnly
 	t.Pinned = m.Pinned
 	t.Masked = m.Masked
+	t.State = m.State
 	probes := probe.Suite(t)
 	out, err := s.Capture("bash", "-c", probe.Script(probes))
 	if err != nil {

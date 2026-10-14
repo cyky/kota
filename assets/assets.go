@@ -1,4 +1,5 @@
-// Package assets embeds the image build contexts shipped with localllm.
+// Package assets embeds the image build contexts and agent configs shipped
+// with localllm.
 package assets
 
 import "embed"
@@ -7,3 +8,10 @@ import "embed"
 //
 //go:embed images
 var Images embed.FS
+
+// Agents holds each agent's base config under agents/<agent>/. It is
+// versioned here so the agent can't change its own permissions or
+// providers.
+//
+//go:embed agents
+var Agents embed.FS

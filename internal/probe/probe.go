@@ -63,6 +63,9 @@ type Targets struct {
 	Pinned []string
 	// Masked are paths that must read as an empty file or directory.
 	Masked []string
+	// State is the agent's state directory, which must be writable so
+	// sessions persist. Empty skips the probe.
+	State string
 }
 
 // Suite returns the network, workspace and mount probes for targets.
@@ -95,6 +98,13 @@ func Suite(t Targets) []Probe {
 			MustSucceed: true,
 		},
 	)
+	if t.State != "" {
+		probes = append(probes, Probe{
+			Name:        "state writable",
+			Cmd:         []string{"sh", "-c", `f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"`, "sh", t.State},
+			MustSucceed: true,
+		})
+	}
 	for _, path := range t.ReadOnly {
 		// A missing mount exits 0, so it fails the probe rather than passing
 		// because there is nothing to write to.

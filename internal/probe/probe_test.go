@@ -243,3 +243,34 @@ func TestMaskedProbe(t *testing.T) {
 		t.Errorf("no probes for %v", want)
 	}
 }
+
+// TestStateProbe runs the state probe locally: only a writable directory
+// passes, and nothing is left behind.
+func TestStateProbe(t *testing.T) {
+	if _, ok := byName(Suite(testTargets()))["state writable"]; ok {
+		t.Error("state probe without a state dir")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores permissions")
+	}
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]bool{dir: true, locked: false, filepath.Join(dir, "missing"): false} {
+		tt := testTargets()
+		tt.State = path
+		p, ok := byName(Suite(tt))["state writable"]
+		if !ok || !p.MustSucceed {
+			t.Fatalf("state probe missing or not must-succeed: %+v", p)
+		}
+		passed := Result{Probe: p, ExitCode: exitCode(exec.Command(p.Cmd[0], p.Cmd[1:]...).Run())}.Passed()
+		if passed != want {
+			t.Errorf("%s: passed = %v, want %v", path, passed, want)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("probe left files behind: %v", entries)
+	}
+}

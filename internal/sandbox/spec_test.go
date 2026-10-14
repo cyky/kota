@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -165,5 +166,57 @@ func TestParseGateway(t *testing.T) {
 		if !tt.wantErr && got != tt.want {
 			t.Errorf("ParseGateway(%q) = %+v, want %+v", tt.raw, got, tt.want)
 		}
+	}
+}
+
+func TestStateVolume(t *testing.T) {
+	a := StateVolume("/Users/me/Projects/a", "opencode")
+	if a != StateVolume("/Users/me/Projects/a", "opencode") {
+		t.Error("state volume name not stable")
+	}
+	for _, other := range []string{
+		StateVolume("/Users/me/Projects/b", "opencode"),
+		StateVolume("/Users/me/Other/a", "opencode"),
+		StateVolume("/Users/me/Projects/a", "pi"),
+	} {
+		if other == a {
+			t.Errorf("%q is shared", a)
+		}
+	}
+	if !regexp.MustCompile(`^localllm-state-opencode-[0-9a-f]{32}$`).MatchString(a) {
+		t.Errorf("state volume = %q", a)
+	}
+}
+
+func TestStateVolumeMount(t *testing.T) {
+	in := testInputs()
+	in.StateVolume = StateVolume(in.ProjectDir, "opencode")
+	spec := Build(in)
+	agent := spec.Services[AgentService]
+
+	var found bool
+	for _, v := range agent.Volumes {
+		if v.Target == StateDir {
+			found = true
+			if v.Type != "volume" || v.ReadOnly || spec.Volumes[v.Source].Name != in.StateVolume {
+				t.Errorf("state mount = %+v, volumes = %+v", v, spec.Volumes)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no mount at %s in %+v", StateDir, agent.Volumes)
+	}
+	for k, want := range map[string]string{
+		"XDG_DATA_HOME":  StateDir + "/data",
+		"XDG_STATE_HOME": StateDir + "/state",
+		"XDG_CACHE_HOME": StateDir + "/cache",
+	} {
+		if agent.Environment[k] != want {
+			t.Errorf("%s = %q, want %q", k, agent.Environment[k], want)
+		}
+	}
+
+	if spec := Build(testInputs()); spec.Volumes != nil || spec.Services[AgentService].Environment["XDG_DATA_HOME"] != "" {
+		t.Errorf("state volume without StateVolume: %+v", spec.Volumes)
 	}
 }

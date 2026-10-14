@@ -468,3 +468,65 @@ func TestMissingMaskIsDetected(t *testing.T) {
 		t.Error("masked probe passed although .env is readable")
 	}
 }
+
+// startWithState starts a sandbox for project with its opencode state volume
+// and a read-only agent config, as run does.
+func startWithState(t *testing.T, project string) (*docker.Session, sandbox.Gateway, Mounts) {
+	t.Helper()
+	cfg := filepath.Join(t.TempDir(), "opencode.json")
+	if err := os.WriteFile(cfg, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const cfgTarget = "/etc/localllm/opencode.json"
+	vol := sandbox.StateVolume(project, "opencode")
+	s, gw := startInputs(t, sandbox.Inputs{
+		ProjectDir:  project,
+		ReadOnly:    []sandbox.Mount{{Source: cfg, Target: cfgTarget}},
+		StateVolume: vol,
+	}, nil)
+	return s, gw, Mounts{ReadOnly: []string{cfgTarget}, State: sandbox.StateDir}
+}
+
+// removeVolume deletes a state volume after the test, once its sessions are
+// closed (cleanups run last-in, first-out).
+func removeVolume(t *testing.T, project string) {
+	t.Helper()
+	vol := sandbox.StateVolume(project, "opencode")
+	t.Cleanup(func() { exec.Command("docker", "volume", "rm", "-f", vol).Run() })
+}
+
+func TestStateVolumePerProject(t *testing.T) {
+	requireDocker(t)
+	a, b := projectDir(t), projectDir(t)
+	removeVolume(t, a)
+	removeVolume(t, b)
+	marker := `"$XDG_DATA_HOME/opencode/marker"`
+
+	// First session of A: probes pass and a file lands in its data dir.
+	s, gw, m := startWithState(t, a)
+	results, err := Run(s, gw, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePass(t, results)
+	for _, name := range []string{"state writable", "read-only /etc/localllm/opencode.json"} {
+		if !slices.Contains(names(results), name) {
+			t.Errorf("no probe %q", name)
+		}
+	}
+	if out, _ := s.Capture("sh", "-c", `mkdir -p "$XDG_DATA_HOME/opencode" && echo session-a > `+marker+` && cat `+marker); strings.TrimSpace(out) != "session-a" {
+		t.Fatalf("write marker: %q", out)
+	}
+	s.Close()
+
+	// A later session of A sees it; B doesn't.
+	s, _, _ = startWithState(t, a)
+	if out, _ := s.Capture("sh", "-c", "cat "+marker); strings.TrimSpace(out) != "session-a" {
+		t.Errorf("project A's later session reads %q, want session-a", out)
+	}
+	s.Close()
+	s, _, _ = startWithState(t, b)
+	if out, _ := s.Capture("sh", "-c", "cat "+marker+" 2>/dev/null; echo end"); strings.TrimSpace(out) != "end" {
+		t.Errorf("project B sees project A's state: %q", out)
+	}
+}
