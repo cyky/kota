@@ -3,6 +3,8 @@ package sandbox
 // The subset of the compose file format localllm generates. Compose accepts
 // JSON, so specs are written with encoding/json.
 
+import "strings"
+
 type Compose struct {
 	Name     string                 `json:"name"`
 	Services map[string]Service     `json:"services"`
@@ -47,4 +49,58 @@ type Network struct {
 // instead of prefixing it with the compose project.
 type NamedVolume struct {
 	Name string `json:"name"`
+}
+
+// Literal returns a copy of c to write to a compose file: compose expands
+// $VAR in every value from the caller's environment, so each "$" is doubled
+// to keep commands, environment values and paths as given. Without this a
+// command mentioning $SOME_SECRET would get the host's value.
+func (c Compose) Literal() Compose {
+	out := c
+	out.Name = literal(c.Name)
+	out.Services = make(map[string]Service, len(c.Services))
+	for name, s := range c.Services {
+		s.Image = literal(s.Image)
+		s.Command = literalAll(s.Command)
+		s.User = literal(s.User)
+		s.WorkingDir = literal(s.WorkingDir)
+		if s.Environment != nil {
+			env := make(map[string]string, len(s.Environment))
+			for k, v := range s.Environment {
+				env[k] = literal(v)
+			}
+			s.Environment = env
+		}
+		vols := make([]Volume, len(s.Volumes))
+		for i, v := range s.Volumes {
+			v.Source, v.Target = literal(v.Source), literal(v.Target)
+			vols[i] = v
+		}
+		if s.Volumes == nil {
+			vols = nil
+		}
+		s.Volumes = vols
+		s.Tmpfs = literalAll(s.Tmpfs)
+		out.Services[name] = s
+	}
+	if c.Volumes != nil {
+		out.Volumes = make(map[string]NamedVolume, len(c.Volumes))
+		for k, v := range c.Volumes {
+			out.Volumes[k] = NamedVolume{Name: literal(v.Name)}
+		}
+	}
+	return out
+}
+
+func literal(s string) string { return strings.ReplaceAll(s, "$", "$$") }
+
+func literalAll(ss []string) []string {
+	if ss == nil {
+		return nil
+	}
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = literal(s)
+	}
+	return out
 }

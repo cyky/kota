@@ -220,3 +220,28 @@ func TestStateVolumeMount(t *testing.T) {
 		t.Errorf("state volume without StateVolume: %+v", spec.Volumes)
 	}
 }
+
+func TestLiteralEscapesDollars(t *testing.T) {
+	in := testInputs()
+	in.ProjectDir = "/Users/me/Projects/a$b"
+	in.Env = map[string]string{"GIT_CONFIG_VALUE_1": "Pay$al"}
+	in.Command = []string{"sh", "-c", "echo $HOME ${USER}"}
+	in.StateVolume = StateVolume(in.ProjectDir, "opencode")
+	spec := Build(in)
+	lit := spec.Literal()
+	agent := lit.Services[AgentService]
+
+	if want := []string{"sh", "-c", "echo $$HOME $${USER}"}; !slices.Equal(agent.Command, want) {
+		t.Errorf("command = %q, want %q", agent.Command, want)
+	}
+	if agent.Environment["GIT_CONFIG_VALUE_1"] != "Pay$$al" {
+		t.Errorf("env = %q", agent.Environment["GIT_CONFIG_VALUE_1"])
+	}
+	if agent.Volumes[0].Source != "/Users/me/Projects/a$$b" {
+		t.Errorf("project source = %q", agent.Volumes[0].Source)
+	}
+	// The original is untouched.
+	if spec.Services[AgentService].Command[2] != "echo $HOME ${USER}" || spec.Services[AgentService].Volumes[0].Source != in.ProjectDir {
+		t.Error("Literal modified the spec")
+	}
+}

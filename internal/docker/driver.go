@@ -39,7 +39,7 @@ type Session struct {
 
 // Start writes spec into sessionDir and brings up the forwarder and networks.
 func Start(spec sandbox.Compose, sessionDir string) (*Session, error) {
-	data, err := json.MarshalIndent(spec, "", "  ")
+	data, err := json.MarshalIndent(spec.Literal(), "", "  ")
 	if err != nil {
 		return nil, err
 	}
