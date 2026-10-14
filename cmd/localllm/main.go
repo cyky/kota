@@ -57,12 +57,14 @@ const usage = `usage: localllm <command> [flags]
 commands:
   build                 build the sandbox images
   build dir             build dir's image from its ` + projectimage.File + `, on top
-                        of the base image; prep, run and check then use it
+                        of the base image; prep, run, shell and check use it
   prep [dir]            install dir's dependencies with network access and
                         no agent, into volumes that run mounts offline
   run [flags] [dir] [-- cmd...]
                         verify containment, then start the agent offline in
                         dir (default: current dir)
+  shell [flags] [dir]   verify containment, then open an interactive Bash
+                        shell in the same sandbox as run
   check [flags] [dir]   show mounts and run the containment probes
 
 flags:
@@ -94,6 +96,8 @@ func main() {
 		err = cmdPrep(os.Args[2:])
 	case "run":
 		err = cmdRun(os.Args[2:])
+	case "shell":
+		err = cmdShell(os.Args[2:])
 	case "check":
 		err = cmdCheck(os.Args[2:])
 	case "-h", "--help", "help":
@@ -265,7 +269,8 @@ func agentFor(name string) (agentSetup, error) {
 
 // session holds everything needed to start one sandbox.
 type session struct {
-	spec sandbox.Compose
+	shell bool
+	spec  sandbox.Compose
 	// fetchSpec is prep's fetch phase, which fills the shared caches before
 	// spec installs.
 	fetchSpec  sandbox.Compose
@@ -320,8 +325,9 @@ func (s *session) cleanup() {
 	os.RemoveAll(s.sessionDir)
 }
 
-// sessionArgs are the [flags] [dir] [-- cmd...] shared by run and check.
+// sessionArgs are the [flags] [dir] [-- cmd...] shared by run, shell and check.
 type sessionArgs struct {
+	shell      bool
 	agent      string
 	gatewayURL string
 	model      string
@@ -454,7 +460,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 		return nil, err
 	}
 
-	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan, image: image}
+	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan, image: image}
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {
 		sess.mountPoints = append(sess.mountPoints, missingDirs(project, d.Path)...)
@@ -483,6 +489,9 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 	command := sa.command
 	if len(command) == 0 {
 		command = agent.command
+	}
+	if sa.shell {
+		command = []string{"bash", "--noprofile", "--norc", "-i"}
 	}
 	stateVolume := ""
 	if prep {
@@ -563,6 +572,23 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	return cmdOffline(sa, auto, skipCheck)
+}
+
+func cmdShell(args []string) error {
+	sa, err := parseSessionArgs("shell", args, nil)
+	if err != nil {
+		return err
+	}
+	if len(sa.command) > 0 {
+		return errors.New("shell does not take a command; use 'localllm run [dir] -- cmd...' instead")
+	}
+	sa.shell = true
+	return cmdOffline(sa, false, false)
+}
+
+// cmdOffline shares startup, cleanup and change reporting for run and shell.
+func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	sess, err := prepareSession(sa, sandbox.ModeRun)
 	if err != nil {
 		return err
@@ -572,9 +598,11 @@ func cmdRun(args []string) error {
 		sess.cleanup()
 		return err
 	}
-	if err := confirmFullAuto(sess.project, sess.agent.name, auto); err != nil {
-		sess.cleanup()
-		return err
+	if !sa.shell {
+		if err := confirmFullAuto(sess.project, sess.agent.name, auto); err != nil {
+			sess.cleanup()
+			return err
+		}
 	}
 	// Snapshot before Docker creates any mount points, and compare after
 	// cleanup has removed them, so placeholders aren't reported.
@@ -590,7 +618,7 @@ func cmdRun(args []string) error {
 }
 
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
-// agent. The containers are gone when it returns.
+// agent or shell. The containers are gone when it returns.
 func runSession(sess *session, model string, auto, skipCheck bool) error {
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
@@ -612,7 +640,11 @@ func runSession(sess *session, model string, auto, skipCheck bool) error {
 		fmt.Fprintln(os.Stderr, "note:", n)
 	}
 	fmt.Fprintf(os.Stderr, "model: %s (%d offered)\n", catalog.Default, len(catalog.Models))
-	fmt.Fprintln(os.Stderr, "approval:", sess.agent.approval(auto))
+	if sess.shell {
+		fmt.Fprintln(os.Stderr, "starting an interactive Bash shell (no agent)")
+	} else {
+		fmt.Fprintln(os.Stderr, "approval:", sess.agent.approval(auto))
+	}
 
 	if skipCheck {
 		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")

@@ -24,8 +24,12 @@ localllm run --model qwen3.5-2b-instruct [dir]  # start with another model
 localllm run --auto [dir]              # opencode acts without asking
 localllm run --agent pi [dir]          # pi instead of opencode (always full auto)
 localllm run --agent pi [dir] -- pi -c # continue the project's last pi session
+localllm shell [dir]                   # interactive Bash in the same offline sandbox
+localllm shell --ro ../specs [dir]     # shell with a read-only reference mount
 localllm check [dir]                   # show mounts and run the containment probes
 ```
+
+`localllm shell [dir]` opens interactive Bash in `/workspace` as your UID, without starting an agent. It shares `run`'s project image, mounts, secret masks, dependency volumes, gateway access and containment probes. The probes must pass before the shell opens. Use `--agent pi` to select pi's config and state volume (opencode is the default); `--model`, `--gateway` and `--ro` work as for `run`. Agent configuration is rendered from the gateway's model list as usual, so the gateway must be available. Shell startup skips Bash profile and rc files. On exit, changed files that can run code on the host are reported, as for `run`. `--auto`, `--unsafe-skip-check` and command overrides are only available on `run`.
 
 Set the gateway with `--gateway URL` or `LOCALLLM_GATEWAY` (default `http://host.docker.internal:8080`).
 
@@ -52,7 +56,7 @@ The agent's config is versioned in this repo (`assets/agents/opencode/opencode.j
 
 Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `localllm-state-<agent>-<hash of the project path>`, mounted at `/var/lib/localllm/state`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them (`docker volume ls`, `docker volume rm`). If the "state writable" probe fails after upgrading, run `localllm build` and remove the project's state volume, which an older image created owned by root.
 
-Before every `run`, containment probes run in a fresh agent container. They try to reach the internet, external DNS, the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN gateway, and check that the gateway, `/workspace` and the state volume work and that every `--ro` mount and the agent config reject writes. Any failure blocks the session; `--unsafe-skip-check` overrides that with a warning.
+Before every `run` and `shell`, containment probes run in a fresh agent container. They try to reach the internet, external DNS, the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN gateway, and check that the gateway, `/workspace` and the state volume work and that every `--ro` mount and the agent config reject writes. Any failure blocks the session; `--unsafe-skip-check` overrides that with a warning.
 
 The agent can't plant code that runs later on the host. `.git/hooks`, `.git/config` and `.envrc` are mounted read-only over themselves; a missing `.envrc` or hooks directory is replaced by an empty read-only placeholder, which is removed from the host after the session. A `core.hooksPath` inside the project (husky and similar) is read-only too, as are the hooks, config and `.git` pointer file of each submodule. `.git/commondir`, which would redirect git to another directory's config and hooks, is read-only too. When it is missing it is created with `.` (meaning "this git dir") for the session and removed afterwards. `.git`, and every other directory on the way to a protected path, is mounted over itself so it can't be renamed away and replaced. Linked worktrees' `commondir` (and `config.worktree` when enabled) are protected the same way. A protected path with a symlink anywhere along it is refused, because a read-only mount can't hold it in place. Git still works inside the sandbox: commit, branch and diff use your host identity, passed in through `GIT_CONFIG_*`. The probes check each of these mounts. Limits:
 
@@ -125,7 +129,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 ```
 
-`localllm build dir` builds it as `localllm-project-<hash of the project path>`, and `prep`, `run` and `check` of that project then use it (`check` shows the image). Projects without the file use the base image. The build runs as root with network access, like any `docker build`, but with an empty build context, so `COPY` and `ADD` can't read the project or its masked secrets. Download what you need in a `RUN`, or copy it from another image (`COPY --from=...`). The file is read-only inside the sandbox, like `localllm.yaml`, so the agent can't change what the next build runs. A symlinked `localllm.Dockerfile` is refused.
+`localllm build dir` builds it as `localllm-project-<hash of the project path>`, and `prep`, `run`, `shell` and `check` of that project then use it (`check` shows the image). Projects without the file use the base image. The build runs as root with network access, like any `docker build`, but with an empty build context, so `COPY` and `ADD` can't read the project or its masked secrets. Download what you need in a `RUN`, or copy it from another image (`COPY --from=...`). The file is read-only inside the sandbox, like `localllm.yaml`, so the agent can't change what the next build runs. A symlinked `localllm.Dockerfile` is refused.
 
 The image is labeled with the Dockerfile's hash and the base image it was built on. When the Dockerfile has changed or `localllm build` has rebuilt the base image since, sessions warn and use the old image. Without an image yet, they warn and use the base image. Each warning shows the `localllm build dir` command that fixes it. Run it again to pick up a new base image even when the Dockerfile is unchanged. The sandbox sets the user, capabilities and networks, so `USER` or `EXPOSE` in the Dockerfile don't change them. The root container that prepares dependency volumes always uses the base image.
 

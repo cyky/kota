@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -473,5 +474,92 @@ func TestDockerfileReadOnly(t *testing.T) {
 	t.Cleanup(sess.cleanup)
 	if !slices.Contains(sess.mounts.ReadOnly, sandbox.Workspace+"/"+projectimage.File) {
 		t.Errorf("%s is not among the probed read-only mounts %v", projectimage.File, sess.mounts.ReadOnly)
+	}
+}
+
+// Shell changes only the command: the selected agent's config/state, probes,
+// dependency mounts, gateway key and hardening stay identical to run.
+func TestShellMatchesRun(t *testing.T) {
+	for _, name := range []string{opencode.Agent, pi.Agent} {
+		t.Run(name, func(t *testing.T) {
+			project := fakeHome(t, map[string]string{
+				"package.json": "{}", ".env": "SECRET=1\n",
+			})
+			t.Setenv("LOCALLLM_GATEWAY_KEY", "shell-test-key")
+			t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+			reference := t.TempDir()
+			sa := sessionArgs{agent: name, gatewayURL: defaultGateway, dir: project, ro: []string{reference}}
+			run, err := prepareSession(sa, sandbox.ModeRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Save the spec before cleanup removes protection placeholders.
+			runSpec, runMounts, runDir := run.spec, run.mounts, run.sessionDir
+			run.cleanup()
+			sa.shell = true
+			shell, err := prepareSession(sa, sandbox.ModeRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(shell.cleanup)
+			agent := shell.spec.Services[sandbox.AgentService]
+			if !slices.Equal(agent.Command, []string{"bash", "--noprofile", "--norc", "-i"}) {
+				t.Fatalf("shell command = %q", agent.Command)
+			}
+			if agent.User != fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()) || agent.WorkingDir != sandbox.Workspace || !agent.StdinOpen || !agent.Tty {
+				t.Errorf("shell must be interactive in workspace as host UID/GID: %+v", agent)
+			}
+			agent.Command = runSpec.Services[sandbox.AgentService].Command
+			shell.spec.Services[sandbox.AgentService] = agent
+			// Session directories are unique; normalize only that host prefix.
+			want, _ := json.Marshal(runSpec)
+			got, _ := json.Marshal(shell.spec)
+			got = []byte(strings.ReplaceAll(string(got), shell.sessionDir, runDir))
+			if string(got) != string(want) {
+				t.Errorf("shell spec differs beyond command:\ngot %s\nwant %s", got, want)
+			}
+			if !reflect.DeepEqual(shell.mounts, runMounts) || shell.gateway != run.gateway || shell.gatewayKey != run.gatewayKey {
+				t.Error("shell containment inputs differ from run")
+			}
+		})
+	}
+}
+
+func TestShellRefusesFailedProbes(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "test"})
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	bin := t.TempDir()
+	entered := filepath.Join(bin, "entered")
+	t.Setenv("TEST_SHELL_ENTERED", entered)
+	// Model discovery succeeds, but the probe container returns no results.
+	// Missing probes must prevent the interactive container from starting.
+	script := `#!/bin/sh
+case "$*" in
+  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"},{"id":"qwen3.5-2b-instruct"}]}' ;;
+  *'run --rm agent') touch "$TEST_SHELL_ENTERED" ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	err := cmdShell([]string{project})
+	if err == nil || !strings.Contains(err.Error(), "containment probes failed") {
+		t.Fatalf("shell error = %v, want failed containment probes", err)
+	}
+	if _, err := os.Stat(entered); !os.IsNotExist(err) {
+		t.Fatalf("interactive container started after failed probes: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(project, ".envrc")); !os.IsNotExist(err) {
+		t.Errorf("protection placeholder left behind: %v", err)
+	}
+}
+
+func TestShellRejectsRunOnlyOptions(t *testing.T) {
+	for _, args := range [][]string{{"--auto"}, {"--unsafe-skip-check"}, {"--", "echo", "hi"}, {"a", "b"}} {
+		if err := cmdShell(args); err == nil {
+			t.Errorf("shell accepted %q", args)
+		}
 	}
 }
