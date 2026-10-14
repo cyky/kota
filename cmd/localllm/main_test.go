@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,6 +23,8 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LOCALLLM_ALLOWED_ROOT", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
 	hostDirs := []string{".config/opencode", ".local/share/opencode", ".local/state/opencode", ".opencode", ".pi"}
 	for _, d := range append(hostDirs, "Projects/app") {
 		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
@@ -104,6 +107,48 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 				t.Errorf("command = %q, want %q", agent.Command, c.command)
 			}
 		})
+	}
+}
+
+// TestGatewayKeyReachesSessionByNameOnly checks a configured key is passed
+// to the agent container by name and isn't written to the session dir.
+func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("LOCALLLM_ALLOWED_ROOT", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	const secret = "sk-unit-test-secret"
+	t.Setenv("LOCALLLM_GATEWAY_KEY", secret)
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	project := filepath.Join(home, "Projects/app")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := prepareSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sess.cleanup)
+	if sess.gatewayKey != secret {
+		t.Errorf("session key not loaded")
+	}
+	agent := sess.spec.Services[sandbox.AgentService]
+	if !slices.Contains(agent.PassEnv, sandbox.GatewayKeyEnv) {
+		t.Errorf("pass env = %v, want %s", agent.PassEnv, sandbox.GatewayKeyEnv)
+	}
+	data, err := json.Marshal(sess.spec.Literal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Error("key in the compose spec")
+	}
+	var out strings.Builder
+	printMounts(&out, sess.spec)
+	if strings.Contains(out.String(), secret) || !strings.Contains(out.String(), "gateway key: configured") {
+		t.Errorf("check output = %q", out.String())
 	}
 }
 

@@ -20,9 +20,9 @@ const ProviderID = "localllm"
 // BaseSettings is the path of the base settings in assets.Agents.
 const BaseSettings = "agents/pi/settings.json"
 
-// apiKey is a placeholder: pi only offers a provider's models when it has a
-// key, and the gateway doesn't check it.
-const apiKey = "localllm"
+// placeholderKey is used without a gateway key: pi only offers a
+// provider's models when it has a key, and the gateway doesn't check it.
+const placeholderKey = "localllm"
 
 // Settings are the inputs for a session's pi config.
 type Settings struct {
@@ -31,6 +31,9 @@ type Settings struct {
 	// Models are the models offered, with the default model. pi has no
 	// small model; it uses the session's model for summaries.
 	Models models.Catalog
+	// APIKeyEnv, when set, names the environment variable holding the
+	// gateway key. The config refers to it, so the key isn't written out.
+	APIKeyEnv string
 }
 
 // RenderSettings returns the settings.json content for a session: base (the
@@ -59,13 +62,17 @@ func RenderModels(s Settings) ([]byte, error) {
 			"maxTokens":     m.Output,
 		})
 	}
+	key := placeholderKey
+	if s.APIKeyEnv != "" {
+		key = "$" + s.APIKeyEnv
+	}
 	return json.MarshalIndent(map[string]any{
 		"providers": map[string]any{
 			ProviderID: map[string]any{
 				"name":    "localllm gateway",
 				"baseUrl": s.GatewayURL + "/v1",
 				"api":     "openai-completions",
-				"apiKey":  apiKey,
+				"apiKey":  key,
 				"models":  offered,
 			},
 		},

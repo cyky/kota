@@ -5,6 +5,7 @@
 package check
 
 import (
+	"errors"
 	"io/fs"
 	"net"
 	"net/http"
@@ -50,6 +51,13 @@ func requireDocker(t *testing.T) {
 // stubGateway serves /v1/models on host loopback and returns its gateway.
 func stubGateway(t *testing.T) sandbox.Gateway {
 	t.Helper()
+	return stubGatewayWithKey(t, "")
+}
+
+// stubGatewayWithKey is stubGateway requiring "Authorization: Bearer key",
+// as llama-swap does with apiKeys, unless key is empty.
+func stubGatewayWithKey(t *testing.T, key string) sandbox.Gateway {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +65,10 @@ func stubGateway(t *testing.T) sandbox.Gateway {
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)
+			return
+		}
+		if key != "" && r.Header.Get("Authorization") != "Bearer "+key {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -94,7 +106,12 @@ func startSandbox(t *testing.T, mutate func(*sandbox.Compose)) (*docker.Session,
 // startInputs fills in the common inputs and starts a sandbox.
 func startInputs(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose)) (*docker.Session, sandbox.Gateway) {
 	t.Helper()
-	gw := stubGateway(t)
+	return startKeyed(t, in, mutate, stubGateway(t), "")
+}
+
+// startKeyed starts a sandbox against gw, passing key to the session.
+func startKeyed(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose), gw sandbox.Gateway, key string) (*docker.Session, sandbox.Gateway) {
+	t.Helper()
 	in.UID, in.GID = os.Getuid(), os.Getgid()
 	in.Gateway = gw
 	in.AgentImage, in.ForwarderImage = testAgentImage, testForwarderImage
@@ -102,7 +119,7 @@ func startInputs(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose))
 	if mutate != nil {
 		mutate(&spec)
 	}
-	s, err := docker.Start(spec, t.TempDir())
+	s, err := docker.Start(spec, t.TempDir(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,5 +601,55 @@ func TestGatewayGetThroughForwarder(t *testing.T) {
 	}
 	if _, err := s.GatewayGet("/missing"); err == nil {
 		t.Error("no error for a 404")
+	}
+}
+
+// TestGatewayKey runs against a gateway that requires a key: with the key
+// configured the model list and the gateway probe work; without it, or
+// with a wrong one, both fail and the fetch reports ErrUnauthorized.
+func TestGatewayKey(t *testing.T) {
+	requireDocker(t)
+	const key = "sk-integration-secret"
+	gw := stubGatewayWithKey(t, key)
+	cases := []struct {
+		name string
+		// configured is the key the session has; ok is whether the gateway
+		// accepts it.
+		configured string
+		ok         bool
+	}{
+		{"configured", key, true},
+		{"missing", "", false},
+		{"wrong", "sk-wrong", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := sandbox.Inputs{ProjectDir: projectDir(t), GatewayKey: c.configured != ""}
+			s, _ := startKeyed(t, in, nil, gw, c.configured)
+
+			_, err := s.GatewayGet("/v1/models")
+			if c.ok && err != nil {
+				t.Errorf("GatewayGet: %v", err)
+			}
+			if !c.ok && !errors.Is(err, docker.ErrUnauthorized) {
+				t.Errorf("GatewayGet err = %v, want ErrUnauthorized", err)
+			}
+			if err != nil && strings.Contains(err.Error(), key) {
+				t.Errorf("error contains the key: %v", err)
+			}
+
+			results, err := Run(s, gw, Mounts{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range results {
+				if r.Name == "gateway /v1/models" && r.Passed() != c.ok {
+					t.Errorf("gateway probe passed = %v, want %v", r.Passed(), c.ok)
+				}
+			}
+			if c.ok {
+				requirePass(t, results)
+			}
+		})
 	}
 }

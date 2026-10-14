@@ -28,6 +28,9 @@ type Settings struct {
 	Models models.Catalog
 	// Auto approves edits and shell commands instead of asking.
 	Auto bool
+	// APIKeyEnv, when set, names the environment variable holding the
+	// gateway key. The config refers to it, so the key isn't written out.
+	APIKeyEnv string
 }
 
 // Render returns the opencode.json content for a session: base (the
@@ -63,14 +66,16 @@ func Render(base []byte, s Settings) ([]byte, error) {
 		}
 		cfg["permission"] = perm
 	}
+	options := map[string]any{"baseURL": s.GatewayURL + "/v1"}
+	if s.APIKeyEnv != "" {
+		options["apiKey"] = "{env:" + s.APIKeyEnv + "}"
+	}
 	cfg["provider"] = map[string]any{
 		ProviderID: map[string]any{
-			"npm":  "@ai-sdk/openai-compatible",
-			"name": "localllm gateway",
-			"options": map[string]any{
-				"baseURL": s.GatewayURL + "/v1",
-			},
-			"models": offered,
+			"npm":     "@ai-sdk/openai-compatible",
+			"name":    "localllm gateway",
+			"options": options,
+			"models":  offered,
 		},
 	}
 	return json.MarshalIndent(cfg, "", "  ")

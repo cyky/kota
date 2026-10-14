@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"regexp"
 	"slices"
 	"strings"
@@ -257,5 +258,63 @@ func TestLiteralEscapesDollars(t *testing.T) {
 	// The original is untouched.
 	if spec.Services[AgentService].Command[2] != "echo $HOME ${USER}" || spec.Services[AgentService].Volumes[0].Source != in.ProjectDir {
 		t.Error("Literal modified the spec")
+	}
+}
+
+// marshalled is the agent service as written to the compose file.
+func marshalled(t *testing.T, c Compose) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(c.Literal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Services map[string]map[string]any `json:"services"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Services[AgentService]
+}
+
+func TestGatewayKeyOnlyInRunMode(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    Mode
+		key     bool
+		wantKey bool
+	}{
+		{"run with key", ModeRun, true, true},
+		{"run without key", ModeRun, false, false},
+		{"prep with key", ModePrep, true, false},
+		{"prep without key", ModePrep, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := testInputs()
+			in.Mode, in.GatewayKey = c.mode, c.key
+			spec := Build(in)
+			agent := spec.Services[AgentService]
+			if got := slices.Contains(agent.PassEnv, GatewayKeyEnv); got != c.wantKey {
+				t.Errorf("key passed = %v, want %v", got, c.wantKey)
+			}
+			if _, ok := agent.Environment[GatewayKeyEnv]; ok {
+				t.Error("key value in the spec's environment")
+			}
+			if _, ok := spec.Services[ForwarderService].Environment[GatewayKeyEnv]; ok {
+				t.Error("forwarder gets the key")
+			}
+
+			// In the compose file the key is a name without a value; the
+			// other variables keep theirs.
+			env, _ := marshalled(t, spec)["environment"].(map[string]any)
+			v, ok := env[GatewayKeyEnv]
+			if ok != c.wantKey || v != nil {
+				t.Errorf("compose environment %s = %v (present %v), want present %v with null value", GatewayKeyEnv, v, ok, c.wantKey)
+			}
+			if env["FOO"] != "bar" || env["HOME"] != Home {
+				t.Errorf("compose environment = %v", env)
+			}
+		})
 	}
 }

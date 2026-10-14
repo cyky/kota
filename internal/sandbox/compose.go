@@ -3,7 +3,10 @@ package sandbox
 // The subset of the compose file format localllm generates. Compose accepts
 // JSON, so specs are written with encoding/json.
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 type Compose struct {
 	Name     string                 `json:"name"`
@@ -13,11 +16,15 @@ type Compose struct {
 }
 
 type Service struct {
-	Image       string                    `json:"image"`
-	Command     []string                  `json:"command,omitempty"`
-	User        string                    `json:"user,omitempty"`
-	WorkingDir  string                    `json:"working_dir,omitempty"`
-	Environment map[string]string         `json:"environment,omitempty"`
+	Image       string            `json:"image"`
+	Command     []string          `json:"command,omitempty"`
+	User        string            `json:"user,omitempty"`
+	WorkingDir  string            `json:"working_dir,omitempty"`
+	Environment map[string]string `json:"environment,omitempty"`
+	// PassEnv are variables the container takes from docker compose's own
+	// environment. They are written without a value, so secrets never
+	// appear in the compose file.
+	PassEnv     []string                  `json:"-"`
 	Volumes     []Volume                  `json:"volumes,omitempty"`
 	Tmpfs       []string                  `json:"tmpfs,omitempty"`
 	Networks    map[string]*NetworkAttach `json:"networks,omitempty"`
@@ -27,6 +34,26 @@ type Service struct {
 	ReadOnly    bool                      `json:"read_only,omitempty"`
 	StdinOpen   bool                      `json:"stdin_open,omitempty"`
 	Tty         bool                      `json:"tty,omitempty"`
+}
+
+// MarshalJSON writes PassEnv into environment as null values, which
+// compose resolves from its own environment (unset stays unset).
+func (s Service) MarshalJSON() ([]byte, error) {
+	type plain Service
+	out := struct {
+		plain
+		Environment map[string]*string `json:"environment,omitempty"`
+	}{plain: plain(s)}
+	if len(s.Environment)+len(s.PassEnv) > 0 {
+		out.Environment = map[string]*string{}
+		for k, v := range s.Environment {
+			out.Environment[k] = &v
+		}
+		for _, k := range s.PassEnv {
+			out.Environment[k] = nil
+		}
+	}
+	return json.Marshal(out)
 }
 
 type Volume struct {
@@ -71,6 +98,7 @@ func (c Compose) Literal() Compose {
 			}
 			s.Environment = env
 		}
+		s.PassEnv = append([]string(nil), s.PassEnv...)
 		vols := make([]Volume, len(s.Volumes))
 		for i, v := range s.Volumes {
 			v.Source, v.Target = literal(v.Source), literal(v.Target)

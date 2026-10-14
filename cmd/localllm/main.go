@@ -23,6 +23,7 @@ import (
 	"localllm/internal/changereport"
 	"localllm/internal/check"
 	"localllm/internal/docker"
+	"localllm/internal/gatewaykey"
 	"localllm/internal/mask"
 	"localllm/internal/models"
 	"localllm/internal/opencode"
@@ -68,6 +69,8 @@ flags:
   --unsafe-skip-check   run only: start without the containment probes
 
 dir must be inside the allowed root ($LOCALLLM_ALLOWED_ROOT, default ~/Projects).
+A gateway API key (llama-swap apiKeys) is read from $LOCALLLM_GATEWAY_KEY or
+the file named by $LOCALLLM_GATEWAY_KEY_FILE.
 `
 
 func main() {
@@ -121,8 +124,9 @@ type agentSetup struct {
 	scratch []string
 	env     map[string]string
 	command []string
-	// render returns the content of each of configs, in order.
-	render func(c models.Catalog, auto bool) ([][]byte, error)
+	// render returns the content of each of configs, in order. keyEnv,
+	// when set, names the variable holding the gateway key.
+	render func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error)
 	// approval describes, for the startup message, whether the agent asks
 	// before it acts.
 	approval func(auto bool) string
@@ -136,12 +140,12 @@ func agentFor(name string) (agentSetup, error) {
 			configs: []string{opencodeConfigPath},
 			env:     opencode.Env(opencodeConfigPath),
 			command: []string{"opencode"},
-			render: func(c models.Catalog, auto bool) ([][]byte, error) {
+			render: func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(opencode.BaseConfig)
 				if err != nil {
 					return nil, err
 				}
-				cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto})
+				cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto, APIKeyEnv: keyEnv})
 				return [][]byte{cfg}, err
 			},
 			approval: func(auto bool) string {
@@ -158,12 +162,12 @@ func agentFor(name string) (agentSetup, error) {
 			scratch: []string{piAgentDir},
 			env:     pi.Env(piAgentDir, piSessionDir),
 			command: []string{"pi"},
-			render: func(c models.Catalog, _ bool) ([][]byte, error) {
+			render: func(c models.Catalog, _ bool, keyEnv string) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(pi.BaseSettings)
 				if err != nil {
 					return nil, err
 				}
-				s := pi.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c}
+				s := pi.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, APIKeyEnv: keyEnv}
 				settings, err := pi.RenderSettings(base, s)
 				if err != nil {
 					return nil, err
@@ -187,6 +191,9 @@ type session struct {
 	project    string
 	layout     mask.Layout
 	agent      agentSetup
+	// gatewayKey is the gateway API key, empty when none is configured. It
+	// only reaches the sandbox through docker compose's environment.
+	gatewayKey string
 	// cfgFiles are the host files behind agent.configs, written by
 	// configure once the gateway's models are known.
 	cfgFiles []string
@@ -278,6 +285,10 @@ func prepareSession(sa sessionArgs) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
+	key, err := gatewaykey.Load(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
 	layout, err := mask.Plan(project, mask.DefaultRules)
 	if err != nil {
 		return nil, err
@@ -305,7 +316,7 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		return nil, err
 	}
 
-	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, cfgFiles: cfgFiles}
+	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles}
 	pinned, protected, err := layout.Bind(project, sessionDir)
 	if err == nil {
 		err = layout.Prepare(project)
@@ -331,7 +342,9 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		ProjectDir:     project,
 		UID:            os.Getuid(),
 		GID:            os.Getgid(),
+		Mode:           sandbox.ModeRun,
 		Gateway:        gw,
+		GatewayKey:     key != "",
 		AgentImage:     baseImage,
 		ForwarderImage: forwarderImage,
 		Pinned:         pinned,
@@ -412,7 +425,7 @@ func runSession(sess *session, model string, auto, skipCheck bool) error {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'localllm check' to list them\n", n)
 	}
 
-	ds, err := docker.Start(sess.spec, sess.sessionDir)
+	ds, err := docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
 	if err != nil {
 		return err
 	}
@@ -483,7 +496,7 @@ func cmdCheck(args []string) error {
 		fmt.Println("WARNING:", w)
 	}
 
-	ds, err := docker.Start(sess.spec, sess.sessionDir)
+	ds, err := docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
 	if err != nil {
 		return err
 	}
@@ -519,6 +532,12 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 		return models.Catalog{}, err
 	}
 	data, err := ds.GatewayGet("/v1/models")
+	if errors.Is(err, docker.ErrUnauthorized) {
+		if s.gatewayKey == "" {
+			return models.Catalog{}, fmt.Errorf("%w; no key is configured: %s", err, gatewaykey.Hint)
+		}
+		return models.Catalog{}, fmt.Errorf("%w; check the key (%s)", err, gatewaykey.Hint)
+	}
 	if err != nil {
 		return models.Catalog{}, err
 	}
@@ -530,7 +549,11 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 	if err != nil {
 		return models.Catalog{}, err
 	}
-	contents, err := s.agent.render(catalog, auto)
+	keyEnv := ""
+	if s.gatewayKey != "" {
+		keyEnv = sandbox.GatewayKeyEnv
+	}
+	contents, err := s.agent.render(catalog, auto, keyEnv)
 	if err != nil {
 		return models.Catalog{}, err
 	}
@@ -604,6 +627,11 @@ func printMounts(w io.Writer, spec sandbox.Compose) {
 		fmt.Fprintf(w, "  %s  %s -> %s\n", mode, v.Source, v.Target)
 	}
 	fmt.Fprintf(w, "gateway (in sandbox): %s\n", sandbox.AgentGatewayURL())
+	key := "none"
+	if slices.Contains(spec.Services[sandbox.AgentService].PassEnv, sandbox.GatewayKeyEnv) {
+		key = "configured (value not shown)"
+	}
+	fmt.Fprintf(w, "gateway key: %s\n", key)
 }
 
 func printMasks(w io.Writer, layout mask.Layout) {

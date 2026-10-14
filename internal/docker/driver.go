@@ -4,6 +4,7 @@ package docker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -35,10 +36,17 @@ func BuildImage(tag string, context fs.FS) error {
 type Session struct {
 	spec    sandbox.Compose
 	compose []string
+	// env is the environment of every docker compose command: the host's
+	// plus the session's secrets, which services take by name (PassEnv).
+	env []string
+	// gatewayKey reports whether a gateway key is in env.
+	gatewayKey bool
 }
 
 // Start writes spec into sessionDir and brings up the forwarder and networks.
-func Start(spec sandbox.Compose, sessionDir string) (*Session, error) {
+// gatewayKey, when not empty, is passed to compose in its environment as
+// sandbox.GatewayKeyEnv, never in the compose file or on a command line.
+func Start(spec sandbox.Compose, sessionDir, gatewayKey string) (*Session, error) {
 	data, err := json.MarshalIndent(spec.Literal(), "", "  ")
 	if err != nil {
 		return nil, err
@@ -47,7 +55,11 @@ func Start(spec sandbox.Compose, sessionDir string) (*Session, error) {
 	if err := os.WriteFile(file, data, 0o600); err != nil {
 		return nil, err
 	}
-	s := &Session{spec: spec, compose: []string{"compose", "-f", file, "-p", spec.Name}}
+	s := &Session{spec: spec, compose: []string{"compose", "-f", file, "-p", spec.Name}, env: os.Environ()}
+	if gatewayKey != "" {
+		s.env = append(s.env, sandbox.GatewayKeyEnv+"="+gatewayKey)
+		s.gatewayKey = true
+	}
 	if _, err := s.output("up", "-d", "--quiet-pull", sandbox.ForwarderService); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("start forwarder: %w", err)
@@ -120,12 +132,27 @@ func (s *Session) ResolveFromForwarder(host string) ([]string, error) {
 	return addrs, nil
 }
 
+// ErrUnauthorized is returned by GatewayGet when the gateway rejects the
+// request for a missing or wrong API key.
+var ErrUnauthorized = errors.New("the gateway requires an API key, or rejected the one configured")
+
 // GatewayGet fetches path from the model gateway through the forwarder,
-// the same route the agent's requests take.
+// the same route the agent's requests take. The key is expanded inside the
+// forwarder, so it isn't on the host's command line.
 func (s *Session) GatewayGet(path string) ([]byte, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", sandbox.GatewayPort, path)
-	out, err := s.output("exec", "-T", sandbox.ForwarderService, "wget", "-q", "-T", "10", "-O", "-", url)
+	args := []string{"exec", "-T"}
+	script := `exec wget -q -T 10 -O - "$1"`
+	if s.gatewayKey {
+		args = append(args, "-e", sandbox.GatewayKeyEnv)
+		script = `exec wget -q -T 10 --header "Authorization: Bearer $` + sandbox.GatewayKeyEnv + `" -O - "$1"`
+	}
+	args = append(args, sandbox.ForwarderService, "sh", "-c", script, "sh", url)
+	out, err := s.output(args...)
 	if err != nil {
+		if strings.Contains(err.Error(), " 401 ") {
+			err = ErrUnauthorized
+		}
 		return nil, fmt.Errorf("fetch %s from the gateway: %w", path, err)
 	}
 	return []byte(out), nil
@@ -136,6 +163,7 @@ func (s *Session) GatewayGet(path string) ([]byte, error) {
 func (s *Session) Capture(cmd ...string) (string, error) {
 	args := append(append(slices.Clone(s.compose), "run", "--rm", "-T", sandbox.AgentService), cmd...)
 	c := exec.Command("docker", args...)
+	c.Env = s.env
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {
@@ -151,7 +179,10 @@ func (s *Session) Capture(cmd ...string) (string, error) {
 
 // Interactive runs the agent service attached to the terminal.
 func (s *Session) Interactive() error {
-	return run("docker", append(slices.Clone(s.compose), "run", "--rm", sandbox.AgentService)...)
+	cmd := exec.Command("docker", append(slices.Clone(s.compose), "run", "--rm", sandbox.AgentService)...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Env = s.env
+	return cmd.Run()
 }
 
 // Close removes the session's containers and networks.
@@ -161,6 +192,7 @@ func (s *Session) Close() {
 
 func (s *Session) output(args ...string) (string, error) {
 	c := exec.Command("docker", append(slices.Clone(s.compose), args...)...)
+	c.Env = s.env
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {

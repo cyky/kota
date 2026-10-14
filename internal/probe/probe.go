@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"localllm/internal/sandbox"
 )
 
 // Probe is one containment check.
@@ -88,8 +90,11 @@ func Suite(t Targets) []Probe {
 
 	probes = append(probes,
 		Probe{
-			Name:        "gateway /v1/models",
-			Cmd:         []string{"curl", "-fsS", "-m", "3", "-o", "/dev/null", t.GatewayURL + "/v1/models"},
+			Name: "gateway /v1/models",
+			// Sends the gateway key when the container has one.
+			Cmd: []string{"sh", "-c", `url=$1; shift
+if [ -n "$` + sandbox.GatewayKeyEnv + `" ]; then set -- -H "Authorization: Bearer $` + sandbox.GatewayKeyEnv + `"; fi
+exec curl -fsS -m 3 -o /dev/null "$@" "$url"`, "sh", t.GatewayURL + "/v1/models"},
 			MustSucceed: true,
 		},
 		Probe{

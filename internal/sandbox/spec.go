@@ -38,6 +38,9 @@ const (
 	// ForwarderService is the compose service name of the forwarder.
 	ForwarderService = "forwarder"
 
+	// GatewayKeyEnv carries the gateway API key into the agent container.
+	GatewayKeyEnv = "LOCALLLM_GATEWAY_KEY"
+
 	stateKey = "state"
 
 	internalNetwork = "sandbox"
@@ -82,6 +85,17 @@ func AgentGatewayURL() string {
 	return fmt.Sprintf("http://%s:%d", GatewayHost, GatewayPort)
 }
 
+// Mode is what a session is for.
+type Mode int
+
+const (
+	// ModeRun is an agent session (run, check): offline, with the gateway.
+	ModeRun Mode = iota
+	// ModePrep installs dependencies. It never gets the gateway key, so
+	// install scripts can't reach the models.
+	ModePrep
+)
+
 // Mount is a bind mount of a host file or directory.
 type Mount struct {
 	Source string
@@ -90,10 +104,15 @@ type Mount struct {
 
 // Inputs describes one sandbox session.
 type Inputs struct {
+	Mode Mode
 	// ProjectDir is the resolved absolute host path mounted at Workspace.
 	ProjectDir string
 	UID, GID   int
 	Gateway    Gateway
+	// GatewayKey reports that a gateway API key is configured. The agent
+	// container then takes GatewayKeyEnv from docker compose's environment,
+	// so the key itself is never in the spec. Ignored for ModePrep.
+	GatewayKey bool
 
 	AgentImage     string
 	ForwarderImage string
@@ -185,6 +204,9 @@ func Build(in Inputs) Compose {
 	agent.User = fmt.Sprintf("%d:%d", in.UID, in.GID)
 	agent.WorkingDir = Workspace
 	agent.Environment = env
+	if in.GatewayKey && in.Mode != ModePrep {
+		agent.PassEnv = []string{GatewayKeyEnv}
+	}
 	agent.Volumes = volumes
 	for _, dir := range append([]string{Home}, in.Scratch...) {
 		agent.Tmpfs = append(agent.Tmpfs, fmt.Sprintf("%s:uid=%d,gid=%d,mode=0700", dir, in.UID, in.GID))

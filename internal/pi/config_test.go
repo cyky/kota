@@ -151,3 +151,28 @@ func TestEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderModelsGatewayKey(t *testing.T) {
+	cases := []struct {
+		keyEnv, want string
+	}{
+		{"", placeholderKey},
+		// pi interpolates $NAME; the key itself is never written.
+		{"LOCALLLM_GATEWAY_KEY", "$LOCALLLM_GATEWAY_KEY"},
+	}
+	for _, c := range cases {
+		s := settings
+		s.APIKeyEnv = c.keyEnv
+		data, err := RenderModels(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg renderedModels
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.Providers[ProviderID].APIKey; got != c.want {
+			t.Errorf("APIKeyEnv %q: apiKey = %q, want %q", c.keyEnv, got, c.want)
+		}
+	}
+}
