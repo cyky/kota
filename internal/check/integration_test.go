@@ -270,6 +270,19 @@ func requirePass(t *testing.T, results []probe.Result) {
 func TestGitProtection(t *testing.T) {
 	requireDocker(t)
 	project := gitRepo(t)
+	// A husky-style hooks dir and a linked worktree, whose parents the agent
+	// must not be able to rename away.
+	if err := os.MkdirAll(filepath.Join(project, ".husky/_"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"config", "core.hooksPath", ".husky/_"},
+		{"worktree", "add", "-q", filepath.Join(t.TempDir(), "wt")},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", project}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
 	s, gw, mounts := startProtected(t, project)
 
 	results, err := Run(s, gw, mounts)
@@ -296,6 +309,10 @@ try envrc-remove rm -f .envrc
 try git-rename mv .git .git-old
 try commondir sh -c 'echo ../evil > .git/commondir'
 try commondir-remove rm -f .git/commondir
+try husky-rename mv .husky .husky-old
+try husky-hook touch .husky/_/pre-commit
+try worktree-rename mv .git/worktrees/wt .git/worktrees/x
+try worktree-commondir sh -c 'echo ../../../evil > .git/worktrees/wt/commondir'
 echo DONE`)
 	if err != nil {
 		t.Fatal(err)

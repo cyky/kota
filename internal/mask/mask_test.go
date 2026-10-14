@@ -115,7 +115,7 @@ func TestPlan(t *testing.T) {
 				git(t, dir, "config", "core.hooksPath", ".husky/_")
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: ".husky/_", Dir: true}},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: ".husky", Dir: true, Pin: true}, {Path: ".husky/_", Dir: true}},
 			note: "core.hooksPath is .husky/_",
 		},
 		{
@@ -127,6 +127,16 @@ func TestPlan(t *testing.T) {
 			},
 			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: "githooks", Dir: true, Placeholder: true}},
 			note: "core.hooksPath is githooks",
+		},
+		{
+			name: "hooksPath with missing parents",
+			setup: func(t *testing.T) string {
+				dir := repo(t)
+				git(t, dir, "config", "core.hooksPath", "tools/git/hooks")
+				return dir
+			},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: "tools", Dir: true, Placeholder: true}},
+			note: "core.hooksPath is tools/git/hooks",
 		},
 		{
 			name: "hooksPath absolute inside project",
@@ -197,9 +207,14 @@ func TestPlan(t *testing.T) {
 			},
 			want: []Mount{
 				envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks,
+				{Path: ".git/modules", Dir: true, Pin: true},
+				{Path: ".git/modules/libs", Dir: true, Pin: true},
+				{Path: ".git/modules/libs/sub", Dir: true, Pin: true},
 				{Path: ".git/modules/libs/sub/commondir", Seed: ".\n"},
 				{Path: ".git/modules/libs/sub/config"},
 				{Path: ".git/modules/libs/sub/hooks", Dir: true},
+				{Path: "libs", Dir: true, Pin: true},
+				{Path: "libs/sub", Dir: true, Pin: true},
 				{Path: "libs/sub/.git"},
 			},
 		},
@@ -302,13 +317,21 @@ func TestBind(t *testing.T) {
 	}
 }
 
-func TestPlanProtectsLinkedWorktreeCommondir(t *testing.T) {
+func TestPlanProtectsLinkedWorktrees(t *testing.T) {
 	isolateGit(t)
 	dir := repo(t)
+	git(t, dir, "config", "extensions.worktreeConfig", "true")
 	git(t, dir, "worktree", "add", "-q", filepath.Join(t.TempDir(), "wt"))
 	p := mustPlan(t, dir)
-	if !slices.Contains(p.Mounts, Mount{Path: ".git/worktrees/wt/commondir"}) {
-		t.Errorf("worktree commondir not protected: %+v", p.Mounts)
+	for _, want := range []Mount{
+		{Path: ".git/worktrees", Dir: true, Pin: true},
+		{Path: ".git/worktrees/wt", Dir: true, Pin: true},
+		{Path: ".git/worktrees/wt/commondir"},
+		{Path: ".git/worktrees/wt/config.worktree", Placeholder: true},
+	} {
+		if !slices.Contains(p.Mounts, want) {
+			t.Errorf("missing %+v in %+v", want, p.Mounts)
+		}
 	}
 }
 

@@ -56,6 +56,7 @@ func Plan(project string) (Layout, error) {
 	if err := p.git(); err != nil {
 		return Layout{}, err
 	}
+	p.pinAncestors()
 	slices.SortStableFunc(p.plan.Mounts, func(a, b Mount) int { return strings.Compare(a.Path, b.Path) })
 	return p.plan, nil
 }
@@ -91,36 +92,7 @@ func (p *planner) git() error {
 	if err := p.hooksPath(); err != nil {
 		return err
 	}
-	if err := p.worktrees(); err != nil {
-		return err
-	}
 	return p.modules()
-}
-
-// worktrees protects the commondir of each linked worktree's git dir, which
-// host git reads when used in that worktree.
-func (p *planner) worktrees() error {
-	if err := p.noSymlinks(".git/worktrees"); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(filepath.Join(p.project, ".git", "worktrees"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		rel := ".git/worktrees/" + e.Name() + "/commondir"
-		if _, err := p.lstat(rel); err == nil {
-			if err := p.file(rel); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 // gitDir protects the files of the git dir at rel that decide what git runs.
@@ -137,8 +109,41 @@ func (p *planner) gitDir(rel string) error {
 	if err := p.seeded(rel+"/commondir", ".\n"); err != nil {
 		return err
 	}
-	if on, _ := gitConfig(filepath.Join(p.project, rel, "config"), "--bool", "extensions.worktreeConfig"); on == "true" {
-		return p.file(rel+"/config.worktree")
+	wtConfig, _ := gitConfig(filepath.Join(p.project, rel, "config"), "--bool", "extensions.worktreeConfig")
+	if wtConfig == "true" {
+		if err := p.file(rel + "/config.worktree"); err != nil {
+			return err
+		}
+	}
+	return p.linkedWorktrees(rel, wtConfig == "true")
+}
+
+// linkedWorktrees protects the per-worktree files of each linked worktree
+// of the git dir at rel, which host git reads when used in that worktree.
+func (p *planner) linkedWorktrees(rel string, wtConfig bool) error {
+	dir := rel + "/worktrees"
+	if err := p.noSymlinks(dir); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Join(p.project, filepath.FromSlash(dir)))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		wt := dir + "/" + e.Name()
+		if err := p.file(wt + "/commondir"); err != nil {
+			return err
+		}
+		if wtConfig {
+			if err := p.file(wt + "/config.worktree"); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -247,7 +252,10 @@ func (p *planner) protect(rel string, dir bool) error {
 	info, err := p.lstat(rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		p.add(Mount{Path: rel, Dir: dir, Placeholder: true})
+		// Hold the first missing directory on the way, so nothing can be
+		// created under it either.
+		first := p.firstMissing(rel)
+		p.add(Mount{Path: first, Dir: dir || first != rel, Placeholder: true})
 		return nil
 	case err != nil:
 		return err
@@ -268,6 +276,33 @@ func (p *planner) seeded(rel, content string) error {
 		return nil
 	}
 	return p.file(rel)
+}
+
+// firstMissing returns the shortest prefix of rel that doesn't exist.
+func (p *planner) firstMissing(rel string) string {
+	parts := strings.Split(rel, "/")
+	for i := range parts {
+		prefix := strings.Join(parts[:i+1], "/")
+		if _, err := p.lstat(prefix); errors.Is(err, fs.ErrNotExist) {
+			return prefix
+		}
+	}
+	return rel
+}
+
+// pinAncestors pins every directory on the way to a protected path. A
+// read-only mount only holds its own path: renaming a parent moves it
+// aside, and a fresh parent can hold anything.
+func (p *planner) pinAncestors() {
+	for _, m := range slices.Clone(p.plan.Mounts) {
+		if m.Pin {
+			continue
+		}
+		parts := strings.Split(m.Path, "/")
+		for i := 1; i < len(parts); i++ {
+			p.add(Mount{Path: strings.Join(parts[:i], "/"), Dir: true, Pin: true})
+		}
+	}
 }
 
 // noSymlinks refuses rel when it or any directory on the way to it is a
