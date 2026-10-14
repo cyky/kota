@@ -48,3 +48,5 @@ Not verified: the interactive TUI (`localllm run` with no command). Needs a manu
 Notes for later issues:
 - opencode does not ask before acting by default, so issue 09 must set ask-mode permissions explicitly.
 - opencode's npm postinstall must run (it installs the binary), so it's allowed for that package only. pi's `--ignore-scripts` plan (issue 10) is unaffected.
+
+**2026-10-14 — Follow-up fix in `06f8f15`.** Found while working on issue 08: docker compose expands `$VAR` in every compose value from the environment `localllm` runs in. `run -- sh -c '... $op ...'` triggered "variable is not set" warnings and lost the variable. A command mentioning a host variable, such as `$AWS_SECRET_ACCESS_KEY`, would have had the host's value baked in, and env values (the git identity) and paths containing `$` were mangled too. `docker.Start` now writes `Compose.Literal()`, which doubles every `$`. Verified with a unit test and a real run: with `FAKE_HOST_SECRET=leaked` set on the host, `run -- sh -c 'echo [$FAKE_HOST_SECRET] $HOME'` prints `[] /home/agent`.
