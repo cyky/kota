@@ -1,0 +1,153 @@
+package pi
+
+import (
+	"encoding/json"
+	"slices"
+	"testing"
+
+	"localllm/assets"
+	"localllm/internal/models"
+)
+
+func base(t *testing.T) []byte {
+	t.Helper()
+	data, err := assets.Agents.ReadFile(BaseSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+var catalog = models.Catalog{
+	Models: []models.Model{
+		{ID: "big", Context: 129024, Output: 16384, Tools: true},
+		{ID: "notools", Context: 8192, Output: 2048, Tools: false},
+		{ID: "small", Context: 16384, Output: 4096, Tools: true},
+	},
+	Default: "big",
+	Small:   "small",
+}
+
+var settings = Settings{GatewayURL: "http://gateway:8080", Models: catalog}
+
+// renderedSettings is the part of settings.json the tests inspect.
+type renderedSettings struct {
+	DefaultProvider        string   `json:"defaultProvider"`
+	DefaultModel           string   `json:"defaultModel"`
+	DefaultProjectTrust    string   `json:"defaultProjectTrust"`
+	EnableInstallTelemetry *bool    `json:"enableInstallTelemetry"`
+	Extensions             []string `json:"extensions"`
+}
+
+func TestRenderSettings(t *testing.T) {
+	data, err := RenderSettings(base(t), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg renderedSettings
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultProvider != ProviderID || cfg.DefaultModel != "big" {
+		t.Errorf("default = %s/%s, want %s/big", cfg.DefaultProvider, cfg.DefaultModel, ProviderID)
+	}
+	// The project's .pi/ is writable by the agent; it must not load in a
+	// later session.
+	if cfg.DefaultProjectTrust != "never" {
+		t.Errorf("defaultProjectTrust = %q, want never", cfg.DefaultProjectTrust)
+	}
+	if cfg.EnableInstallTelemetry == nil || *cfg.EnableInstallTelemetry {
+		t.Error("install telemetry not disabled")
+	}
+	if !slices.Contains(cfg.Extensions, "-builtin:llama.cpp") {
+		t.Errorf("extensions = %q, want the llama.cpp extension disabled", cfg.Extensions)
+	}
+}
+
+func TestRenderSettingsReplacesBaseDefaults(t *testing.T) {
+	b := []byte(`{"defaultProvider": "anthropic", "defaultModel": "claude", "theme": "dark"}`)
+	data, err := RenderSettings(b, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["defaultProvider"] != ProviderID || cfg["defaultModel"] != "big" || cfg["theme"] != "dark" {
+		t.Errorf("settings = %v", cfg)
+	}
+}
+
+func TestRenderSettingsBadBase(t *testing.T) {
+	if _, err := RenderSettings([]byte("{"), settings); err == nil {
+		t.Error("no error for invalid base")
+	}
+}
+
+// renderedModels is models.json.
+type renderedModels struct {
+	Providers map[string]struct {
+		BaseURL string `json:"baseUrl"`
+		API     string `json:"api"`
+		APIKey  string `json:"apiKey"`
+		Models  []struct {
+			ID            string `json:"id"`
+			ContextWindow int    `json:"contextWindow"`
+			MaxTokens     int    `json:"maxTokens"`
+		} `json:"models"`
+	} `json:"providers"`
+}
+
+func TestRenderModels(t *testing.T) {
+	data, err := RenderModels(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg renderedModels
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("providers = %v, want only %s", cfg.Providers, ProviderID)
+	}
+	p, ok := cfg.Providers[ProviderID]
+	if !ok {
+		t.Fatalf("provider %s missing", ProviderID)
+	}
+	if p.BaseURL != "http://gateway:8080/v1" || p.API != "openai-completions" {
+		t.Errorf("provider = %+v", p)
+	}
+	// pi hides a provider's models when it has no key.
+	if p.APIKey == "" {
+		t.Error("provider has no API key")
+	}
+	type model struct {
+		id                 string
+		context, maxTokens int
+	}
+	var got []model
+	for _, m := range p.Models {
+		got = append(got, model{m.ID, m.ContextWindow, m.MaxTokens})
+	}
+	want := []model{{"big", 129024, 16384}, {"notools", 8192, 2048}, {"small", 16384, 4096}}
+	if !slices.Equal(got, want) {
+		t.Errorf("models = %+v, want %+v", got, want)
+	}
+}
+
+func TestEnv(t *testing.T) {
+	env := Env("/home/agent/.pi/agent", "/state/pi/sessions")
+	want := map[string]string{
+		"PI_CODING_AGENT_DIR":         "/home/agent/.pi/agent",
+		"PI_CODING_AGENT_SESSION_DIR": "/state/pi/sessions",
+		"PI_OFFLINE":                  "1",
+		"PI_SKIP_VERSION_CHECK":       "1",
+		"PI_TELEMETRY":                "0",
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("%s = %q, want %q", k, env[k], v)
+		}
+	}
+}

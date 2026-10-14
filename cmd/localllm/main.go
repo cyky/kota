@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -25,6 +27,7 @@ import (
 	"localllm/internal/models"
 	"localllm/internal/opencode"
 	"localllm/internal/pathpolicy"
+	"localllm/internal/pi"
 	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
@@ -33,8 +36,15 @@ const (
 	baseImage      = "localllm-base:latest"
 	forwarderImage = "localllm-forwarder:latest"
 	defaultGateway = "http://host.docker.internal:8080"
+	defaultAgent   = opencode.Agent
 
-	agentConfigPath = "/etc/localllm/opencode.json"
+	opencodeConfigPath = "/etc/localllm/opencode.json"
+	// piAgentDir is pi's config directory. It is writable, because pi
+	// creates lock files next to its settings, and discarded after the
+	// session; the rendered settings.json and models.json in it are
+	// read-only.
+	piAgentDir   = sandbox.Home + "/.pi/agent"
+	piSessionDir = sandbox.StateDir + "/pi/sessions"
 )
 
 const usage = `usage: localllm <command> [flags]
@@ -42,11 +52,13 @@ const usage = `usage: localllm <command> [flags]
 commands:
   build                 build the sandbox images
   run [flags] [dir] [-- cmd...]
-                        verify containment, then start opencode offline in
+                        verify containment, then start the agent offline in
                         dir (default: current dir)
   check [flags] [dir]   show mounts and run the containment probes
 
 flags:
+  --agent NAME          opencode (default) or pi; pi has no permission
+                        system and always runs in full auto
   --gateway URL         model gateway (default $LOCALLLM_GATEWAY or ` + defaultGateway + `)
   --model ID            model to start with (default: models.yaml's default);
                         the agent is offered every model the gateway serves
@@ -99,6 +111,74 @@ func cmdBuild() error {
 	return nil
 }
 
+// agentSetup is how a session runs one agent.
+type agentSetup struct {
+	name string
+	// configs are the in-sandbox paths of the config files render returns,
+	// each mounted read-only.
+	configs []string
+	// scratch are writable per-session directories (sandbox.Inputs.Scratch).
+	scratch []string
+	env     map[string]string
+	command []string
+	// render returns the content of each of configs, in order.
+	render func(c models.Catalog, auto bool) ([][]byte, error)
+	// approval describes, for the startup message, whether the agent asks
+	// before it acts.
+	approval func(auto bool) string
+}
+
+func agentFor(name string) (agentSetup, error) {
+	switch name {
+	case opencode.Agent:
+		return agentSetup{
+			name:    opencode.Agent,
+			configs: []string{opencodeConfigPath},
+			env:     opencode.Env(opencodeConfigPath),
+			command: []string{"opencode"},
+			render: func(c models.Catalog, auto bool) ([][]byte, error) {
+				base, err := assets.Agents.ReadFile(opencode.BaseConfig)
+				if err != nil {
+					return nil, err
+				}
+				cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto})
+				return [][]byte{cfg}, err
+			},
+			approval: func(auto bool) string {
+				if auto {
+					return "auto (opencode edits files and runs commands without asking)"
+				}
+				return "ask (opencode asks before edits and commands; --auto to skip)"
+			},
+		}, nil
+	case pi.Agent:
+		return agentSetup{
+			name:    pi.Agent,
+			configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json"},
+			scratch: []string{piAgentDir},
+			env:     pi.Env(piAgentDir, piSessionDir),
+			command: []string{"pi"},
+			render: func(c models.Catalog, _ bool) ([][]byte, error) {
+				base, err := assets.Agents.ReadFile(pi.BaseSettings)
+				if err != nil {
+					return nil, err
+				}
+				s := pi.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c}
+				settings, err := pi.RenderSettings(base, s)
+				if err != nil {
+					return nil, err
+				}
+				modelsCfg, err := pi.RenderModels(s)
+				return [][]byte{settings, modelsCfg}, err
+			},
+			approval: func(bool) string {
+				return "auto (pi has no permission system: it edits files and runs commands without asking, and the sandbox is its only boundary)"
+			},
+		}, nil
+	}
+	return agentSetup{}, fmt.Errorf("unknown agent %q; available: %s, %s", name, opencode.Agent, pi.Agent)
+}
+
 // session holds everything needed to start one sandbox.
 type session struct {
 	spec       sandbox.Compose
@@ -106,9 +186,10 @@ type session struct {
 	sessionDir string
 	project    string
 	layout     mask.Layout
-	// cfgFile is the agent config, written by configure once the gateway's
-	// models are known and mounted read-only.
-	cfgFile string
+	agent      agentSetup
+	// cfgFiles are the host files behind agent.configs, written by
+	// configure once the gateway's models are known.
+	cfgFiles []string
 	// mounts are what the probes verify.
 	mounts check.Mounts
 }
@@ -122,6 +203,7 @@ func (s *session) cleanup() {
 
 // sessionArgs are the [flags] [dir] [-- cmd...] shared by run and check.
 type sessionArgs struct {
+	agent      string
 	gatewayURL string
 	model      string
 	dir        string
@@ -137,6 +219,7 @@ func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
 	fset := flag.NewFlagSet(name, flag.ContinueOnError)
+	agent := fset.String("agent", defaultAgent, "agent `NAME`: opencode or pi")
 	gw := fset.String("gateway", envOr("LOCALLLM_GATEWAY", defaultGateway), "model gateway URL")
 	model := fset.String("model", "", "model `ID` to start with")
 	var ro stringList
@@ -163,7 +246,7 @@ func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) 
 		args = fset.Args()[1:]
 	}
 
-	sa := sessionArgs{gatewayURL: *gw, model: *model, dir: ".", ro: ro, command: command}
+	sa := sessionArgs{agent: *agent, gatewayURL: *gw, model: *model, dir: ".", ro: ro, command: command}
 	switch len(dirs) {
 	case 0:
 	case 1:
@@ -178,6 +261,10 @@ func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) 
 // config is written later by configure. The caller removes sessionDir when
 // done.
 func prepareSession(sa sessionArgs) (*session, error) {
+	agent, err := agentFor(sa.agent)
+	if err != nil {
+		return nil, err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -200,14 +287,25 @@ func prepareSession(sa sessionArgs) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Created empty so the mount source is a file; configure fills it.
-	cfgFile := filepath.Join(sessionDir, "opencode.json")
-	if err := os.WriteFile(cfgFile, nil, 0o644); err != nil {
+	// Created empty so each mount source is a file; configure fills them.
+	var cfgMounts []sandbox.Mount
+	var cfgFiles []string
+	err = os.Mkdir(filepath.Join(sessionDir, "agent"), 0o755)
+	for _, target := range agent.configs {
+		if err != nil {
+			break
+		}
+		file := filepath.Join(sessionDir, "agent", path.Base(target))
+		err = os.WriteFile(file, nil, 0o644)
+		cfgFiles = append(cfgFiles, file)
+		cfgMounts = append(cfgMounts, sandbox.Mount{Source: file, Target: target})
+	}
+	if err != nil {
 		os.RemoveAll(sessionDir)
 		return nil, err
 	}
 
-	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, cfgFile: cfgFile}
+	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, cfgFiles: cfgFiles}
 	pinned, protected, err := layout.Bind(project, sessionDir)
 	if err == nil {
 		err = layout.Prepare(project)
@@ -217,15 +315,17 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		return nil, err
 	}
 	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
-	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, agentConfigPath)
+	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, agent.configs...)
 	sess.mounts.State = sandbox.StateDir
 	for _, m := range paths.ReadOnly {
 		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
 	}
 
-	env := opencode.Env(agentConfigPath)
-	for k, v := range gitEnv(project) {
-		env[k] = v
+	env := maps.Clone(agent.env)
+	maps.Copy(env, gitEnv(project))
+	command := sa.command
+	if len(command) == 0 {
+		command = agent.command
 	}
 	sess.spec = sandbox.Build(sandbox.Inputs{
 		ProjectDir:     project,
@@ -235,10 +335,11 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		AgentImage:     baseImage,
 		ForwarderImage: forwarderImage,
 		Pinned:         pinned,
-		ReadOnly:       append(append([]sandbox.Mount{{Source: cfgFile, Target: agentConfigPath}}, protected...), paths.ReadOnly...),
-		StateVolume:    sandbox.StateVolume(project, opencode.Agent),
+		ReadOnly:       append(append(cfgMounts, protected...), paths.ReadOnly...),
+		Scratch:        agent.scratch,
+		StateVolume:    sandbox.StateVolume(project, agent.name),
 		Env:            env,
-		Command:        sa.command,
+		Command:        command,
 	})
 	return sess, nil
 }
@@ -281,7 +382,7 @@ func cmdRun(args []string) error {
 		sess.cleanup()
 		return err
 	}
-	if err := confirmFullAuto(sess.project, opencode.Agent, auto); err != nil {
+	if err := confirmFullAuto(sess.project, sess.agent.name, auto); err != nil {
 		sess.cleanup()
 		return err
 	}
@@ -325,11 +426,7 @@ func runSession(sess *session, model string, auto, skipCheck bool) error {
 		fmt.Fprintln(os.Stderr, "note:", n)
 	}
 	fmt.Fprintf(os.Stderr, "model: %s (%d offered)\n", catalog.Default, len(catalog.Models))
-	if auto {
-		fmt.Fprintln(os.Stderr, "approval: auto (opencode edits files and runs commands without asking)")
-	} else {
-		fmt.Fprintln(os.Stderr, "approval: ask (opencode asks before edits and commands; --auto to skip)")
-	}
+	fmt.Fprintln(os.Stderr, "approval:", sess.agent.approval(auto))
 
 	if skipCheck {
 		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
@@ -433,15 +530,16 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 	if err != nil {
 		return models.Catalog{}, err
 	}
-	base, err := assets.Agents.ReadFile(opencode.BaseConfig)
+	contents, err := s.agent.render(catalog, auto)
 	if err != nil {
 		return models.Catalog{}, err
 	}
-	cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: catalog, Auto: auto})
-	if err != nil {
-		return models.Catalog{}, err
+	for i, file := range s.cfgFiles {
+		if err := os.WriteFile(file, contents[i], 0o644); err != nil {
+			return models.Catalog{}, err
+		}
 	}
-	return catalog, os.WriteFile(s.cfgFile, cfg, 0o644)
+	return catalog, nil
 }
 
 // confirmFullAuto asks the user to type y before a full-auto session on a

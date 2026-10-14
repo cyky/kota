@@ -1,0 +1,6 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "defaultProjectTrust": "never",
+  "enableInstallTelemetry": false,
+  "extensions": ["-builtin:llama.cpp"]
+}

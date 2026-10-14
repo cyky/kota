@@ -1,6 +1,6 @@
 # localllm
 
-Run coding agents (opencode, later pi) in an offline Docker sandbox that can reach only the local model gateway (llama-swap).
+Run coding agents (opencode, pi) in an offline Docker sandbox that can reach only the local model gateway (llama-swap).
 
 Status: early. Network containment, secret masking and git-hook protection are verified before every session, and changed files that run things are reported after it. Don't point it at projects with secrets until they land (see `.scratch/agent-sandbox/`).
 
@@ -20,6 +20,8 @@ localllm run --ro ../specs [dir]       # also mount ../specs read-only at /ro/sp
 localllm run [dir] -- opencode -c      # continue the project's last opencode session
 localllm run --model qwen3.5-2b-instruct [dir]  # start with another model
 localllm run --auto [dir]              # opencode acts without asking
+localllm run --agent pi [dir]          # pi instead of opencode (always full auto)
+localllm run --agent pi [dir] -- pi -c # continue the project's last pi session
 localllm check [dir]                   # show mounts and run the containment probes
 ```
 
@@ -33,14 +35,18 @@ The agent container is attached only to an internal Docker network with no route
 
 By default opencode asks before it edits a file or runs a shell command. `--auto` approves both, so it works without interruption. In a non-interactive `opencode run`, a request that needs approval is rejected. Before a full-auto session in a git project with uncommitted changes (modified, staged or untracked files inside the project), `run` lists them and asks you to type `y`. Anything else aborts before a container starts, so you can commit or stash first. Non-git projects aren't asked.
 
-Models come from the gateway. At launch, `run` reads `/v1/models` through the sandbox's forwarder, so a model added to llama-swap shows up in opencode without editing anything. `assets/models.yaml` adds what llama-swap doesn't report:
+pi has no permission system: it always edits files and runs commands without asking, so the sandbox is its only boundary. `run --agent pi` says so at startup, and the uncommitted-changes confirmation above always applies to it. The containment probes run before pi sessions as for opencode.
+
+Models come from the gateway. At launch, `run` reads `/v1/models` through the sandbox's forwarder, so a model added to llama-swap shows up in the agent without editing anything. `assets/models.yaml` adds what llama-swap doesn't report:
 - the context window, maximum output and tool-call support per model;
 - `agent: false` to hide a model (`zeta2.1`, a completion model);
-- the default model (`qwen3.6-coder`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`).
+- the default model (`qwen3.6-coder`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`). pi has no small model.
 
 Models not listed there get conservative values from its `unknown` entry. `--model ID` picks another default for one session; an ID the gateway doesn't serve, or a hidden one, is refused with the list of available models. `localllm check` shows the resolved list. The generated config is written per session and mounted read-only.
 
-The agent's config is versioned in this repo (`assets/agents/opencode/opencode.json`: permissions and defaults). Each session gets that config plus the gateway provider and model, mounted read-only at `/etc/localllm/opencode.json`. Your host `~/.config/opencode`, and any other host agent config, is never mounted. The agent's `HOME` is an empty tmpfs that is discarded when the session ends. opencode ignores the project's `opencode.json` and `.opencode/` directory inside the sandbox, because the agent could write them to change its own permissions. Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `localllm-state-opencode-<hash of the project path>`, mounted at `/var/lib/localllm/state`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them (`docker volume ls`, `docker volume rm`). If the "state writable" probe fails after upgrading, run `localllm build` and remove the project's state volume, which an older image created owned by root.
+The agent's config is versioned in this repo (`assets/agents/opencode/opencode.json`: permissions and defaults). Each session gets that config plus the gateway provider and model, mounted read-only at `/etc/localllm/opencode.json`. Your host `~/.config/opencode`, and any other host agent config, is never mounted. The agent's `HOME` is an empty tmpfs that is discarded when the session ends. opencode ignores the project's `opencode.json` and `.opencode/` directory inside the sandbox, because the agent could write them to change its own permissions. pi's config is versioned the same way (`assets/agents/pi/settings.json`). Each session renders `settings.json` (default model) and `models.json` (the gateway provider and its models), mounted read-only into pi's config directory `~/.pi/agent`. That directory is its own tmpfs, writable because pi creates lock files there, and discarded after the session. The base settings set `defaultProjectTrust` to `never`, so pi doesn't load the project's `.pi/` (settings, extensions, skills, system prompt), which the agent could write for a later session; a `.pi/` of your own isn't used in the sandbox either. `AGENTS.md` and other context files still load. pi's sessions are stored in its state volume via `PI_CODING_AGENT_SESSION_DIR`, which also outranks a `sessionDir` in the project's settings.
+
+Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `localllm-state-<agent>-<hash of the project path>`, mounted at `/var/lib/localllm/state`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them (`docker volume ls`, `docker volume rm`). If the "state writable" probe fails after upgrading, run `localllm build` and remove the project's state volume, which an older image created owned by root.
 
 Before every `run`, containment probes run in a fresh agent container. They try to reach the internet, external DNS, the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN gateway, and check that the gateway, `/workspace` and the state volume work and that every `--ro` mount and the agent config reject writes. Any failure blocks the session; `--unsafe-skip-check` overrides that with a warning.
 

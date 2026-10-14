@@ -8,11 +8,13 @@ import (
 	"testing"
 
 	"localllm/internal/opencode"
+	"localllm/internal/pi"
 	"localllm/internal/sandbox"
 )
 
-// TestSessionMountsNoHostAgentConfig builds a session against a fake HOME
-// that has host agent config and state, and checks none of it is mounted.
+// TestSessionMountsNoHostAgentConfig builds a session for each agent against
+// a fake HOME that has host agent config and state, and checks none of it is
+// mounted.
 func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -28,45 +30,87 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 	}
 	home, _ = filepath.EvalSymlinks(home)
 
-	sess, err := prepareSession(sessionArgs{
-		gatewayURL: defaultGateway,
-		dir:        filepath.Join(home, "Projects/app"),
-	})
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		agent   string
+		configs []string
+		env     map[string]string
+		command []string
+	}{
+		{
+			agent:   opencode.Agent,
+			configs: []string{opencodeConfigPath},
+			env:     map[string]string{"OPENCODE_DISABLE_PROJECT_CONFIG": "1"},
+			command: []string{"opencode"},
+		},
+		{
+			agent:   pi.Agent,
+			configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json"},
+			env:     map[string]string{"PI_CODING_AGENT_DIR": piAgentDir, "PI_CODING_AGENT_SESSION_DIR": piSessionDir, "PI_OFFLINE": "1"},
+			command: []string{"pi"},
+		},
 	}
-	t.Cleanup(sess.cleanup)
+	for _, c := range cases {
+		t.Run(c.agent, func(t *testing.T) {
+			sess, err := prepareSession(sessionArgs{
+				agent:      c.agent,
+				gatewayURL: defaultGateway,
+				dir:        filepath.Join(home, "Projects/app"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(sess.cleanup)
 
-	agent := sess.spec.Services[sandbox.AgentService]
-	var config, state bool
-	for _, v := range agent.Volumes {
-		for _, d := range hostDirs {
-			if v.Source == filepath.Join(home, d) || strings.HasPrefix(v.Source, filepath.Join(home, d)+"/") {
-				t.Errorf("host agent directory mounted: %+v", v)
+			agent := sess.spec.Services[sandbox.AgentService]
+			configs := map[string]bool{}
+			var state bool
+			for _, v := range agent.Volumes {
+				for _, d := range hostDirs {
+					if v.Source == filepath.Join(home, d) || strings.HasPrefix(v.Source, filepath.Join(home, d)+"/") {
+						t.Errorf("host agent directory mounted: %+v", v)
+					}
+				}
+				switch {
+				case slices.Contains(c.configs, v.Target):
+					configs[v.Target] = true
+					if !v.ReadOnly || !strings.HasPrefix(v.Source, sess.sessionDir+"/") {
+						t.Errorf("agent config mount = %+v, want read-only from the session dir", v)
+					}
+				case v.Target == sandbox.StateDir:
+					state = true
+					if v.Type != "volume" {
+						t.Errorf("state mount = %+v, want a named volume", v)
+					}
+				}
 			}
-		}
-		switch v.Target {
-		case agentConfigPath:
-			config = true
-			if !v.ReadOnly || !strings.HasPrefix(v.Source, sess.sessionDir+"/") {
-				t.Errorf("agent config mount = %+v, want read-only from the session dir", v)
+			if len(configs) != len(c.configs) || !state {
+				t.Errorf("configs mounted = %v, state mounted = %v in %+v", configs, state, agent.Volumes)
 			}
-		case sandbox.StateDir:
-			state = true
-			if v.Type != "volume" {
-				t.Errorf("state mount = %+v, want a named volume", v)
+			for _, cfg := range c.configs {
+				if !slices.Contains(sess.mounts.ReadOnly, cfg) {
+					t.Errorf("probes don't check %s is read-only", cfg)
+				}
 			}
-		}
+			want := sandbox.StateVolume(filepath.Join(home, "Projects/app"), c.agent)
+			if got := sess.spec.Volumes["state"].Name; got != want {
+				t.Errorf("state volume = %q, want %q", got, want)
+			}
+			for k, v := range c.env {
+				if agent.Environment[k] != v {
+					t.Errorf("env %s = %q, want %q", k, agent.Environment[k], v)
+				}
+			}
+			if !slices.Equal(agent.Command, c.command) {
+				t.Errorf("command = %q, want %q", agent.Command, c.command)
+			}
+		})
 	}
-	if !config || !state {
-		t.Errorf("config mounted = %v, state mounted = %v in %+v", config, state, agent.Volumes)
-	}
-	want := sandbox.StateVolume(filepath.Join(home, "Projects/app"), opencode.Agent)
-	if got := sess.spec.Volumes["state"].Name; got != want {
-		t.Errorf("state volume = %q, want %q", got, want)
-	}
-	if agent.Environment["OPENCODE_DISABLE_PROJECT_CONFIG"] != "1" {
-		t.Error("project opencode config is not disabled")
+}
+
+func TestUnknownAgentRefused(t *testing.T) {
+	_, err := prepareSession(sessionArgs{agent: "claude", gatewayURL: defaultGateway, dir: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "opencode, pi") {
+		t.Errorf("err = %v, want unknown agent listing opencode, pi", err)
 	}
 }
 
@@ -75,6 +119,7 @@ func TestParseSessionArgs(t *testing.T) {
 		args    []string
 		dir     string
 		model   string
+		agent   string
 		ro      []string
 		command []string
 		wantErr bool
@@ -87,6 +132,7 @@ func TestParseSessionArgs(t *testing.T) {
 		{args: []string{"app", "--", "sh", "-c", "x"}, dir: "app", command: []string{"sh", "-c", "x"}},
 		{args: []string{"--", "opencode", "run", "hi"}, dir: ".", command: []string{"opencode", "run", "hi"}},
 		{args: []string{"--model", "m", "--", "app"}, dir: ".", model: "m", command: []string{"app"}},
+		{args: []string{"app", "--agent", "pi"}, dir: "app", agent: "pi"},
 		{args: []string{"a", "b"}, wantErr: true},
 		{args: []string{"--nope"}, wantErr: true},
 	}
@@ -102,8 +148,11 @@ func TestParseSessionArgs(t *testing.T) {
 			t.Errorf("%q: %v", c.args, err)
 			continue
 		}
-		if sa.dir != c.dir || sa.model != c.model || !slices.Equal(sa.ro, c.ro) || !slices.Equal(sa.command, c.command) {
-			t.Errorf("%q: got dir=%q model=%q ro=%q command=%q", c.args, sa.dir, sa.model, sa.ro, sa.command)
+		if c.agent == "" {
+			c.agent = defaultAgent
+		}
+		if sa.agent != c.agent || sa.dir != c.dir || sa.model != c.model || !slices.Equal(sa.ro, c.ro) || !slices.Equal(sa.command, c.command) {
+			t.Errorf("%q: got agent=%q dir=%q model=%q ro=%q command=%q", c.args, sa.agent, sa.dir, sa.model, sa.ro, sa.command)
 		}
 	}
 }

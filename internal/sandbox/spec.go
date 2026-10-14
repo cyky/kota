@@ -108,6 +108,10 @@ type Inputs struct {
 	// StateVolume(). XDG data, state and cache point into it, so the agent's
 	// sessions, logs and caches outlive the container. Empty means none.
 	StateVolume string
+	// Scratch are directories inside Home on their own tmpfs, owned by the
+	// agent user. Read-only mounts can go inside one while the agent still
+	// writes next to them; the contents are discarded with the container.
+	Scratch []string
 	// Env is passed to the agent container in addition to HOME.
 	Env map[string]string
 	// Command overrides the agent image's default command when non-empty.
@@ -182,7 +186,9 @@ func Build(in Inputs) Compose {
 	agent.WorkingDir = Workspace
 	agent.Environment = env
 	agent.Volumes = volumes
-	agent.Tmpfs = []string{fmt.Sprintf("%s:uid=%d,gid=%d,mode=0700", Home, in.UID, in.GID)}
+	for _, dir := range append([]string{Home}, in.Scratch...) {
+		agent.Tmpfs = append(agent.Tmpfs, fmt.Sprintf("%s:uid=%d,gid=%d,mode=0700", dir, in.UID, in.GID))
+	}
 	agent.Networks = map[string]*NetworkAttach{internalNetwork: {}}
 	agent.DependsOn = []string{ForwarderService}
 	agent.StdinOpen = true

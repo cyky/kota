@@ -106,6 +106,20 @@ func TestAgentRunsAsHostUserInWorkspace(t *testing.T) {
 	}
 }
 
+func TestScratchDirsAreAgentOwnedTmpfs(t *testing.T) {
+	in := testInputs()
+	in.Scratch = []string{Home + "/.pi/agent"}
+	agent := Build(in).Services[AgentService]
+
+	want := []string{
+		Home + ":uid=501,gid=20,mode=0700",
+		Home + "/.pi/agent:uid=501,gid=20,mode=0700",
+	}
+	if !slices.Equal(agent.Tmpfs, want) {
+		t.Errorf("tmpfs = %v, want %v", agent.Tmpfs, want)
+	}
+}
+
 func TestMounts(t *testing.T) {
 	agent := Build(testInputs()).Services[AgentService]
 

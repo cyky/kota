@@ -531,6 +531,47 @@ func TestStateVolumePerProject(t *testing.T) {
 	}
 }
 
+// TestScratchDirWithReadOnlyConfig mounts config files inside a scratch
+// tmpfs, as for pi: the files reject writes and can't be moved away, the
+// directory around them is writable, and nothing written there survives
+// the container.
+func TestScratchDirWithReadOnlyConfig(t *testing.T) {
+	requireDocker(t)
+	dir := t.TempDir()
+	const agentDir = sandbox.Home + "/.pi/agent"
+	var ro []sandbox.Mount
+	var targets []string
+	for _, name := range []string{"settings.json", "models.json"} {
+		src := filepath.Join(dir, name)
+		if err := os.WriteFile(src, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ro = append(ro, sandbox.Mount{Source: src, Target: agentDir + "/" + name})
+		targets = append(targets, agentDir+"/"+name)
+	}
+	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t), ReadOnly: ro, Scratch: []string{agentDir}}, nil)
+
+	results, err := Run(s, gw, Mounts{ReadOnly: targets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePass(t, results)
+
+	script := `d=` + agentDir + `
+mkdir "$d/settings.json.lock" && rmdir "$d/settings.json.lock" && echo lock-ok
+mv "$d/settings.json" "$d/moved" 2>/dev/null || echo move-refused
+echo trusted > "$d/trust.json" && echo scratch-written`
+	out, _ := s.Capture("sh", "-c", script)
+	for _, want := range []string{"lock-ok", "move-refused", "scratch-written"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q lacks %q", out, want)
+		}
+	}
+	if out, _ := s.Capture("sh", "-c", "cat "+agentDir+"/trust.json 2>/dev/null; echo end"); strings.TrimSpace(out) != "end" {
+		t.Errorf("scratch dir kept a file from an earlier container: %q", out)
+	}
+}
+
 func TestGatewayGetThroughForwarder(t *testing.T) {
 	requireDocker(t)
 	s, _ := startSandbox(t, nil)
