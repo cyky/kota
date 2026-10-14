@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"localllm/assets"
+	"localllm/internal/changereport"
 	"localllm/internal/check"
 	"localllm/internal/docker"
 	"localllm/internal/mask"
@@ -256,7 +257,22 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer sess.cleanup()
+	// Snapshot before Docker creates any mount points, and compare after
+	// cleanup has removed them, so placeholders aren't reported.
+	before, err := changereport.Snapshot(sess.project)
+	if err != nil {
+		sess.cleanup()
+		return fmt.Errorf("snapshot watched files: %w", err)
+	}
+	err = runSession(sess, skipCheck)
+	sess.cleanup()
+	reportChanges(os.Stderr, sess.project, before)
+	return err
+}
+
+// runSession starts the sandbox, verifies it unless skipCheck, and runs the
+// agent. The containers are gone when it returns.
+func runSession(sess *session, skipCheck bool) error {
 	for _, n := range sess.layout.Notes {
 		fmt.Fprintln(os.Stderr, "note:", n)
 	}
@@ -287,6 +303,24 @@ func cmdRun(args []string) error {
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
 	}
 	return ds.Interactive()
+}
+
+// reportChanges warns about watched files the session added, modified or
+// deleted.
+func reportChanges(w io.Writer, project string, before changereport.Files) {
+	after, err := changereport.Snapshot(project)
+	if err != nil {
+		fmt.Fprintf(w, "WARNING: could not check for changed files that run things: %v\n", err)
+		return
+	}
+	changes := changereport.Diff(before, after)
+	if len(changes) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "WARNING: the session changed %d file(s) that can run code on the host. Review them before building, installing or opening the project in an editor:\n", len(changes))
+	for _, line := range changereport.Warnings(changes) {
+		fmt.Fprintln(w, "  "+line)
+	}
 }
 
 func cmdCheck(args []string) error {

@@ -2,7 +2,7 @@
 
 Run coding agents (opencode, later pi) in an offline Docker sandbox that can reach only the local model gateway (llama-swap).
 
-Status: early. Network containment, secret masking and git-hook protection are verified before every session. Don't point it at projects with secrets until they land (see `.scratch/agent-sandbox/`).
+Status: early. Network containment, secret masking and git-hook protection are verified before every session, and changed files that run things are reported after it. Don't point it at projects with secrets until they land (see `.scratch/agent-sandbox/`).
 
 ## Requirements
 
@@ -34,7 +34,7 @@ The agent can't plant code that runs later on the host. `.git/hooks`, `.git/conf
 
 - The agent can create a git repository of its own: `git init` in a non-git project, a nested repository in a subdirectory, or bare-repository files at the project root, which host git falls back to if `.git/HEAD` is broken. Their hooks and config run when you use git there on the host. Set `git config --global safe.bareRepository explicit` to close the bare-repository case.
 - In a linked worktree or a submodule checkout opened on its own, `.git` is a file that points outside the project. The file is read-only, and git does not work inside the sandbox.
-- Files that hooks call, like husky's `.husky/pre-commit`, stay writable. So does an `.envrc` in a subdirectory.
+- Files that hooks call, like husky's `.husky/pre-commit`, stay writable. So does an `.envrc` in a subdirectory. `run` warns when these change (see below).
 
 Secrets are masked: inside the sandbox they read as an empty file or directory and can't be written, while the host files stay untouched. The default rules cover `.env` and `.env.*` (except `.env.example` and similar), keys and certificates (`*.pem`, `*.key`, `id_rsa*`, ...), `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, Terraform state, and `.aws/`, `.ssh/` and `.gnupg/` directories. Add your own in `.localllmignore` at the project root, in gitignore syntax. It comes after the defaults, so `!` can unmask a default, and it is read-only inside the sandbox. `localllm check` lists the masks. Limits:
 
@@ -42,5 +42,11 @@ Secrets are masked: inside the sandbox they read as an empty file or directory a
 - Dependency and build directories (`node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`, ...) aren't searched, to keep launch fast.
 - A masked file tracked in git reads as empty inside the sandbox, so a commit made there would record it emptied. `run` and `check` warn about these.
 - `--ro` paths aren't masked.
+
+Other files that run things can't be locked without breaking normal work, so `run` reports them instead. It records them before the session and, when it ends, lists any that were added, modified or deleted. The list covers `package.json`, `Makefile`, `*.nix`, `flake.lock` and `.envrc` at any depth, `.pre-commit-config.yaml`, and the `.github/workflows/`, `.vscode/`, `.devcontainer/`, `.husky/` and `.githooks/` directories (`changereport.Watched`). Content is compared by hash, so restoring a timestamp doesn't hide an edit. Permission changes and symlink targets count too. Review the listed files before you build, install or open the project in an editor. Limits:
+
+- It's a warning, not a block: the changes are already on the host.
+- Dependency and build directories are skipped, as for masks. So is `.git`, which is protected by mounts.
+- `check` doesn't report changes, and nothing is reported if `localllm` itself is killed mid-session.
 
 Integration tests need Docker: `go test -tags integration ./...`.
