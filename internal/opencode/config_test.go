@@ -2,9 +2,12 @@ package opencode
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"testing"
 
 	"localllm/assets"
+	"localllm/internal/models"
 )
 
 func base(t *testing.T) []byte {
@@ -16,59 +19,93 @@ func base(t *testing.T) []byte {
 	return data
 }
 
-func TestRenderPointsAtGateway(t *testing.T) {
-	data, err := Render(base(t), Settings{GatewayURL: "http://gateway:8080", Model: "qwen3.6-coder"})
+// rendered is the part of opencode.json the tests inspect.
+type rendered struct {
+	Model            string            `json:"model"`
+	SmallModel       string            `json:"small_model"`
+	Autoupdate       bool              `json:"autoupdate"`
+	Share            string            `json:"share"`
+	Permission       map[string]string `json:"permission"`
+	EnabledProviders []string          `json:"enabled_providers"`
+	Provider         map[string]struct {
+		Options struct {
+			BaseURL string `json:"baseURL"`
+		} `json:"options"`
+		Models map[string]struct {
+			Name     string `json:"name"`
+			ToolCall bool   `json:"tool_call"`
+			Limit    struct {
+				Context int `json:"context"`
+				Output  int `json:"output"`
+			} `json:"limit"`
+		} `json:"models"`
+	} `json:"provider"`
+}
+
+func render(t *testing.T, b []byte, c models.Catalog) rendered {
+	t.Helper()
+	data, err := Render(b, Settings{GatewayURL: "http://gateway:8080", Models: c})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg struct {
-		Model            string   `json:"model"`
-		Autoupdate       bool     `json:"autoupdate"`
-		Share            string   `json:"share"`
-		EnabledProviders []string `json:"enabled_providers"`
-		Provider         map[string]struct {
-			Options struct {
-				BaseURL string `json:"baseURL"`
-			} `json:"options"`
-			Models map[string]any `json:"models"`
-		} `json:"provider"`
-	}
+	var cfg rendered
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
 	}
+	return cfg
+}
 
-	if cfg.Model != "localllm/qwen3.6-coder" {
-		t.Errorf("model = %q", cfg.Model)
+var catalog = models.Catalog{
+	Models: []models.Model{
+		{ID: "big", Context: 129024, Output: 16384, Tools: true},
+		{ID: "small", Context: 16384, Output: 4096, Tools: false},
+	},
+	Default: "big",
+	Small:   "small",
+}
+
+func TestRender(t *testing.T) {
+	cfg := render(t, base(t), catalog)
+
+	if cfg.Model != "localllm/big" || cfg.SmallModel != "localllm/small" {
+		t.Errorf("model = %q, small_model = %q", cfg.Model, cfg.SmallModel)
 	}
 	if cfg.Autoupdate || cfg.Share != "disabled" {
 		t.Errorf("autoupdate = %v, share = %q", cfg.Autoupdate, cfg.Share)
 	}
-	if len(cfg.EnabledProviders) != 1 || cfg.EnabledProviders[0] != ProviderID {
+	if !slices.Equal(cfg.EnabledProviders, []string{ProviderID}) {
 		t.Errorf("enabled_providers = %v", cfg.EnabledProviders)
 	}
 	p, ok := cfg.Provider[ProviderID]
-	if !ok {
-		t.Fatalf("provider %q missing", ProviderID)
+	if !ok || len(cfg.Provider) != 1 {
+		t.Fatalf("provider = %v", cfg.Provider)
 	}
 	if p.Options.BaseURL != "http://gateway:8080/v1" {
 		t.Errorf("baseURL = %q", p.Options.BaseURL)
 	}
-	if _, ok := p.Models["qwen3.6-coder"]; !ok {
-		t.Errorf("models = %v", p.Models)
+	if ids := slices.Sorted(maps.Keys(p.Models)); !slices.Equal(ids, []string{"big", "small"}) {
+		t.Fatalf("models = %v", ids)
+	}
+	big, small := p.Models["big"], p.Models["small"]
+	if big.Name != "big" || !big.ToolCall || big.Limit.Context != 129024 || big.Limit.Output != 16384 {
+		t.Errorf("big = %+v", big)
+	}
+	if small.ToolCall || small.Limit.Context != 16384 || small.Limit.Output != 4096 {
+		t.Errorf("small = %+v", small)
+	}
+}
+
+func TestRenderWithoutSmallModel(t *testing.T) {
+	c := catalog
+	c.Small = ""
+	cfg := render(t, []byte(`{"small_model":"openai/gpt-mini"}`), c)
+	if cfg.SmallModel != "" {
+		t.Errorf("small_model = %q, want unset", cfg.SmallModel)
 	}
 }
 
 func TestBaseConfigAsksBeforeEditsAndCommands(t *testing.T) {
-	data, err := Render(base(t), Settings{GatewayURL: "http://gateway:8080", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg struct {
-		Permission map[string]string `json:"permission"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatal(err)
-	}
+	cfg := render(t, base(t), catalog)
 	for _, k := range []string{"edit", "bash"} {
 		if cfg.Permission[k] != "ask" {
 			t.Errorf("permission %s = %q, want ask", k, cfg.Permission[k])
@@ -78,23 +115,11 @@ func TestBaseConfigAsksBeforeEditsAndCommands(t *testing.T) {
 
 func TestRenderOverridesProvidersInBase(t *testing.T) {
 	b := []byte(`{"share":"disabled","enabled_providers":["openai"],"model":"openai/gpt","provider":{"openai":{}}}`)
-	data, err := Render(b, Settings{GatewayURL: "http://gateway:8080", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg struct {
-		Share            string         `json:"share"`
-		Model            string         `json:"model"`
-		EnabledProviders []string       `json:"enabled_providers"`
-		Provider         map[string]any `json:"provider"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatal(err)
-	}
+	cfg := render(t, b, catalog)
 	if cfg.Share != "disabled" {
 		t.Errorf("share = %q, want the base value", cfg.Share)
 	}
-	if cfg.Model != "localllm/m" || len(cfg.EnabledProviders) != 1 || cfg.EnabledProviders[0] != ProviderID {
+	if cfg.Model != "localllm/big" || !slices.Equal(cfg.EnabledProviders, []string{ProviderID}) {
 		t.Errorf("model = %q, enabled_providers = %v", cfg.Model, cfg.EnabledProviders)
 	}
 	if _, ok := cfg.Provider["openai"]; ok || len(cfg.Provider) != 1 {
@@ -103,7 +128,7 @@ func TestRenderOverridesProvidersInBase(t *testing.T) {
 }
 
 func TestRenderRejectsBadBase(t *testing.T) {
-	if _, err := Render([]byte("{"), Settings{}); err == nil {
+	if _, err := Render([]byte("{"), Settings{Models: catalog}); err == nil {
 		t.Error("no error for invalid base config")
 	}
 }

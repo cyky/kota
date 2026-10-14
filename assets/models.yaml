@@ -1,0 +1,33 @@
+# Metadata for the models the gateway serves. The model list itself comes
+# from the gateway's /v1/models at launch; this file only adds what llama-swap
+# doesn't report. Models missing here get the `unknown` values.
+#
+# Per model:
+#   context  context window in tokens (match llama-server's -c / --ctx-size)
+#   output   maximum output tokens
+#   tools    whether the model handles tool calls
+#   agent    false hides the model from agents (completion-only models)
+
+default: qwen3.6-coder
+small: qwen3.5-2b-instruct
+
+# Conservative values for models not listed below.
+unknown:
+  context: 8192
+  output: 2048
+  tools: true
+
+models:
+  qwen3.6-coder:
+    context: 129024
+    output: 16384
+    tools: true
+  qwen3.5-2b-instruct:
+    context: 16384
+    output: 4096
+    tools: true
+  zeta2.1:
+    context: 8192
+    output: 2048
+    tools: false
+    agent: false

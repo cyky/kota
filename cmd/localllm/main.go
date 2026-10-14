@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"localllm/internal/check"
 	"localllm/internal/docker"
 	"localllm/internal/mask"
+	"localllm/internal/models"
 	"localllm/internal/opencode"
 	"localllm/internal/pathpolicy"
 	"localllm/internal/probe"
@@ -30,7 +32,6 @@ const (
 	baseImage      = "localllm-base:latest"
 	forwarderImage = "localllm-forwarder:latest"
 	defaultGateway = "http://host.docker.internal:8080"
-	defaultModel   = "qwen3.6-coder"
 
 	agentConfigPath = "/etc/localllm/opencode.json"
 )
@@ -46,6 +47,8 @@ commands:
 
 flags:
   --gateway URL         model gateway (default $LOCALLLM_GATEWAY or ` + defaultGateway + `)
+  --model ID            model to start with (default: models.yaml's default);
+                        the agent is offered every model the gateway serves
   --ro PATH             mount PATH read-only at ` + sandbox.ReadOnlyRoot + `/<name> (repeatable)
   --unsafe-skip-check   run only: start without the containment probes
 
@@ -100,6 +103,9 @@ type session struct {
 	sessionDir string
 	project    string
 	layout     mask.Layout
+	// cfgFile is the agent config, written by configure once the gateway's
+	// models are known and mounted read-only.
+	cfgFile string
 	// mounts are what the probes verify.
 	mounts check.Mounts
 }
@@ -114,6 +120,7 @@ func (s *session) cleanup() {
 // sessionArgs are the [flags] [dir] [-- cmd...] shared by run and check.
 type sessionArgs struct {
 	gatewayURL string
+	model      string
 	dir        string
 	ro         []string
 	command    []string
@@ -128,36 +135,45 @@ func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
 	fset := flag.NewFlagSet(name, flag.ContinueOnError)
 	gw := fset.String("gateway", envOr("LOCALLLM_GATEWAY", defaultGateway), "model gateway URL")
+	model := fset.String("model", "", "model `ID` to start with")
 	var ro stringList
 	fset.Var(&ro, "ro", "mount `PATH` read-only (repeatable)")
 	if register != nil {
 		register(fset)
 	}
-	if err := fset.Parse(args); err != nil {
-		return sessionArgs{}, err
+	// Split off the command first: the flag package would swallow a "--"
+	// that comes before any directory.
+	var command []string
+	if i := slices.Index(args, "--"); i >= 0 {
+		args, command = args[:i], args[i+1:]
 	}
-
-	sa := sessionArgs{gatewayURL: *gw, dir: ".", ro: ro}
-	rest := fset.Args()
-	for i, a := range rest {
-		if a == "--" {
-			sa.command = rest[i+1:]
-			rest = rest[:i]
+	// Flags may come before or after the directory.
+	var dirs []string
+	for {
+		if err := fset.Parse(args); err != nil {
+			return sessionArgs{}, err
+		}
+		if fset.NArg() == 0 {
 			break
 		}
+		dirs = append(dirs, fset.Arg(0))
+		args = fset.Args()[1:]
 	}
-	switch len(rest) {
+
+	sa := sessionArgs{gatewayURL: *gw, model: *model, dir: ".", ro: ro, command: command}
+	switch len(dirs) {
 	case 0:
 	case 1:
-		sa.dir = rest[0]
+		sa.dir = dirs[0]
 	default:
 		return sessionArgs{}, fmt.Errorf("%s takes at most one directory", name)
 	}
 	return sa, nil
 }
 
-// prepareSession validates paths, renders the agent config and builds the
-// compose spec. The caller removes sessionDir when done.
+// prepareSession validates paths and builds the compose spec. The agent
+// config is written later by configure. The caller removes sessionDir when
+// done.
 func prepareSession(sa sessionArgs) (*session, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -181,23 +197,14 @@ func prepareSession(sa sessionArgs) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	base, err := assets.Agents.ReadFile(opencode.BaseConfig)
-	if err != nil {
-		os.RemoveAll(sessionDir)
-		return nil, err
-	}
-	cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Model: defaultModel})
-	if err != nil {
-		os.RemoveAll(sessionDir)
-		return nil, err
-	}
+	// Created empty so the mount source is a file; configure fills it.
 	cfgFile := filepath.Join(sessionDir, "opencode.json")
-	if err := os.WriteFile(cfgFile, cfg, 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, nil, 0o644); err != nil {
 		os.RemoveAll(sessionDir)
 		return nil, err
 	}
 
-	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout}
+	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, cfgFile: cfgFile}
 	pinned, protected, err := layout.Bind(project, sessionDir)
 	if err == nil {
 		err = layout.Prepare(project)
@@ -265,6 +272,11 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Fail on a broken models.yaml before starting anything.
+	if _, err := models.ParseFile(assets.Models); err != nil {
+		sess.cleanup()
+		return err
+	}
 	// Snapshot before Docker creates any mount points, and compare after
 	// cleanup has removed them, so placeholders aren't reported.
 	before, err := changereport.Snapshot(sess.project)
@@ -272,7 +284,7 @@ func cmdRun(args []string) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
-	err = runSession(sess, skipCheck)
+	err = runSession(sess, sa.model, skipCheck)
 	sess.cleanup()
 	reportChanges(os.Stderr, sess.project, before)
 	return err
@@ -280,7 +292,7 @@ func cmdRun(args []string) error {
 
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
 // agent. The containers are gone when it returns.
-func runSession(sess *session, skipCheck bool) error {
+func runSession(sess *session, model string, skipCheck bool) error {
 	for _, n := range sess.layout.Notes {
 		fmt.Fprintln(os.Stderr, "note:", n)
 	}
@@ -296,6 +308,15 @@ func runSession(sess *session, skipCheck bool) error {
 		return err
 	}
 	defer ds.Close()
+
+	catalog, err := sess.configure(ds, model)
+	if err != nil {
+		return err
+	}
+	for _, n := range catalog.Notes {
+		fmt.Fprintln(os.Stderr, "note:", n)
+	}
+	fmt.Fprintf(os.Stderr, "model: %s (%d offered)\n", catalog.Default, len(catalog.Models))
 
 	if skipCheck {
 		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
@@ -358,6 +379,11 @@ func cmdCheck(args []string) error {
 	}
 	defer ds.Close()
 
+	// A gateway problem is reported here and by the gateway probe; the
+	// other probes still run.
+	catalog, modelErr := sess.configure(ds, sa.model)
+	printModels(os.Stdout, catalog, modelErr)
+
 	start := time.Now()
 	results, err := check.Run(ds, sess.gateway, sess.mounts)
 	if err != nil {
@@ -371,7 +397,67 @@ func cmdCheck(args []string) error {
 	if len(failed) > 0 {
 		return errors.New("sandbox is not contained")
 	}
-	return nil
+	return modelErr
+}
+
+// configure resolves the session's models from the gateway, through the
+// started sandbox, and writes the agent config. No agent container exists
+// yet, so the config is complete before the agent first sees it.
+func (s *session) configure(ds *docker.Session, model string) (models.Catalog, error) {
+	file, err := models.ParseFile(assets.Models)
+	if err != nil {
+		return models.Catalog{}, err
+	}
+	data, err := ds.GatewayGet("/v1/models")
+	if err != nil {
+		return models.Catalog{}, err
+	}
+	discovered, err := models.ParseDiscovered(data)
+	if err != nil {
+		return models.Catalog{}, err
+	}
+	catalog, err := models.Resolve(discovered, file, model)
+	if err != nil {
+		return models.Catalog{}, err
+	}
+	base, err := assets.Agents.ReadFile(opencode.BaseConfig)
+	if err != nil {
+		return models.Catalog{}, err
+	}
+	cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: catalog})
+	if err != nil {
+		return models.Catalog{}, err
+	}
+	return catalog, os.WriteFile(s.cfgFile, cfg, 0o644)
+}
+
+func printModels(w io.Writer, c models.Catalog, err error) {
+	fmt.Fprintln(w, "models:")
+	if err != nil {
+		fmt.Fprintf(w, "  error: %v\n\n", err)
+		return
+	}
+	for _, m := range c.Models {
+		var tags []string
+		if m.ID == c.Default {
+			tags = append(tags, "default")
+		}
+		if m.ID == c.Small {
+			tags = append(tags, "small")
+		}
+		if !m.Tools {
+			tags = append(tags, "no tools")
+		}
+		label := ""
+		if len(tags) > 0 {
+			label = " (" + strings.Join(tags, ", ") + ")"
+		}
+		fmt.Fprintf(w, "  %s  context %d, output %d%s\n", m.ID, m.Context, m.Output, label)
+	}
+	for _, n := range c.Notes {
+		fmt.Fprintln(w, "  note:", n)
+	}
+	fmt.Fprintln(w)
 }
 
 func printMounts(w io.Writer, spec sandbox.Compose) {

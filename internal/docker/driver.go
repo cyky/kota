@@ -120,6 +120,17 @@ func (s *Session) ResolveFromForwarder(host string) ([]string, error) {
 	return addrs, nil
 }
 
+// GatewayGet fetches path from the model gateway through the forwarder,
+// the same route the agent's requests take.
+func (s *Session) GatewayGet(path string) ([]byte, error) {
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", sandbox.GatewayPort, path)
+	out, err := s.output("exec", "-T", sandbox.ForwarderService, "wget", "-q", "-T", "10", "-O", "-", url)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s from the gateway: %w", path, err)
+	}
+	return []byte(out), nil
+}
+
 // Capture runs cmd in a fresh agent container without a TTY and returns its
 // stdout. A non-zero exit is not an error; the output is what matters.
 func (s *Session) Capture(cmd ...string) (string, error) {

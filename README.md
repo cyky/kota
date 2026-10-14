@@ -18,6 +18,7 @@ localllm run [dir]                     # opencode in dir (default: current dir)
 localllm run [dir] -- opencode run "…" # any command inside the sandbox
 localllm run --ro ../specs [dir]       # also mount ../specs read-only at /ro/specs
 localllm run [dir] -- opencode -c      # continue the project's last opencode session
+localllm run --model qwen3.5-2b-instruct [dir]  # start with another model
 localllm check [dir]                   # show mounts and run the containment probes
 ```
 
@@ -28,6 +29,13 @@ The project must be inside the allowed root, `~/Projects` by default (set `LOCAL
 ## How it works
 
 The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway. Inside the sandbox the gateway is `http://gateway:8080`. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
+
+Models come from the gateway. At launch, `run` reads `/v1/models` through the sandbox's forwarder, so a model added to llama-swap shows up in opencode without editing anything. `assets/models.yaml` adds what llama-swap doesn't report:
+- the context window, maximum output and tool-call support per model;
+- `agent: false` to hide a model (`zeta2.1`, a completion model);
+- the default model (`qwen3.6-coder`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`).
+
+Models not listed there get conservative values from its `unknown` entry. `--model ID` picks another default for one session; an ID the gateway doesn't serve, or a hidden one, is refused with the list of available models. `localllm check` shows the resolved list. The generated config is written per session and mounted read-only.
 
 The agent's config is versioned in this repo (`assets/agents/opencode/opencode.json`: permissions and defaults). Each session gets that config plus the gateway provider and model, mounted read-only at `/etc/localllm/opencode.json`. Your host `~/.config/opencode`, and any other host agent config, is never mounted. The agent's `HOME` is an empty tmpfs that is discarded when the session ends. opencode ignores the project's `opencode.json` and `.opencode/` directory inside the sandbox, because the agent could write them to change its own permissions. Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `localllm-state-opencode-<hash of the project path>`, mounted at `/var/lib/localllm/state`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them (`docker volume ls`, `docker volume rm`). If the "state writable" probe fails after upgrading, run `localllm build` and remove the project's state volume, which an older image created owned by root.
 

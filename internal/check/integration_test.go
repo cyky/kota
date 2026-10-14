@@ -530,3 +530,18 @@ func TestStateVolumePerProject(t *testing.T) {
 		t.Errorf("project B sees project A's state: %q", out)
 	}
 }
+
+func TestGatewayGetThroughForwarder(t *testing.T) {
+	requireDocker(t)
+	s, _ := startSandbox(t, nil)
+	data, err := s.GatewayGet("/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"stub-model"`) {
+		t.Errorf("/v1/models = %s", data)
+	}
+	if _, err := s.GatewayGet("/missing"); err == nil {
+		t.Error("no error for a 404")
+	}
+}

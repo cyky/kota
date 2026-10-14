@@ -1,5 +1,5 @@
-// Package assets embeds the image build contexts and agent configs shipped
-// with localllm.
+// Package assets embeds the image build contexts, agent configs and model
+// metadata shipped with localllm.
 package assets
 
 import "embed"
@@ -15,3 +15,8 @@ var Images embed.FS
 //
 //go:embed agents
 var Agents embed.FS
+
+// Models is the model metadata merged with the gateway's model list.
+//
+//go:embed models.yaml
+var Models []byte

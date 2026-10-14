@@ -4,6 +4,8 @@ package opencode
 import (
 	"encoding/json"
 	"fmt"
+
+	"localllm/internal/models"
 )
 
 // Agent is the agent name, used for its state volume and config directory.
@@ -19,20 +21,32 @@ const BaseConfig = "agents/opencode/opencode.json"
 type Settings struct {
 	// GatewayURL is the gateway base URL as seen from inside the sandbox.
 	GatewayURL string
-	// Model is the default model ID; it is always offered.
-	Model string
+	// Models are the models offered, with the default and small model.
+	Models models.Catalog
 }
 
 // Render returns the opencode.json content for a session: base (the
-// versioned permissions and defaults) with the gateway provider and model
-// set on top.
+// versioned permissions and defaults) with the gateway provider, its models
+// and the default and small model set on top.
 func Render(base []byte, s Settings) ([]byte, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
 		return nil, fmt.Errorf("base opencode config: %w", err)
 	}
+	offered := map[string]any{}
+	for _, m := range s.Models.Models {
+		offered[m.ID] = map[string]any{
+			"name":      m.ID,
+			"tool_call": m.Tools,
+			"limit":     map[string]int{"context": m.Context, "output": m.Output},
+		}
+	}
 	cfg["enabled_providers"] = []string{ProviderID}
-	cfg["model"] = ProviderID + "/" + s.Model
+	cfg["model"] = ProviderID + "/" + s.Models.Default
+	delete(cfg, "small_model")
+	if s.Models.Small != "" {
+		cfg["small_model"] = ProviderID + "/" + s.Models.Small
+	}
 	cfg["provider"] = map[string]any{
 		ProviderID: map[string]any{
 			"npm":  "@ai-sdk/openai-compatible",
@@ -40,9 +54,7 @@ func Render(base []byte, s Settings) ([]byte, error) {
 			"options": map[string]any{
 				"baseURL": s.GatewayURL + "/v1",
 			},
-			"models": map[string]any{
-				s.Model: map[string]any{"name": s.Model},
-			},
+			"models": offered,
 		},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
