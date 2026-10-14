@@ -1,7 +1,7 @@
 # DONE — 04 — Host-execution protection: read-only git hooks, git config, .envrc
 
 Status: done
-Resolved in: `1e44af2`, `53d3968`
+Resolved in: `1e44af2`, `53d3968`, `031b31f`
 
 ## Parent
 
@@ -62,3 +62,5 @@ For 06: add `.husky/`, `.githooks/` and `**/.envrc` to the watch list.
 - Only the last component of a protected path was checked for symlinks. Any symlink along the path is now refused.
 
 Not fixed, documented in the README: the agent can create a repository of its own (nested in a subdirectory, or bare-repository files at the root, which host git falls back to when `.git/HEAD` is broken). `safe.bareRepository=explicit` closes the bare case.
+
+**2026-10-14 — Second follow-up in `031b31f`.** Another review found the same rename trick one level down. Renaming `.git/worktrees/<name>`, `.git/modules/<name>` or a `core.hooksPath` parent like `.husky` moved the protected files aside. Every directory on the way to a protected path is now pinned, and a placeholder sits at the first missing directory. Linked worktrees' `config.worktree` is protected when `extensions.worktreeConfig` is on, and submodule git dirs get the same treatment. The integration test now tries those renames. With pinning disabled it reports `ESCAPED husky-rename` and `ESCAPED worktree-rename`; with pinning on it passes.
