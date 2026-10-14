@@ -116,6 +116,9 @@ func Plan(project string, defaults []string) (Layout, error) {
 	if err := p.git(); err != nil {
 		return Layout{}, err
 	}
+	// Pin before masking: a mask may replace a protection or hide it inside
+	// a masked directory, but the directories above must still hold.
+	p.pinAncestors()
 	rs, err := p.rules(defaults)
 	if err != nil {
 		return Layout{}, err
@@ -124,7 +127,6 @@ func Plan(project string, defaults []string) (Layout, error) {
 		return Layout{}, err
 	}
 	p.dropInsideMasks()
-	p.pinAncestors()
 	slices.SortStableFunc(p.plan.Mounts, func(a, b Mount) int { return strings.Compare(a.Path, b.Path) })
 	if err := p.warnTracked(); err != nil {
 		return Layout{}, err

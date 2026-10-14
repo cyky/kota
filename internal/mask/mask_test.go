@@ -584,3 +584,27 @@ func TestPlanRefusesBadIgnoreFile(t *testing.T) {
 		t.Error("symlinked .localllmignore accepted")
 	}
 }
+
+func TestPlanMaskKeepsPinsAboveIt(t *testing.T) {
+	isolateGit(t)
+	dir := repo(t)
+	write(t, filepath.Join(dir, "tools/git/hooks/pre-commit"), "")
+	git(t, dir, "config", "core.hooksPath", "tools/git/hooks")
+	write(t, filepath.Join(dir, IgnoreFile), "tools/git/\n")
+	l, err := Plan(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Without the pin on tools, the agent could rename it and recreate
+	// tools/git/hooks with its own hooks.
+	for _, want := range []Mount{{Path: "tools", Dir: true, Pin: true}, {Path: "tools/git", Dir: true, Mask: true}} {
+		if !slices.Contains(l.Mounts, want) {
+			t.Errorf("missing %+v in %+v", want, l.Mounts)
+		}
+	}
+	for _, m := range l.Mounts {
+		if strings.HasPrefix(m.Path, "tools/git/") {
+			t.Errorf("mount inside the mask: %+v", m)
+		}
+	}
+}
