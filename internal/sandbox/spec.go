@@ -162,8 +162,12 @@ type Inputs struct {
 	// so the key itself is never in the spec. Only ModeRun uses it.
 	GatewayKey bool
 
+	// AgentImage is the base image or the project's own image.
 	AgentImage     string
 	ForwarderImage string
+	// HelperImage runs VolumesService, the one container with root. It is
+	// the base image, never a project image; empty means AgentImage.
+	HelperImage string
 
 	// Pinned are read-write mounts of a path over itself. A mount point can't
 	// be renamed or removed, so the path stays where read-only mounts inside
@@ -354,7 +358,10 @@ while [ $# -gt 0 ]; do
   shift 2
 done`
 	s := hardening
-	s.Image = in.AgentImage
+	s.Image = in.HelperImage
+	if s.Image == "" {
+		s.Image = in.AgentImage
+	}
 	s.User = "0:0"
 	s.CapAdd = []string{"CHOWN"}
 	s.ReadOnly = true

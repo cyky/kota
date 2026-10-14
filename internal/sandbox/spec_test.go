@@ -464,6 +464,25 @@ func TestVolumesServiceOnlyChowns(t *testing.T) {
 	}
 }
 
+// TestProjectImageOnlyForAgent checks a project image runs the agent in
+// every mode, while the root volumes service keeps the base image.
+func TestProjectImageOnlyForAgent(t *testing.T) {
+	for _, mode := range []Mode{ModeRun, ModePrep, ModeFetch} {
+		in := depInputs(mode)
+		in.AgentImage, in.HelperImage = "localllm-project-abc:latest", "localllm-base:latest"
+		spec := Build(in)
+		if got := spec.Services[AgentService].Image; got != in.AgentImage {
+			t.Errorf("mode %d: agent image = %s", mode, got)
+		}
+		if got := spec.Services[VolumesService].Image; got != in.HelperImage {
+			t.Errorf("mode %d: volumes service image = %s, want the base image", mode, got)
+		}
+		if fwd, ok := spec.Services[ForwarderService]; ok && fwd.Image != in.ForwarderImage {
+			t.Errorf("mode %d: forwarder image = %s", mode, fwd.Image)
+		}
+	}
+}
+
 func TestDepVolume(t *testing.T) {
 	a := DepVolume("/Users/me/Projects/a", "node_modules")
 	if a != DepVolume("/Users/me/Projects/a", "node_modules") {

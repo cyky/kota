@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"localllm/internal/deps"
+	"localllm/internal/projectimage"
 	"localllm/internal/sandbox"
 )
 
@@ -116,6 +117,11 @@ func Plan(project string, defaults []string) (Layout, error) {
 	}
 	// The project config decides what prep runs with network access.
 	if err := p.file(deps.ConfigFile); err != nil {
+		return Layout{}, err
+	}
+	// The project's Dockerfile runs with network access at build time and
+	// decides what every later session runs on.
+	if err := p.file(projectimage.File); err != nil {
 		return Layout{}, err
 	}
 	if err := p.git(); err != nil {

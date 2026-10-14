@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -29,6 +30,48 @@ func BuildImage(tag string, context fs.FS) error {
 		return fmt.Errorf("copy build context: %w", err)
 	}
 	return run("docker", "build", "-t", tag, dir)
+}
+
+// BuildDockerfile builds an image from dockerfile with an empty build
+// context, so COPY and ADD can't take anything from the host, and labels
+// it.
+func BuildDockerfile(tag string, dockerfile []byte, labels map[string]string) error {
+	dir, err := os.MkdirTemp("", "localllm-build-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	args := []string{"build", "-t", tag, "-f", "-"}
+	for _, k := range slices.Sorted(maps.Keys(labels)) {
+		args = append(args, "--label", k+"="+labels[k])
+	}
+	cmd := exec.Command("docker", append(args, dir)...)
+	cmd.Stdin = bytes.NewReader(dockerfile)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+// InspectImage returns an image's ID and labels. A missing image is not an
+// error; exists is false.
+func InspectImage(tag string) (id string, labels map[string]string, exists bool, err error) {
+	out, err := exec.Command("docker", "image", "inspect", tag).Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && strings.Contains(strings.ToLower(string(exit.Stderr)), "no such image") {
+			return "", nil, false, nil
+		}
+		return "", nil, false, fmt.Errorf("inspect image %s: %w", tag, err)
+	}
+	var images []struct {
+		ID     string `json:"Id"`
+		Config struct {
+			Labels map[string]string
+		}
+	}
+	if err := json.Unmarshal(out, &images); err != nil || len(images) != 1 {
+		return "", nil, false, fmt.Errorf("inspect image %s: unexpected output", tag)
+	}
+	return images[0].ID, images[0].Config.Labels, true, nil
 }
 
 // RemoveVolumes deletes the named volumes. Missing ones are fine; one in use

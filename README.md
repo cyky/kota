@@ -14,6 +14,7 @@ Status: early. Network containment, secret masking and git-hook protection are v
 ```sh
 go install ./cmd/localllm
 localllm build                         # build the sandbox images
+localllm build [dir]                   # build dir's image from its localllm.Dockerfile
 localllm prep [dir]                    # install dependencies (network, no agent)
 localllm run [dir]                     # opencode in dir (default: current dir)
 localllm run [dir] -- opencode run "…" # any command inside the sandbox
@@ -113,4 +114,49 @@ Limits:
 - `.npmrc` is masked by default, so registry settings and tokens in it don't apply. Unmask it in `.localllmignore` (`!.npmrc`) if `prep` needs it; the agent can then read it too.
 - `prep` reports changed files that run things, like `run`.
 
-Integration tests need Docker: `go test -tags integration ./...`. The prep tests also need network access.
+## Project image
+
+A project that needs more than Node and Go can add a `localllm.Dockerfile` at its root, on top of the base image:
+
+```dockerfile
+FROM localllm-base:latest
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libsqlite3-dev \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+`localllm build dir` builds it as `localllm-project-<hash of the project path>`, and `prep`, `run` and `check` of that project then use it (`check` shows the image). Projects without the file use the base image. The build runs as root with network access, like any `docker build`, but with an empty build context, so `COPY` and `ADD` can't read the project or its masked secrets. Download what you need in a `RUN`, or copy it from another image (`COPY --from=...`). The file is read-only inside the sandbox, like `localllm.yaml`, so the agent can't change what the next build runs. A symlinked `localllm.Dockerfile` is refused.
+
+The image is labeled with the Dockerfile's hash and the base image it was built on. When the Dockerfile has changed or `localllm build` has rebuilt the base image since, sessions warn and use the old image. Without an image yet, they warn and use the base image. Each warning shows the `localllm build dir` command that fixes it. Run it again to pick up a new base image even when the Dockerfile is unchanged. The sandbox sets the user, capabilities and networks, so `USER` or `EXPOSE` in the Dockerfile don't change them. The root container that prepares dependency volumes always uses the base image.
+
+### Rust
+
+Copy the toolchain from the official image, the way the base image gets Go, and keep Cargo's downloads and build output in dependency volumes:
+
+```dockerfile
+FROM rust:1-slim-trixie AS rust
+
+FROM localllm-base:latest
+COPY --from=rust /usr/local/rustup /usr/local/rustup
+COPY --from=rust /usr/local/cargo /usr/local/cargo
+# The toolchain stays in the image; the registry and git checkouts go in
+# the .cargo-home dependency volume.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/workspace/.cargo-home \
+    PATH=/usr/local/cargo/bin:$PATH
+```
+
+```yaml
+# localllm.yaml
+prep:
+  command: cargo fetch
+  dirs: [.cargo-home, target]
+```
+
+Pin the `rust` tag to a version for reproducible builds. `cargo fetch` needs a `Cargo.lock`. In `run`, `cargo build` and `cargo test` then work offline; add `--offline` if Cargo tries the network anyway.
+
+To make Rust available to every project instead, add the same `COPY` and `ENV` lines to `assets/images/base/Dockerfile`, and, for a registry cache shared across projects like the Go module cache, a `CARGO_HOME` entry in `sandbox.sharedCaches` with `cargo fetch` in the fetch phase.
+
+## Tests
+
+Integration tests need Docker: `go test -tags integration ./...`. The prep and project image tests also need network access.

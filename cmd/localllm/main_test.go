@@ -12,9 +12,11 @@ import (
 
 	"localllm/internal/changereport"
 	"localllm/internal/deps"
+	"localllm/internal/docker"
 	"localllm/internal/opencode"
 	"localllm/internal/pi"
 	"localllm/internal/prepgate"
+	"localllm/internal/projectimage"
 	"localllm/internal/sandbox"
 )
 
@@ -382,5 +384,94 @@ func TestParseSessionArgs(t *testing.T) {
 		if sa.agent != c.agent || sa.dir != c.dir || sa.model != c.model || !slices.Equal(sa.ro, c.ro) || !slices.Equal(sa.command, c.command) {
 			t.Errorf("%q: got agent=%q dir=%q model=%q ro=%q command=%q", c.args, sa.agent, sa.dir, sa.model, sa.ro, sa.command)
 		}
+	}
+}
+
+// TestSessionImage checks which image prepareSession gives the agent and
+// the volumes service, with Docker's images faked.
+func TestSessionImage(t *testing.T) {
+	const dockerfile = "FROM localllm-base:latest\nRUN apt-get install -y tree\n"
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	cases := []struct {
+		name    string
+		files   map[string]string
+		built   bool
+		labels  string // Dockerfile the fake image was built from
+		image   string // "project" or the base image
+		warning string
+	}{
+		{name: "no Dockerfile", files: map[string]string{"package.json": "{}"}, image: baseImage},
+		{name: "built", files: map[string]string{projectimage.File: dockerfile, "package.json": "{}"}, built: true, labels: dockerfile, image: "project"},
+		{name: "not built", files: map[string]string{projectimage.File: dockerfile, "package.json": "{}"}, image: baseImage, warning: "has no image yet"},
+		{name: "stale", files: map[string]string{projectimage.File: dockerfile, "package.json": "{}"}, built: true, labels: "FROM localllm-base:latest\n", image: "project", warning: "changed since"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			project := fakeHome(t, c.files)
+			calls := 0
+			inspectImage = func(tag string) (string, map[string]string, bool, error) {
+				calls++
+				switch {
+				case tag == baseImage:
+					return "sha256:base", nil, true, nil
+				case tag == projectimage.Tag(project) && c.built:
+					return "sha256:project", projectimage.Labels([]byte(c.labels), "sha256:base"), true, nil
+				}
+				return "", nil, false, nil
+			}
+			t.Cleanup(func() { inspectImage = docker.InspectImage })
+
+			want := c.image
+			if want == "project" {
+				want = projectimage.Tag(project)
+			}
+			for _, mode := range []sandbox.Mode{sandbox.ModeRun, sandbox.ModePrep} {
+				sess, err := prepareSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, mode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(sess.cleanup)
+				specs := []sandbox.Compose{sess.spec}
+				if mode == sandbox.ModePrep {
+					specs = append(specs, sess.fetchSpec)
+				}
+				for _, spec := range specs {
+					if got := spec.Services[sandbox.AgentService].Image; got != want {
+						t.Errorf("mode %d: agent image = %s, want %s", mode, got, want)
+					}
+					if got := spec.Services[sandbox.VolumesService].Image; got != baseImage {
+						t.Errorf("mode %d: volumes service image = %s, want the base image", mode, got)
+					}
+				}
+				var out strings.Builder
+				sess.printWarnings(&out)
+				if c.warning == "" && strings.Contains(out.String(), "WARNING") {
+					t.Errorf("mode %d: unexpected warning: %s", mode, out.String())
+				}
+				if c.warning != "" && (!strings.Contains(out.String(), c.warning) || !strings.Contains(out.String(), "localllm build "+project)) {
+					t.Errorf("mode %d: output = %q, want %q and the build command", mode, out.String(), c.warning)
+				}
+			}
+			if c.files[projectimage.File] == "" && calls > 0 {
+				t.Error("inspected images for a project without a Dockerfile")
+			}
+		})
+	}
+}
+
+// TestDockerfileReadOnly checks the project Dockerfile is protected like
+// localllm.yaml, since a build runs it with network access.
+func TestDockerfileReadOnly(t *testing.T) {
+	project := fakeHome(t, map[string]string{})
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	sess, err := prepareSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sess.cleanup)
+	if !slices.Contains(sess.mounts.ReadOnly, sandbox.Workspace+"/"+projectimage.File) {
+		t.Errorf("%s is not among the probed read-only mounts %v", projectimage.File, sess.mounts.ReadOnly)
 	}
 }

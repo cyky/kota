@@ -33,6 +33,7 @@ import (
 	"localllm/internal/pi"
 	"localllm/internal/prepgate"
 	"localllm/internal/probe"
+	"localllm/internal/projectimage"
 	"localllm/internal/sandbox"
 )
 
@@ -55,6 +56,8 @@ const usage = `usage: localllm <command> [flags]
 
 commands:
   build                 build the sandbox images
+  build dir             build dir's image from its ` + projectimage.File + `, on top
+                        of the base image; prep, run and check then use it
   prep [dir]            install dir's dependencies with network access and
                         no agent, into volumes that run mounts offline
   run [flags] [dir] [-- cmd...]
@@ -86,7 +89,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "build":
-		err = cmdBuild()
+		err = cmdBuild(os.Args[2:])
 	case "prep":
 		err = cmdPrep(os.Args[2:])
 	case "run":
@@ -106,7 +109,22 @@ func main() {
 	}
 }
 
-func cmdBuild() error {
+func cmdBuild(args []string) error {
+	fset := flag.NewFlagSet("build", flag.ContinueOnError)
+	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	switch fset.NArg() {
+	case 0:
+		return buildBase()
+	case 1:
+		return buildProject(fset.Arg(0))
+	}
+	return errors.New("build takes at most one directory")
+}
+
+// buildBase builds the images every project shares.
+func buildBase() error {
 	images := map[string]string{"base": baseImage, "forwarder": forwarderImage}
 	for _, name := range []string{"forwarder", "base"} {
 		ctx, err := fs.Sub(assets.Images, "images/"+name)
@@ -119,6 +137,61 @@ func cmdBuild() error {
 		}
 	}
 	return nil
+}
+
+// buildProject builds a project's image from its Dockerfile on top of the
+// base image.
+func buildProject(dir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	paths, err := pathpolicy.Validate(dir, nil, pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT")))
+	if err != nil {
+		return err
+	}
+	project := paths.Project
+	dockerfile, err := projectimage.Read(project)
+	if err != nil {
+		return err
+	}
+	if dockerfile == nil {
+		return fmt.Errorf("no %s in %s; without one, sessions use the base image", projectimage.File, project)
+	}
+	baseID, _, ok, err := inspectImage(baseImage)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("the base image %s is missing; run 'localllm build' first", baseImage)
+	}
+	tag := projectimage.Tag(project)
+	fmt.Printf("building %s from %s (no build context: COPY and ADD can't read the project)\n", tag, filepath.Join(project, projectimage.File))
+	if err := docker.BuildDockerfile(tag, dockerfile, projectimage.Labels(dockerfile, baseID)); err != nil {
+		return fmt.Errorf("build %s: %w", tag, err)
+	}
+	return nil
+}
+
+// inspectImage is docker.InspectImage, replaced in tests.
+var inspectImage = docker.InspectImage
+
+// chooseImage returns the image for a session of project and a warning when
+// the project's own image is missing or stale.
+func chooseImage(project string) (projectimage.Choice, error) {
+	dockerfile, err := projectimage.Read(project)
+	if err != nil || dockerfile == nil {
+		return projectimage.Choice{Image: baseImage}, err
+	}
+	baseID, _, _, err := inspectImage(baseImage)
+	if err != nil {
+		return projectimage.Choice{}, err
+	}
+	_, labels, exists, err := inspectImage(projectimage.Tag(project))
+	if err != nil {
+		return projectimage.Choice{}, err
+	}
+	return projectimage.Choose(project, baseImage, dockerfile, projectimage.Image{Exists: exists, Labels: labels}, baseID), nil
 }
 
 // agentSetup is how a session runs one agent.
@@ -214,6 +287,26 @@ type session struct {
 	// mountPoints are directories Docker creates on the host for the
 	// dependency volumes, outermost first.
 	mountPoints []string
+	// image is the agent container's image: the base image or the
+	// project's own.
+	image projectimage.Choice
+}
+
+// printWarnings prints the layout's notes and warnings, and which image
+// the session uses when it isn't the base image or should be rebuilt.
+func (s *session) printWarnings(w io.Writer) {
+	for _, n := range s.layout.Notes {
+		fmt.Fprintln(w, "note:", n)
+	}
+	if s.image.Image != baseImage {
+		fmt.Fprintf(w, "note: using the project image %s, built from %s\n", s.image.Image, projectimage.File)
+	}
+	for _, warning := range s.layout.Warnings {
+		fmt.Fprintln(w, "WARNING:", warning)
+	}
+	if s.image.Warning != "" {
+		fmt.Fprintln(w, "WARNING:", s.image.Warning)
+	}
 }
 
 // cleanup removes what the session left on the host. Call it after the
@@ -323,6 +416,10 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
+	image, err := chooseImage(project)
+	if err != nil {
+		return nil, err
+	}
 	var protected, pinnedPaths []string
 	for _, m := range layout.Mounts {
 		if m.Pin {
@@ -357,7 +454,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 		return nil, err
 	}
 
-	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan}
+	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan, image: image}
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {
 		sess.mountPoints = append(sess.mountPoints, missingDirs(project, d.Path)...)
@@ -400,8 +497,9 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 		Mode:           mode,
 		Gateway:        gw,
 		GatewayKey:     key != "",
-		AgentImage:     baseImage,
+		AgentImage:     image.Image,
 		ForwarderImage: forwarderImage,
+		HelperImage:    baseImage,
 		Pinned:         pinned,
 		ReadOnly:       append(append(cfgMounts, protectedMounts...), paths.ReadOnly...),
 		Scratch:        agent.scratch,
@@ -494,12 +592,7 @@ func cmdRun(args []string) error {
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
 // agent. The containers are gone when it returns.
 func runSession(sess *session, model string, auto, skipCheck bool) error {
-	for _, n := range sess.layout.Notes {
-		fmt.Fprintln(os.Stderr, "note:", n)
-	}
-	for _, w := range sess.layout.Warnings {
-		fmt.Fprintln(os.Stderr, "WARNING:", w)
-	}
+	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'localllm check' to list them\n", n)
 	}
@@ -569,12 +662,7 @@ func cmdCheck(args []string) error {
 
 	printMounts(os.Stdout, sess.spec)
 	printMasks(os.Stdout, sess.layout)
-	for _, n := range sess.layout.Notes {
-		fmt.Println("note:", n)
-	}
-	for _, w := range sess.layout.Warnings {
-		fmt.Println("WARNING:", w)
-	}
+	sess.printWarnings(os.Stdout)
 
 	ds, err := docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
 	if err != nil {
@@ -736,12 +824,7 @@ func readYes(r io.Reader) bool {
 // runPrep runs the install steps with network access, without an agent,
 // the gateway or its key. The containers are gone when it returns.
 func runPrep(sess *session) error {
-	for _, n := range sess.layout.Notes {
-		fmt.Fprintln(os.Stderr, "note:", n)
-	}
-	for _, w := range sess.layout.Warnings {
-		fmt.Fprintln(os.Stderr, "WARNING:", w)
-	}
+	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); install scripts can't read them\n", n)
 	}
@@ -887,6 +970,7 @@ func printModels(w io.Writer, c models.Catalog, err error) {
 }
 
 func printMounts(w io.Writer, spec sandbox.Compose) {
+	fmt.Fprintf(w, "image: %s\n", spec.Services[sandbox.AgentService].Image)
 	fmt.Fprintln(w, "mounts:")
 	for _, v := range spec.Services[sandbox.AgentService].Volumes {
 		mode := "rw"
