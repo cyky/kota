@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -342,7 +343,13 @@ func depInputs(mode Mode) Inputs {
 }
 
 func TestPrepHasNetworkButNoGateway(t *testing.T) {
-	spec := Build(depInputs(ModePrep))
+	for _, mode := range []Mode{ModePrep, ModeFetch} {
+		t.Run(strconv.Itoa(int(mode)), func(t *testing.T) { testNetworkNoGateway(t, mode) })
+	}
+}
+
+func testNetworkNoGateway(t *testing.T, mode Mode) {
+	spec := Build(depInputs(mode))
 	agent := spec.Services[AgentService]
 
 	if _, ok := spec.Services[ForwarderService]; ok {
@@ -397,9 +404,12 @@ func TestSharedCaches(t *testing.T) {
 		// mounted and readOnly are what the mode should get.
 		mounted, readOnly bool
 	}{
-		{ModePrep, GoModCache, "GOMODCACHE", true, false},
-		{ModePrep, CorepackHome, "COREPACK_HOME", true, false},
-		{ModePrep, PnpmStore, "", true, false},
+		{ModeFetch, GoModCache, "GOMODCACHE", true, false},
+		{ModeFetch, CorepackHome, "COREPACK_HOME", true, false},
+		{ModeFetch, PnpmStore, "", true, false},
+		{ModePrep, GoModCache, "GOMODCACHE", true, true},
+		{ModePrep, CorepackHome, "COREPACK_HOME", true, true},
+		{ModePrep, PnpmStore, "", true, true},
 		{ModeRun, GoModCache, "GOMODCACHE", true, true},
 		{ModeRun, CorepackHome, "COREPACK_HOME", true, true},
 		{ModeRun, PnpmStore, "", false, false},

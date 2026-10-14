@@ -31,6 +31,19 @@ func BuildImage(tag string, context fs.FS) error {
 	return run("docker", "build", "-t", tag, dir)
 }
 
+// RemoveVolumes deletes the named volumes. Missing ones are fine; one in use
+// by a container is an error.
+func RemoveVolumes(names ...string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	out, err := exec.Command("docker", append([]string{"volume", "rm", "-f"}, names...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("remove volumes: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // Session is a started sandbox: networks and forwarder are up, the agent
 // container is run on demand. Close tears everything down.
 type Session struct {

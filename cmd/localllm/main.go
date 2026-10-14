@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"localllm/internal/opencode"
 	"localllm/internal/pathpolicy"
 	"localllm/internal/pi"
+	"localllm/internal/prepgate"
 	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
@@ -190,7 +192,10 @@ func agentFor(name string) (agentSetup, error) {
 
 // session holds everything needed to start one sandbox.
 type session struct {
-	spec       sandbox.Compose
+	spec sandbox.Compose
+	// fetchSpec is prep's fetch phase, which fills the shared caches before
+	// spec installs.
+	fetchSpec  sandbox.Compose
 	gateway    sandbox.Gateway
 	sessionDir string
 	project    string
@@ -388,7 +393,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 	} else {
 		stateVolume = sandbox.StateVolume(project, agent.name)
 	}
-	sess.spec = sandbox.Build(sandbox.Inputs{
+	in := sandbox.Inputs{
 		ProjectDir:     project,
 		UID:            os.Getuid(),
 		GID:            os.Getgid(),
@@ -404,7 +409,13 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 		Deps:           depMounts,
 		Env:            env,
 		Command:        command,
-	})
+	}
+	sess.spec = sandbox.Build(in)
+	if prep {
+		in.Mode = sandbox.ModeFetch
+		in.Command = []string{"sh", "-c", depPlan.FetchScript()}
+		sess.fetchSpec = sandbox.Build(in)
+	}
 	return sess, nil
 }
 
@@ -614,6 +625,10 @@ func cmdPrep(args []string) error {
 		sess.cleanup()
 		return fmt.Errorf("nothing to install in %s: no package.json or go.mod; set prep.command in %s", sess.project, deps.ConfigFile)
 	}
+	if err := confirmPrep(sess); err != nil {
+		sess.cleanup()
+		return err
+	}
 	before, err := changereport.Snapshot(sess.project)
 	if err != nil {
 		sess.cleanup()
@@ -622,7 +637,100 @@ func cmdPrep(args []string) error {
 	err = runPrep(sess)
 	sess.cleanup()
 	reportChanges(os.Stderr, sess.project, before)
-	return err
+	if err != nil {
+		return err
+	}
+	// The next prep asks about changes made after this point.
+	record, err := prepgate.Snapshot(sess.project)
+	if err == nil {
+		err = record.Save(prepRecordFile(sess.project))
+	}
+	if err != nil {
+		return fmt.Errorf("record prepped state: %w", err)
+	}
+	return nil
+}
+
+// prepRecordFile is where the project's state after its last prep is kept,
+// on the host and out of the sandbox's reach.
+func prepRecordFile(project string) string {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		cache = os.TempDir()
+	}
+	return filepath.Join(cache, "localllm", "prep", sandbox.ProjectName(project)+".json")
+}
+
+// confirmPrep asks the user to type y before a prep whose inputs changed
+// since the last prep, or before the first one: an agent session may have
+// written what prep is about to run with network access.
+func confirmPrep(sess *session) error {
+	last, err := prepgate.Load(prepRecordFile(sess.project))
+	if err != nil {
+		return fmt.Errorf("read the last prep's record: %w", err)
+	}
+	now, err := prepgate.Snapshot(sess.project)
+	if err != nil {
+		return err
+	}
+	d := prepgate.Decide(last, now, len(sess.deps.Hooks) > 0)
+	if !d.Ask() {
+		return nil
+	}
+	printPrepGate(os.Stderr, sess, d)
+	fmt.Fprint(os.Stderr, "Type y to run prep: ")
+	if !readYes(os.Stdin) {
+		return errors.New("prep not run")
+	}
+	return nil
+}
+
+func printPrepGate(w io.Writer, sess *session, d prepgate.Decision) {
+	if d.First {
+		fmt.Fprintf(w, "First prep of %s. These run with network access:\n", sess.project)
+		for _, s := range sess.deps.Steps {
+			for _, c := range []string{s.Fetch, s.Script} {
+				if c != "" {
+					fmt.Fprintf(w, "  %s: %s\n", s.Name, c)
+				}
+			}
+		}
+	} else {
+		fmt.Fprintf(w, "%s changed since its last prep, and prep runs with network access.\n", sess.project)
+		if len(d.Inputs) > 0 {
+			fmt.Fprintln(w, "Files that decide what prep runs:")
+			for _, line := range changereport.Warnings(d.Inputs) {
+				fmt.Fprintln(w, "  "+line)
+			}
+		}
+	}
+	if len(sess.deps.Hooks) > 0 {
+		fmt.Fprintln(w, "The install runs project code:")
+		for _, h := range sess.deps.Hooks {
+			fmt.Fprintln(w, "  "+h)
+		}
+	}
+	if len(d.Others) > 0 {
+		const max = 20
+		fmt.Fprintf(w, "%d other file(s) changed since the last prep, which that code may run:\n", len(d.Others))
+		for i, line := range changereport.Warnings(d.Others) {
+			if i == max {
+				fmt.Fprintf(w, "  ... and %d more\n", len(d.Others)-max)
+				break
+			}
+			fmt.Fprintln(w, "  "+line)
+		}
+	}
+	if !d.First {
+		fmt.Fprintf(w, "Review them first, e.g. git -C %s diff\n", sess.project)
+	}
+}
+
+// readYes reads one line and reports whether it is y or yes.
+func readYes(r io.Reader) bool {
+	line, _ := bufio.NewReader(r).ReadString('\n')
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes"
 }
 
 // runPrep runs the install steps with network access, without an agent,
@@ -640,16 +748,39 @@ func runPrep(sess *session) error {
 	for _, d := range sess.deps.Dirs {
 		fmt.Fprintf(os.Stderr, "dependency volume: %s\n", d.Path)
 	}
-	ds, err := docker.Start(sess.spec, sess.sessionDir, "")
+	// Fresh volumes, so nothing an agent session left in them runs here.
+	var vols []string
+	for _, d := range sess.deps.Dirs {
+		vols = append(vols, sandbox.DepVolume(sess.project, d.Path))
+	}
+	if err := docker.RemoveVolumes(vols...); err != nil {
+		return fmt.Errorf("%w (is a session for this project running?)", err)
+	}
+	if sess.deps.FetchScript() != "" {
+		fmt.Fprintln(os.Stderr, "fetching into the shared caches (no project code runs)")
+		if err := runAttached(sess.fetchSpec, sess.sessionDir); err != nil {
+			return fmt.Errorf("prep fetch failed: %w", err)
+		}
+	}
+	if sess.deps.Script() != "" {
+		fmt.Fprintln(os.Stderr, "installing (shared caches read-only)")
+		if err := runAttached(sess.spec, sess.sessionDir); err != nil {
+			return fmt.Errorf("prep install failed: %w", err)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "dependencies installed; 'localllm run' uses them offline")
+	return nil
+}
+
+// runAttached starts spec and runs its agent service attached to the
+// terminal. The containers are gone when it returns.
+func runAttached(spec sandbox.Compose, sessionDir string) error {
+	ds, err := docker.Start(spec, sessionDir, "")
 	if err != nil {
 		return err
 	}
 	defer ds.Close()
-	if err := ds.Interactive(); err != nil {
-		return fmt.Errorf("prep failed: %w", err)
-	}
-	fmt.Fprintln(os.Stderr, "dependencies installed; 'localllm run' uses them offline")
-	return nil
+	return ds.Interactive()
 }
 
 // printEmptyDeps hints at prep for each dependency volume that is empty.

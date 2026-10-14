@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,9 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"localllm/internal/changereport"
 	"localllm/internal/deps"
 	"localllm/internal/opencode"
 	"localllm/internal/pi"
+	"localllm/internal/prepgate"
 	"localllm/internal/sandbox"
 )
 
@@ -227,8 +230,30 @@ func TestPrepSession(t *testing.T) {
 	if depVolume != sandbox.DepVolume(project, "node_modules") {
 		t.Errorf("node_modules volume = %q", depVolume)
 	}
-	if len(agent.Command) != 3 || !strings.Contains(agent.Command[2], "pnpm install --store-dir "+sandbox.PnpmStore+" --frozen-lockfile") {
+	if len(agent.Command) != 3 || !strings.Contains(agent.Command[2], "pnpm install --offline --frozen-lockfile --store-dir "+sandbox.PnpmStore) {
 		t.Errorf("command = %q", agent.Command)
+	}
+
+	// The fetch phase runs only the fetch commands, with the same
+	// protections and no key.
+	fetch := sess.fetchSpec.Services[sandbox.AgentService]
+	if len(fetch.Command) != 3 || !strings.Contains(fetch.Command[2], "pnpm fetch --ignore-pnpmfile") || strings.Contains(fetch.Command[2], "pnpm install") {
+		t.Errorf("fetch command = %q", fetch.Command)
+	}
+	if len(fetch.PassEnv) > 0 {
+		t.Errorf("fetch pass env = %v", fetch.PassEnv)
+	}
+	fetchRO := map[string]bool{}
+	for _, v := range fetch.Volumes {
+		fetchRO[v.Target] = v.ReadOnly
+	}
+	for _, target := range []string{"/workspace/.env", "/workspace/.git/hooks", "/workspace/.git/config", "/workspace/localllm.yaml"} {
+		if !fetchRO[target] {
+			t.Errorf("%s is not read-only in fetch", target)
+		}
+	}
+	if ro, ok := fetchRO[sandbox.Workspace+"/node_modules"]; !ok || ro {
+		t.Error("fetch lacks the writable dependency volume, so pnpm fetch would write to the host")
 	}
 
 	// Docker creates the mount point; cleanup removes it while empty.
@@ -267,6 +292,46 @@ func TestPrepRefusesVolumeOverProtectedPath(t *testing.T) {
 	}
 	if _, err := prepareSession(sessionArgs{dir: project}, sandbox.ModePrep); err == nil || !strings.Contains(err.Error(), ".husky") {
 		t.Errorf("err = %v, want refusal of the volume over .husky", err)
+	}
+}
+
+func TestPrepGateOutput(t *testing.T) {
+	sess := &session{project: "/p", deps: deps.Plan{
+		Steps: []deps.Step{{Name: "pnpm", Fetch: "pnpm fetch", Script: "pnpm install"}},
+		Hooks: []string{"package.json: postinstall: node setup.js"},
+	}}
+	var first strings.Builder
+	printPrepGate(&first, sess, prepgate.Decision{First: true})
+	for _, want := range []string{"First prep of /p", "pnpm: pnpm fetch", "pnpm: pnpm install", "postinstall: node setup.js"} {
+		if !strings.Contains(first.String(), want) {
+			t.Errorf("first prep output lacks %q:\n%s", want, first.String())
+		}
+	}
+
+	var others []changereport.Change
+	for i := range 25 {
+		others = append(others, changereport.Change{Path: fmt.Sprintf("src/f%02d.js", i), Kind: changereport.Modified})
+	}
+	var changed strings.Builder
+	printPrepGate(&changed, sess, prepgate.Decision{
+		Inputs: []changereport.Change{{Path: "package.json", Kind: changereport.Modified}},
+		Others: others,
+	})
+	for _, want := range []string{"modified  package.json", "25 other file(s)", "src/f19.js", "... and 5 more", "git -C /p diff"} {
+		if !strings.Contains(changed.String(), want) {
+			t.Errorf("changed output lacks %q:\n%s", want, changed.String())
+		}
+	}
+	if strings.Contains(changed.String(), "src/f20.js") {
+		t.Errorf("output not truncated:\n%s", changed.String())
+	}
+}
+
+func TestReadYes(t *testing.T) {
+	for in, want := range map[string]bool{"y\n": true, "Yes\n": true, " y ": true, "n\n": false, "": false, "yy\n": false} {
+		if got := readYes(strings.NewReader(in)); got != want {
+			t.Errorf("readYes(%q) = %v", in, got)
+		}
 	}
 }
 

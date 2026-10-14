@@ -76,6 +76,72 @@ func Snapshot(dir string) (Files, error) {
 	return snapshot(dir, Watched)
 }
 
+// SnapshotMatching records the files in dir that match patterns, in the
+// syntax of Watched.
+func SnapshotMatching(dir string, patterns []string) (Files, error) {
+	return snapshot(dir, patterns)
+}
+
+// SnapshotAll records every file in dir outside the skipped directories,
+// which are skipped at any depth.
+func SnapshotAll(dir string) (Files, error) {
+	s := Files{}
+	var walk func(rel string) error
+	walk = func(rel string) error {
+		entries, err := os.ReadDir(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			p := strings.TrimPrefix(rel+"/"+e.Name(), "/")
+			if !e.IsDir() {
+				if err := s.record(dir, p); err != nil {
+					return err
+				}
+			} else if !slices.Contains(skipDirs, e.Name()) {
+				if err := walk(p); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(""); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// Digests returns each file's state as a string, for storing a snapshot.
+func (s Files) Digests() map[string]string {
+	out := make(map[string]string, len(s))
+	for p, e := range s {
+		out[p] = fmt.Sprintf("%o:%x:%s", uint32(e.mode), e.sum, e.link)
+	}
+	return out
+}
+
+// DiffDigests is Diff for snapshots stored with Digests.
+func DiffDigests(before, after map[string]string) []Change {
+	var out []Change
+	for p, b := range before {
+		a, ok := after[p]
+		switch {
+		case !ok:
+			out = append(out, Change{p, Deleted})
+		case a != b:
+			out = append(out, Change{p, Modified})
+		}
+	}
+	for p := range after {
+		if _, ok := before[p]; !ok {
+			out = append(out, Change{p, Added})
+		}
+	}
+	slices.SortFunc(out, func(x, y Change) int { return strings.Compare(x.Path, y.Path) })
+	return out
+}
+
 func snapshot(dir string, watched []string) (Files, error) {
 	ps := parse(watched)
 	s := Files{}
@@ -151,23 +217,7 @@ func (s Files) record(root, rel string) error {
 // and after, sorted by path. A change of content, permissions or symlink
 // target counts as modified.
 func Diff(before, after Files) []Change {
-	var out []Change
-	for p, b := range before {
-		a, ok := after[p]
-		switch {
-		case !ok:
-			out = append(out, Change{p, Deleted})
-		case a != b:
-			out = append(out, Change{p, Modified})
-		}
-	}
-	for p := range after {
-		if _, ok := before[p]; !ok {
-			out = append(out, Change{p, Added})
-		}
-	}
-	slices.SortFunc(out, func(x, y Change) int { return strings.Compare(x.Path, y.Path) })
-	return out
+	return DiffDigests(before.Digests(), after.Digests())
 }
 
 // Warnings formats changes for the user, one line each.

@@ -74,28 +74,41 @@ Other files that run things can't be locked without breaking normal work, so `ru
 
 ## Dependencies
 
-`run` is offline, so dependencies are installed beforehand with `localllm prep [dir]`. It runs the install in the same image, with the same masks and read-only `.git/hooks`, `.git/config`, `.envrc` and `localllm.yaml` as `run`, but on a normal network so registries are reachable, and without an agent, the forwarder or the gateway key. Run it again after changing a manifest. When the agent needs a new dependency, add it to the manifest on the host and re-run `prep`.
+`run` is offline, so dependencies are installed beforehand with `localllm prep [dir]`. It runs in the same image, with the same masks and read-only `.git/hooks`, `.git/config`, `.envrc` and `localllm.yaml` as `run`, but on a normal network so registries are reachable, and without an agent, the forwarder or the gateway key. Run it again after changing a manifest. When the agent needs a new dependency, add it to the manifest on the host and re-run `prep`.
 
 What it runs is detected from the project root:
-- `package.json`: pnpm, yarn or npm, chosen by the `packageManager` field, else by lockfile (`pnpm-lock.yaml`, `yarn.lock`, otherwise npm). pnpm and yarn come from corepack. With a lockfile, the install is frozen (`pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` or `--immutable`, `npm ci`).
-- `go.mod`: `go mod download`, in every module directory, or once at the root with a `go.work`.
+- `package.json`: pnpm, yarn or npm, chosen by the `packageManager` field, else by lockfile (`pnpm-lock.yaml`, `yarn.lock`, otherwise npm). pnpm and yarn come from corepack. `packageManager` must be a plain version (`pnpm@10.0.0`, optionally `+sha512.…`), not a URL. With a lockfile, the install is frozen (`pnpm install --offline --frozen-lockfile`, `yarn install --frozen-lockfile` or `--immutable`, `npm ci`).
+- `go.mod`: `go mod download`, in every module directory, or once at the root with a `go.work`. Keep `go.sum` complete (`go mod tidy` on the host).
 
 To run something else, put the command in `localllm.yaml` at the project root:
 
 ```yaml
 prep:
-  command: pnpm install && pnpm build   # replaces the detected commands; run by sh in /workspace
+  command: pnpm install && pnpm build   # replaces the detected installs; run by sh in /workspace
   dirs: [.venv]                         # extra dependency directories (see below)
 ```
 
-The command runs with network access, so `localllm.yaml` is read-only inside the sandbox, like `.localllmignore`.
+The command runs with network access, so `localllm.yaml` is read-only inside the sandbox, like `.localllmignore`. The detected fetches (below) still run before it.
 
-Dependency directories (`node_modules` at the root and in each workspace package, plus `prep.dirs`) are Docker volumes per project, `localllm-deps-<hash of the project path>-<hash of the directory>`, mounted over those paths in `prep`, `run` and `check`. Linux binaries never land in your project directory. A `node_modules` you have on the host stays untouched and isn't visible in the sandbox. A dependency directory may not be or contain a protected or masked path, or lie inside one, and may not go through a symlink.
+Dependency directories (`node_modules` at the root and in each workspace package, plus `prep.dirs`) are Docker volumes per project, `localllm-deps-<hash of the project path>-<hash of the directory>`, mounted over those paths in `prep`, `run` and `check`. Linux binaries never land in your project directory. A `node_modules` you have on the host stays untouched and isn't visible in the sandbox. A dependency directory may not be or contain a protected or masked path, or lie inside one, and may not go through a symlink. `prep` deletes and recreates these volumes each time, so nothing an agent session wrote into them runs during the install. It fails while a session of the project is running.
 
-Caches are shared by all projects: the Go module cache (`localllm-cache-gomod`, `GOMODCACHE`), corepack's pnpm and yarn releases (`localllm-cache-corepack`), and the pnpm store (`localllm-cache-pnpm-store`, `prep` only). `run` mounts the first two read-only, so one project's agent can't change code that another project uses, and sets `GOPROXY=off` and `COREPACK_ENABLE_NETWORK=0` so a missing dependency fails at once. `run` and `check` print a hint when a dependency directory is empty though its manifest exists.
+Caches are shared by all projects: the Go module cache (`localllm-cache-gomod`, `GOMODCACHE`), corepack's pnpm and yarn releases (`localllm-cache-corepack`), and the pnpm store (`localllm-cache-pnpm-store`). So that no project can plant code in another project's dependencies, only package manager code ever writes them. `prep` runs in two phases:
+1. Fetch, with the caches writable: `corepack install`, `pnpm fetch --ignore-pnpmfile` and `go mod download`. No project code runs: no lifecycle scripts, pnpmfile or `yarnPath`. What is downloaded is checked against the lockfile, `go.sum` or the `packageManager` hash, and the caches are keyed by content or version.
+2. Install, with the caches read-only: `pnpm install --offline`, `yarn install`, `npm ci` and the `localllm.yaml` command, which run lifecycle scripts.
+
+pnpm without a lockfile has nothing to fetch ahead, so its install uses a store of its own for that run; the next `prep` then uses the shared one. `run` mounts the Go module and corepack caches read-only, and sets `GOPROXY=off` and `COREPACK_ENABLE_NETWORK=0` so a missing dependency fails at once. `run` and `check` print a hint when a dependency directory is empty though its manifest exists.
+
+The agent can write the files that decide what `prep` runs, and `prep` runs them with network access. So `prep` asks you to type `y` first when:
+- it is the project's first `prep` (it lists the commands and the project code the install runs);
+- a file that decides what prep runs changed since the last successful `prep`: `package.json` files, lockfiles, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc.yml`, `.yarn/releases/`, `.yarn/plugins/`, patches, `go.mod`, `go.sum`, `go.work` or `localllm.yaml`;
+- the install runs project code (lifecycle scripts like `postinstall` or `prepare`, a pnpmfile, a `yarnPath`, the `localllm.yaml` command) and any other project file changed, since that code may run it.
+
+It lists what changed; review it (`git diff`) before you answer. Anything else, or no terminal, aborts. The state after each `prep` is recorded in `~/Library/Caches/localllm/prep/` (the user cache dir), outside the sandbox.
 
 Limits:
 - `prep` has the same network as any container: the internet, the LAN and the host's loopback services (including the gateway port, but without the key). It runs no containment probes.
+- Changes in dependency and build directories (`dist`, `build`, `vendor`, ...) don't count for the confirmation, as for the change report. Don't let install scripts run files from there.
+- The confirmation is only as good as your review. A dependency from the registry can still run its own install scripts during its project's `prep`, with the masks in place.
 - Install scripts can't change `.git/config`, so a `prepare` script that sets `core.hooksPath` (husky) fails or does nothing; run it on the host.
 - `.npmrc` is masked by default, so registry settings and tokens in it don't apply. Unmask it in `.localllmignore` (`!.npmrc`) if `prep` needs it; the agent can then read it too.
 - `prep` reports changed files that run things, like `run`.

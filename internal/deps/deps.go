@@ -1,6 +1,11 @@
 // Package deps works out how prep installs a project's dependencies: the
-// install commands, and the dependency directories that live in Docker
-// volumes instead of the project directory.
+// fetch and install commands, and the dependency directories that live in
+// Docker volumes instead of the project directory.
+//
+// Prep runs in two phases. Fetch commands run only package manager code,
+// which checks what it downloads against the project's lockfiles, and fill
+// the caches shared by all projects. Install commands may run project code
+// (lifecycle scripts, ConfigFile's command) and see those caches read-only.
 //
 // Detection covers npm, pnpm and yarn (run through corepack) and Go modules.
 // A project's ConfigFile can replace the detected commands and add
@@ -17,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -27,10 +33,14 @@ import (
 // command runs with network access, so it is read-only inside the sandbox.
 const ConfigFile = "localllm.yaml"
 
-// Step is one install command, run by sh in the project root.
+// Step is one package manager's commands, each run by sh in the project
+// root. Either may be empty.
 type Step struct {
 	// Name says what the step installs, e.g. "pnpm" or ConfigFile.
-	Name   string
+	Name string
+	// Fetch fills the shared caches. It must not run project code.
+	Fetch string
+	// Script installs into the project's dependency directories.
 	Script string
 }
 
@@ -47,6 +57,9 @@ type Dir struct {
 type Plan struct {
 	Steps []Step
 	Dirs  []Dir
+	// Hooks describe the project code the install runs: lifecycle scripts,
+	// pnpmfiles, a yarnPath, ConfigFile's command. One line each.
+	Hooks []string
 }
 
 // Options are the settings Detect needs from the sandbox.
@@ -88,7 +101,12 @@ func Detect(project string, opts Options) (Plan, error) {
 		return Plan{}, err
 	}
 	if cfg.Prep.Command != "" {
-		plan.Steps = []Step{{Name: ConfigFile, Script: cfg.Prep.Command}}
+		// The detected fetches still fill the caches the command can use.
+		for i := range plan.Steps {
+			plan.Steps[i].Script = ""
+		}
+		plan.Steps = append(plan.Steps, Step{Name: ConfigFile, Script: cfg.Prep.Command})
+		plan.Hooks = append(plan.Hooks, ConfigFile+": prep.command: "+cfg.Prep.Command)
 	}
 	for _, d := range cfg.Prep.Dirs {
 		clean, err := cleanDir(d)
@@ -184,34 +202,60 @@ func noSymlinks(project, rel string) error {
 
 // packageJSON is the part of package.json detection reads.
 type packageJSON struct {
-	PackageManager string          `json:"packageManager"`
-	Workspaces     json.RawMessage `json:"workspaces"`
+	PackageManager string            `json:"packageManager"`
+	Workspaces     json.RawMessage   `json:"workspaces"`
+	Scripts        map[string]string `json:"scripts"`
 }
 
-// node adds the install step for a package.json at the project root, and a
-// node_modules directory for the root and each workspace package.
+// lifecycleScripts are the package.json scripts a package manager runs for
+// the project itself during install.
+var lifecycleScripts = []string{
+	"preinstall", "install", "postinstall", "prepublish",
+	"preprepare", "prepare", "postprepare", "pnpm:devPreinstall",
+}
+
+// node adds the fetch and install commands for a package.json at the
+// project root, and a node_modules directory for the root and each
+// workspace package.
 func (p *Plan) node(project string, opts Options) error {
-	data, err := os.ReadFile(filepath.Join(project, "package.json"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	} else if err != nil {
+	pkg, ok, err := readPackage(project, "")
+	if err != nil || !ok {
 		return err
 	}
-	var pkg packageJSON
-	if err := json.Unmarshal(data, &pkg); err != nil {
-		return fmt.Errorf("parse package.json: %w", err)
+	manager, version, err := managerFromField(pkg.PackageManager)
+	if err != nil {
+		return err
 	}
-	manager, version := managerFromField(pkg.PackageManager)
 	if manager == "" {
 		manager = managerFromLockfile(project)
 	}
+	// corepack downloads the package manager in the fetch phase. A
+	// release named in the packageManager field is checked against its
+	// hash, if the field has one.
+	corepack := "corepack install"
+	if pkg.PackageManager == "" {
+		corepack = "corepack install -g " + map[string]string{"pnpm": "pnpm", "yarn": "yarn@1"}[manager]
+	}
 	switch manager {
 	case "pnpm":
-		script := "pnpm install --store-dir " + opts.PnpmStore
+		step := Step{Name: "pnpm"}
 		if exists(project, "pnpm-lock.yaml") {
-			script += " --frozen-lockfile"
+			// pnpm fetch fills the shared store from the lockfile without
+			// running any scripts; the pnpmfile is project code.
+			step.Fetch = corepack + " && pnpm fetch --ignore-pnpmfile --store-dir " + opts.PnpmStore
+			step.Script = "pnpm install --offline --frozen-lockfile --store-dir " + opts.PnpmStore
+		} else {
+			// Without a lockfile there is nothing to fetch ahead, so this
+			// install uses a store of its own, discarded afterwards.
+			step.Fetch = corepack
+			step.Script = `pnpm install --store-dir "$HOME/.pnpm-store"`
 		}
-		p.Steps = append(p.Steps, Step{Name: "pnpm", Script: script})
+		p.Steps = append(p.Steps, step)
+		for _, f := range []string{".pnpmfile.cjs", ".pnpmfile.mjs"} {
+			if exists(project, f) {
+				p.Hooks = append(p.Hooks, f+": pnpm hooks")
+			}
+		}
 	case "yarn":
 		berry := version != "" && !strings.HasPrefix(version, "1.") || exists(project, ".yarnrc.yml")
 		script := "yarn install"
@@ -222,42 +266,98 @@ func (p *Plan) node(project string, opts Options) error {
 		default:
 			script += " --frozen-lockfile"
 		}
-		p.Steps = append(p.Steps, Step{Name: "yarn", Script: script})
+		p.Steps = append(p.Steps, Step{Name: "yarn", Fetch: corepack, Script: script})
+		if yarnPath(project) != "" {
+			p.Hooks = append(p.Hooks, ".yarnrc.yml: yarnPath: "+yarnPath(project))
+		}
 	case "npm":
 		script := "npm install"
 		if exists(project, "package-lock.json") || exists(project, "npm-shrinkwrap.json") {
 			script = "npm ci"
 		}
 		p.Steps = append(p.Steps, Step{Name: "npm", Script: script})
-	default:
-		return fmt.Errorf("package.json: unsupported packageManager %q; set prep.command in %s", pkg.PackageManager, ConfigFile)
 	}
 
 	p.Dirs = append(p.Dirs, Dir{Path: "node_modules", Manifest: "package.json"})
+	p.scriptHooks("", pkg)
 	patterns, err := workspacePatterns(project, manager, pkg.Workspaces)
+	if err != nil || len(patterns) == 0 {
+		return err
+	}
+	var dirs []string
+	err = walk(project, func(rel string, names []string) {
+		if rel != "" && slices.Contains(names, "package.json") && matchWorkspace(patterns, rel) {
+			dirs = append(dirs, rel)
+		}
+	})
 	if err != nil {
 		return err
 	}
-	if len(patterns) == 0 {
-		return nil
-	}
-	return walk(project, func(rel string, names []string) {
-		if rel != "" && slices.Contains(names, "package.json") && matchWorkspace(patterns, rel) {
-			p.Dirs = append(p.Dirs, Dir{Path: rel + "/node_modules", Manifest: rel + "/package.json"})
+	for _, rel := range dirs {
+		p.Dirs = append(p.Dirs, Dir{Path: rel + "/node_modules", Manifest: rel + "/package.json"})
+		ws, _, err := readPackage(project, rel)
+		if err != nil {
+			return err
 		}
-	})
+		p.scriptHooks(rel, ws)
+	}
+	return nil
 }
 
+// readPackage reads the package.json in the directory rel.
+func readPackage(project, rel string) (packageJSON, bool, error) {
+	var pkg packageJSON
+	file := path.Join(rel, "package.json")
+	data, err := os.ReadFile(filepath.Join(project, filepath.FromSlash(file)))
+	if errors.Is(err, fs.ErrNotExist) {
+		return pkg, false, nil
+	} else if err != nil {
+		return pkg, false, err
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return pkg, false, fmt.Errorf("parse %s: %w", file, err)
+	}
+	return pkg, true, nil
+}
+
+// scriptHooks adds the lifecycle scripts of the package in rel.
+func (p *Plan) scriptHooks(rel string, pkg packageJSON) {
+	for _, name := range lifecycleScripts {
+		if cmd, ok := pkg.Scripts[name]; ok {
+			p.Hooks = append(p.Hooks, fmt.Sprintf("%s: %s: %s", path.Join(rel, "package.json"), name, cmd))
+		}
+	}
+}
+
+// yarnPath returns the yarnPath of .yarnrc.yml, the yarn release the
+// project runs instead of corepack's.
+func yarnPath(project string) string {
+	data, err := os.ReadFile(filepath.Join(project, ".yarnrc.yml"))
+	if err != nil {
+		return ""
+	}
+	var rc struct {
+		YarnPath string `yaml:"yarnPath"`
+	}
+	yaml.Unmarshal(data, &rc)
+	return rc.YarnPath
+}
+
+// packageManagerField is the packageManager values corepack may install:
+// a plain version with an optional hash. corepack also accepts URLs, which
+// would download any code into the shared cache.
+var packageManagerField = regexp.MustCompile(`^(npm|pnpm|yarn)@[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+sha(1|224|256|384|512)\.[0-9a-f]+)?$`)
+
 // managerFromField reads the packageManager field, e.g. "pnpm@9.1.0+sha...".
-func managerFromField(field string) (name, version string) {
+func managerFromField(field string) (name, version string, err error) {
 	if field == "" {
-		return "", ""
+		return "", "", nil
+	}
+	if !packageManagerField.MatchString(field) {
+		return "", "", fmt.Errorf("package.json: unsupported packageManager %q (want npm, pnpm or yarn with a plain version); set prep.command in %s", field, ConfigFile)
 	}
 	name, version, _ = strings.Cut(field, "@")
-	if name != "npm" && name != "pnpm" && name != "yarn" {
-		return field, ""
-	}
-	return name, version
+	return name, version, nil
 }
 
 func managerFromLockfile(project string) string {
@@ -343,8 +443,9 @@ func globMatch(pat, segs []string) bool {
 // golang adds a module download for each Go module. With a go.work at the
 // root, one download in the root covers every module of the workspace.
 func (p *Plan) golang(project string) error {
+	// go mod download runs no project code, so all of it is fetching.
 	if exists(project, "go.work") {
-		p.Steps = append(p.Steps, Step{Name: "go", Script: "go mod download"})
+		p.Steps = append(p.Steps, Step{Name: "go", Fetch: "go mod download"})
 		return nil
 	}
 	var dirs []string
@@ -358,7 +459,7 @@ func (p *Plan) golang(project string) error {
 		if d != "" {
 			script = "(cd " + shellQuote(d) + " && go mod download)"
 		}
-		p.Steps = append(p.Steps, Step{Name: "go", Script: script})
+		p.Steps = append(p.Steps, Step{Name: "go", Fetch: script})
 	}
 	return err
 }
@@ -390,15 +491,29 @@ func walk(project string, fn func(rel string, names []string)) error {
 	return visit("")
 }
 
-// Script returns the shell script that runs every step in order and stops
-// at the first failure.
+// FetchScript returns the shell script that runs every fetch command in
+// order and stops at the first failure, or "" when there is none.
+func (p Plan) FetchScript() string {
+	return script(p.Steps, func(s Step) string { return s.Fetch })
+}
+
+// Script returns the shell script that runs every install command in order
+// and stops at the first failure, or "" when there is none.
 func (p Plan) Script() string {
+	return script(p.Steps, func(s Step) string { return s.Script })
+}
+
+func script(steps []Step, cmd func(Step) string) string {
 	var b strings.Builder
-	b.WriteString("set -e\n")
-	for _, s := range p.Steps {
-		fmt.Fprintf(&b, "echo %s\n%s\n", shellQuote("==> "+s.Name+": "+s.Script), s.Script)
+	for _, s := range steps {
+		if c := cmd(s); c != "" {
+			fmt.Fprintf(&b, "echo %s\n%s\n", shellQuote("==> "+s.Name+": "+c), c)
+		}
 	}
-	return b.String()
+	if b.Len() == 0 {
+		return ""
+	}
+	return "set -e\n" + b.String()
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

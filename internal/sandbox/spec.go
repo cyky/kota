@@ -3,8 +3,8 @@
 // In a run session the agent container is attached only to an internal
 // network with no route out. A forwarder container joins both that network
 // and a normal one and forwards a single port to the model gateway, which
-// the agent reaches as http://gateway:8080. A prep session has a normal
-// network and no forwarder.
+// the agent reaches as http://gateway:8080. Prep and fetch sessions have a
+// normal network and no forwarder.
 package sandbox
 
 import (
@@ -103,34 +103,35 @@ const (
 	ModeRun Mode = iota
 	// ModePrep installs dependencies: a normal network, so package
 	// registries are reachable, and no forwarder or gateway key, so install
-	// scripts don't get the models.
+	// scripts don't get the models. The shared caches are read-only: install
+	// scripts are project code, and must not change what other projects use.
 	ModePrep
+	// ModeFetch fills the shared caches before ModePrep. It runs only
+	// package manager commands, which check what they download against the
+	// project's lockfiles, so it is the one mode with writable caches. The
+	// dependency volumes must be new: pnpm fetch fills node_modules/.pnpm,
+	// and nothing an agent session left there may run while the caches are
+	// writable.
+	ModeFetch
 )
 
-// sharedCache is a volume every project shares.
+// sharedCache is a volume every project shares. Only ModeFetch writes it,
+// so neither an agent nor an install script can plant code in another
+// project's dependencies.
 type sharedCache struct {
 	key, name, target, env string
-	// inRun is how a run session mounts it: read-only, so one project's
-	// agent can't plant code in another project's dependencies, or not at
-	// all.
-	inRun cacheAccess
+	// inRun reports whether a run session mounts it.
+	inRun bool
 }
 
-type cacheAccess int
-
-const (
-	readOnlyInRun cacheAccess = iota
-	prepOnly
-)
-
 var sharedCaches = []sharedCache{
-	{key: "gomod", name: "localllm-cache-gomod", target: GoModCache, env: "GOMODCACHE", inRun: readOnlyInRun},
+	{key: "gomod", name: "localllm-cache-gomod", target: GoModCache, env: "GOMODCACHE", inRun: true},
 	// corepack keeps the pnpm and yarn releases it downloads here, and the
 	// shims need them offline too.
-	{key: "corepack", name: "localllm-cache-corepack", target: CorepackHome, env: "COREPACK_HOME", inRun: readOnlyInRun},
+	{key: "corepack", name: "localllm-cache-corepack", target: CorepackHome, env: "COREPACK_HOME", inRun: true},
 	// pnpm copies packages from the store into node_modules, which is a
 	// different volume, so run doesn't need it.
-	{key: "pnpm-store", name: "localllm-cache-pnpm-store", target: PnpmStore, inRun: prepOnly},
+	{key: "pnpm-store", name: "localllm-cache-pnpm-store", target: PnpmStore},
 }
 
 // SharedCacheVolumes returns the names of the volumes shared by all
@@ -158,7 +159,7 @@ type Inputs struct {
 	Gateway    Gateway
 	// GatewayKey reports that a gateway API key is configured. The agent
 	// container then takes GatewayKeyEnv from docker compose's environment,
-	// so the key itself is never in the spec. Ignored for ModePrep.
+	// so the key itself is never in the spec. Only ModeRun uses it.
 	GatewayKey bool
 
 	AgentImage     string
@@ -228,9 +229,12 @@ func Build(in Inputs) Compose {
 		CapDrop:     []string{"ALL"},
 		SecurityOpt: []string{"no-new-privileges:true"},
 	}
-	prep := in.Mode == ModePrep
+	// prep is any mode with a normal network and no gateway.
+	prep := in.Mode != ModeRun
+	fetch := in.Mode == ModeFetch
 
-	env := map[string]string{"HOME": Home}
+	// corepack would otherwise add a packageManager field to package.json.
+	env := map[string]string{"HOME": Home, "COREPACK_ENABLE_AUTO_PIN": "0"}
 	if in.StateVolume != "" {
 		env["XDG_DATA_HOME"] = StateDir + "/data"
 		env["XDG_STATE_HOME"] = StateDir + "/state"
@@ -257,10 +261,10 @@ func Build(in Inputs) Compose {
 		named[stateKey] = NamedVolume{Name: in.StateVolume}
 	}
 	for _, c := range sharedCaches {
-		if !prep && c.inRun == prepOnly {
+		if !prep && !c.inRun {
 			continue
 		}
-		volumes = append(volumes, Volume{Type: "volume", Source: c.key, Target: c.target, ReadOnly: !prep})
+		volumes = append(volumes, Volume{Type: "volume", Source: c.key, Target: c.target, ReadOnly: !fetch})
 		named[c.key] = NamedVolume{Name: c.name, External: true}
 		if c.env != "" {
 			env[c.env] = c.target
