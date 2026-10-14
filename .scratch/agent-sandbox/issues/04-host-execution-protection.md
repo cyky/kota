@@ -1,7 +1,7 @@
 # DONE — 04 — Host-execution protection: read-only git hooks, git config, .envrc
 
 Status: done
-Resolved in: `1e44af2`
+Resolved in: `1e44af2`, `53d3968`
 
 ## Parent
 
@@ -56,3 +56,9 @@ Limits, documented in the README:
 - Files that hooks call (husky's `.husky/pre-commit`) and `.envrc` files in subdirectories stay writable.
 
 For 06: add `.husky/`, `.githooks/` and `**/.envrc` to the watch list.
+
+**2026-10-14 — Follow-up fix in `53d3968`.** An automated security review found two gaps in `1e44af2`, and both were confirmed:
+- The agent could create `.git/commondir` pointing at a directory it controls. In a throwaway repo, host git then ran a hook the agent planted there. A missing `commondir` is now seeded with `.` for the session (an empty file breaks git), mounted read-only, and removed afterwards. Submodule git dirs and linked worktrees' `commondir` files are covered too.
+- Only the last component of a protected path was checked for symlinks. Any symlink along the path is now refused.
+
+Not fixed, documented in the README: the agent can create a repository of its own (nested in a subdirectory, or bare-repository files at the root, which host git falls back to when `.git/HEAD` is broken). `safe.bareRepository=explicit` closes the bare case.
