@@ -24,6 +24,8 @@ type Mounts struct {
 	ReadOnly []string
 	// Pinned must be mount points.
 	Pinned []string
+	// Masked must read as empty.
+	Masked []string
 }
 
 // Run discovers the addresses that lead out of the sandbox, runs the probe
@@ -32,6 +34,7 @@ func Run(s *docker.Session, gw sandbox.Gateway, m Mounts) ([]probe.Result, error
 	t := Targets(s, gw)
 	t.ReadOnly = m.ReadOnly
 	t.Pinned = m.Pinned
+	t.Masked = m.Masked
 	probes := probe.Suite(t)
 	out, err := s.Capture("bash", "-c", probe.Script(probes))
 	if err != nil {

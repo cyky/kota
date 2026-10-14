@@ -2,7 +2,7 @@
 
 Run coding agents (opencode, later pi) in an offline Docker sandbox that can reach only the local model gateway (llama-swap).
 
-Status: early. Network containment and git-hook protection are verified before every session, but secret masking is not in place yet. Don't point it at projects with secrets until they land (see `.scratch/agent-sandbox/`).
+Status: early. Network containment, secret masking and git-hook protection are verified before every session. Don't point it at projects with secrets until they land (see `.scratch/agent-sandbox/`).
 
 ## Requirements
 
@@ -35,5 +35,12 @@ The agent can't plant code that runs later on the host. `.git/hooks`, `.git/conf
 - The agent can create a git repository of its own: `git init` in a non-git project, a nested repository in a subdirectory, or bare-repository files at the project root, which host git falls back to if `.git/HEAD` is broken. Their hooks and config run when you use git there on the host. Set `git config --global safe.bareRepository explicit` to close the bare-repository case.
 - In a linked worktree or a submodule checkout opened on its own, `.git` is a file that points outside the project. The file is read-only, and git does not work inside the sandbox.
 - Files that hooks call, like husky's `.husky/pre-commit`, stay writable. So does an `.envrc` in a subdirectory.
+
+Secrets are masked: inside the sandbox they read as an empty file or directory and can't be written, while the host files stay untouched. The default rules cover `.env` and `.env.*` (except `.env.example` and similar), keys and certificates (`*.pem`, `*.key`, `id_rsa*`, ...), `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, Terraform state, and `.aws/`, `.ssh/` and `.gnupg/` directories. Add your own in `.localllmignore` at the project root, in gitignore syntax. It comes after the defaults, so `!` can unmask a default, and it is read-only inside the sandbox. `localllm check` lists the masks. Limits:
+
+- Masks are computed at launch. A secret created on the host during a session isn't masked until the next one.
+- Dependency and build directories (`node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`, ...) aren't searched, to keep launch fast.
+- A masked file tracked in git reads as empty inside the sandbox, so a commit made there would record it emptied. `run` and `check` warn about these.
+- `--ro` paths aren't masked.
 
 Integration tests need Docker: `go test -tags integration ./...`.

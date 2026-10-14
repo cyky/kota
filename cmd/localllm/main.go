@@ -171,7 +171,7 @@ func prepareSession(sa sessionArgs) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	layout, err := mask.Plan(project)
+	layout, err := mask.Plan(project, mask.DefaultRules)
 	if err != nil {
 		return nil, err
 	}
@@ -200,10 +200,8 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		sess.cleanup()
 		return nil, err
 	}
-	for _, m := range pinned {
-		sess.mounts.Pinned = append(sess.mounts.Pinned, m.Target)
-	}
-	for _, m := range append(protected, paths.ReadOnly...) {
+	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
+	for _, m := range paths.ReadOnly {
 		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
 	}
 
@@ -262,6 +260,12 @@ func cmdRun(args []string) error {
 	for _, n := range sess.layout.Notes {
 		fmt.Fprintln(os.Stderr, "note:", n)
 	}
+	for _, w := range sess.layout.Warnings {
+		fmt.Fprintln(os.Stderr, "WARNING:", w)
+	}
+	if n := len(sess.mounts.Masked); n > 0 {
+		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'localllm check' to list them\n", n)
+	}
 
 	ds, err := docker.Start(sess.spec, sess.sessionDir)
 	if err != nil {
@@ -298,8 +302,12 @@ func cmdCheck(args []string) error {
 	defer sess.cleanup()
 
 	printMounts(os.Stdout, sess.spec)
+	printMasks(os.Stdout, sess.layout)
 	for _, n := range sess.layout.Notes {
 		fmt.Println("note:", n)
+	}
+	for _, w := range sess.layout.Warnings {
+		fmt.Println("WARNING:", w)
 	}
 
 	ds, err := docker.Start(sess.spec, sess.sessionDir)
@@ -334,6 +342,26 @@ func printMounts(w io.Writer, spec sandbox.Compose) {
 		fmt.Fprintf(w, "  %s  %s -> %s\n", mode, v.Source, v.Target)
 	}
 	fmt.Fprintf(w, "gateway (in sandbox): %s\n", sandbox.AgentGatewayURL())
+}
+
+func printMasks(w io.Writer, layout mask.Layout) {
+	fmt.Fprintf(w, "\nmasks (computed at launch; files created later are not masked; rules: defaults + %s):\n", mask.IgnoreFile)
+	n := 0
+	for _, m := range layout.Mounts {
+		if !m.Mask {
+			continue
+		}
+		n++
+		if m.Dir {
+			fmt.Fprintf(w, "  %s/ (directory, shown empty)\n", m.Path)
+		} else {
+			fmt.Fprintf(w, "  %s (shown empty)\n", m.Path)
+		}
+	}
+	if n == 0 {
+		fmt.Fprintln(w, "  none")
+	}
+	fmt.Fprintln(w)
 }
 
 func printResults(w io.Writer, results []probe.Result) {

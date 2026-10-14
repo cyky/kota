@@ -202,3 +202,44 @@ func TestSuitePinnedProbes(t *testing.T) {
 		t.Fatalf("pinned probe missing or not must-succeed: %+v", p)
 	}
 }
+
+// TestMaskedProbe runs the masked probe locally: only an empty file or an
+// empty directory passes.
+func TestMaskedProbe(t *testing.T) {
+	dir := t.TempDir()
+	emptyFile := filepath.Join(dir, "empty")
+	fullFile := filepath.Join(dir, "full")
+	emptyDir := filepath.Join(dir, "emptydir")
+	fullDir := filepath.Join(dir, "fulldir")
+	hiddenDir := filepath.Join(dir, "hiddendir")
+	for _, d := range []string{emptyDir, fullDir, hiddenDir} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, content := range map[string]string{emptyFile: "", fullFile: "secret", filepath.Join(fullDir, "x"): "", filepath.Join(hiddenDir, ".x"): ""} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[string]bool{emptyFile: true, emptyDir: true, fullFile: false, fullDir: false, hiddenDir: false, filepath.Join(dir, "missing"): false}
+
+	tt := testTargets()
+	for path := range want {
+		tt.Masked = append(tt.Masked, path)
+	}
+	for _, p := range Suite(tt) {
+		path, ok := strings.CutPrefix(p.Name, "masked ")
+		if !ok {
+			continue
+		}
+		passed := Result{Probe: p, ExitCode: exitCode(exec.Command(p.Cmd[0], p.Cmd[1:]...).Run())}.Passed()
+		if passed != want[path] {
+			t.Errorf("probe %q passed = %v, want %v", p.Name, passed, want[path])
+		}
+		delete(want, path)
+	}
+	if len(want) > 0 {
+		t.Errorf("no probes for %v", want)
+	}
+}

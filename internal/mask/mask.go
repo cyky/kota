@@ -1,8 +1,10 @@
 // Package mask plans the mounts laid over the project inside the sandbox.
 //
-// So far it protects files that the host later executes: git hooks, git
-// config and direnv's .envrc are mounted read-only over themselves, and the
-// git dir is mounted over itself so it can't be renamed away and replaced.
+// Secrets matching the default rules or the project's .localllmignore are
+// masked: hidden behind an empty read-only file or directory. Files the host
+// later executes (git hooks, git config, direnv's .envrc) are mounted
+// read-only over themselves, and the directories on the way to them are
+// mounted over themselves so they can't be renamed away and replaced.
 package mask
 
 import (
@@ -36,6 +38,9 @@ type Mount struct {
 	// then mounted read-only over itself. Cleanup removes it if unchanged.
 	// Used where an empty placeholder would break git.
 	Seed string
+	// Mask hides the content: an empty read-only file or directory is
+	// mounted over Path.
+	Mask bool
 }
 
 // Layout is the set of mounts for a project.
@@ -44,21 +49,202 @@ type Layout struct {
 	// Notes explain limits that apply to this project, e.g. that git won't
 	// work inside the sandbox.
 	Notes []string
+	// Warnings call for the user's attention, e.g. a masked file tracked in
+	// git.
+	Warnings []string
 }
 
-// Plan inspects project and returns its mounts. It refuses projects where a
-// protected path is a symlink, since a mount there can't hold.
-func Plan(project string) (Layout, error) {
+// IgnoreFile is the per-project mask rules file, in gitignore syntax.
+const IgnoreFile = ".localllmignore"
+
+// DefaultRules are the mask rules every project gets, before IgnoreFile.
+var DefaultRules = []string{
+	".env",
+	".env.*",
+	"!.env.example",
+	"!.env.sample",
+	"!.env.template",
+	"!.env.dist",
+	"*.pem",
+	"*.key",
+	"*.p12",
+	"*.pfx",
+	"*.jks",
+	"*.keystore",
+	"id_rsa*",
+	"id_dsa*",
+	"id_ecdsa*",
+	"id_ed25519*",
+	"!*.pub",
+	".npmrc",
+	".pypirc",
+	".netrc",
+	".git-credentials",
+	"*.tfstate",
+	"*.tfstate.*",
+	".aws/",
+	".ssh/",
+	".gnupg/",
+}
+
+// skipDirs are not searched for secrets: dependency and build output, which
+// is large and not where secrets live. .git is never searched.
+var skipDirs = []string{
+	".git", "node_modules", ".venv", "venv", "__pycache__", "vendor",
+	"target", "dist", "build", ".next", ".nuxt", ".gradle", ".terraform",
+	".direnv", ".cache",
+}
+
+// Plan inspects project and returns its mounts: masks for paths matching
+// defaults (normally DefaultRules) followed by the project's IgnoreFile, and
+// the protections for files the host executes. It refuses projects where a
+// protected path goes through a symlink, since a mount there can't hold.
+func Plan(project string, defaults []string) (Layout, error) {
+	project, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		return Layout{}, err
+	}
 	p := &planner{project: project}
 	if err := p.file(".envrc"); err != nil {
+		return Layout{}, err
+	}
+	// The rules file decides what the next session hides, so the agent
+	// mustn't edit it.
+	if err := p.file(IgnoreFile); err != nil {
 		return Layout{}, err
 	}
 	if err := p.git(); err != nil {
 		return Layout{}, err
 	}
+	rs, err := p.rules(defaults)
+	if err != nil {
+		return Layout{}, err
+	}
+	if err := p.masks(rs, ""); err != nil {
+		return Layout{}, err
+	}
+	p.dropInsideMasks()
 	p.pinAncestors()
 	slices.SortStableFunc(p.plan.Mounts, func(a, b Mount) int { return strings.Compare(a.Path, b.Path) })
+	if err := p.warnTracked(); err != nil {
+		return Layout{}, err
+	}
 	return p.plan, nil
+}
+
+func (p *planner) rules(defaults []string) (rules, error) {
+	rs, err := parseRules(defaults, "default rules")
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(p.project, IgnoreFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return rs, nil
+	} else if err != nil {
+		return nil, err
+	}
+	own, err := parseRules(strings.Split(string(data), "\n"), IgnoreFile)
+	if err != nil {
+		return nil, err
+	}
+	return append(rs, own...), nil
+}
+
+// masks walks the directory rel (slash-separated, "" for the root) and
+// masks every entry the rules exclude. Masked directories aren't entered.
+func (p *planner) masks(rs rules, rel string) error {
+	entries, err := os.ReadDir(filepath.Join(p.project, filepath.FromSlash(rel)))
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		path := strings.TrimPrefix(rel+"/"+e.Name(), "/")
+		if e.IsDir() && slices.Contains(skipDirs, e.Name()) {
+			continue
+		}
+		if rs.excluded(path, e.IsDir()) {
+			if err := p.mask(path, e); err != nil {
+				return err
+			}
+			continue
+		}
+		if e.IsDir() {
+			if err := p.masks(rs, path); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// mask hides path. A matching symlink hides what it points to, when that is
+// inside the project; anything outside isn't mounted and so not reachable.
+func (p *planner) mask(path string, e fs.DirEntry) error {
+	if e.Type()&fs.ModeSymlink == 0 {
+		p.add(Mount{Path: path, Dir: e.IsDir(), Mask: true})
+		return nil
+	}
+	target, err := filepath.EvalSymlinks(filepath.Join(p.project, filepath.FromSlash(path)))
+	if err != nil {
+		return nil // dangling
+	}
+	rel, err := filepath.Rel(p.project, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return nil
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return nil
+	}
+	p.add(Mount{Path: filepath.ToSlash(rel), Dir: info.IsDir(), Mask: true})
+	return nil
+}
+
+// dropInsideMasks removes mounts inside a masked directory: the mask
+// already hides them and holds them read-only, and Docker couldn't create
+// their mount points inside it.
+func (p *planner) dropInsideMasks() {
+	var dirs []string
+	for _, m := range p.plan.Mounts {
+		if m.Mask && m.Dir {
+			dirs = append(dirs, m.Path+"/")
+		}
+	}
+	p.plan.Mounts = slices.DeleteFunc(p.plan.Mounts, func(m Mount) bool {
+		return slices.ContainsFunc(dirs, func(d string) bool { return strings.HasPrefix(m.Path, d) })
+	})
+}
+
+// warnTracked warns about masked paths tracked in git: inside the sandbox
+// they read as empty, so a commit there would record them emptied.
+func (p *planner) warnTracked() error {
+	if info, err := p.lstat(".git"); err != nil || !info.IsDir() {
+		return nil
+	}
+	var masked []Mount
+	for _, m := range p.plan.Mounts {
+		if m.Mask {
+			masked = append(masked, m)
+		}
+	}
+	if len(masked) == 0 {
+		return nil
+	}
+	out, err := exec.Command("git", "-C", p.project, "ls-files", "-z").Output()
+	if err != nil {
+		return fmt.Errorf("list tracked files: %w", err)
+	}
+	tracked := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	for _, m := range masked {
+		hit := slices.ContainsFunc(tracked, func(f string) bool {
+			return f == m.Path || m.Dir && strings.HasPrefix(f, m.Path+"/")
+		})
+		if hit {
+			p.plan.Warnings = append(p.plan.Warnings, fmt.Sprintf(
+				"masked %s is tracked in git: it reads as empty inside the sandbox, so a commit made there would record it emptied", m.Path))
+		}
+	}
+	return nil
 }
 
 type planner struct {
@@ -97,10 +283,10 @@ func (p *planner) git() error {
 
 // gitDir protects the files of the git dir at rel that decide what git runs.
 func (p *planner) gitDir(rel string) error {
-	if err := p.dir(rel+"/hooks"); err != nil {
+	if err := p.dir(rel + "/hooks"); err != nil {
 		return err
 	}
-	if err := p.file(rel+"/config"); err != nil {
+	if err := p.file(rel + "/config"); err != nil {
 		return err
 	}
 	// commondir redirects git to another directory's config and hooks. Git
@@ -164,11 +350,10 @@ func (p *planner) hooksPath() error {
 	if !filepath.IsAbs(hooks) {
 		hooks = filepath.Join(p.project, hooks)
 	}
-	rel, err := filepath.Rel(p.project, filepath.Clean(hooks))
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+	rel, ok := p.inside(hooks)
+	if !ok {
 		return nil // outside the project, out of the agent's reach
 	}
-	rel = filepath.ToSlash(rel)
 	if rel != ".git/hooks" {
 		p.note("core.hooksPath is " + rel + ": it is read-only, but hook scripts there may run other project files (husky runs .husky/*), which stay writable")
 	}
@@ -226,11 +411,10 @@ func (p *planner) pointer(gitDir string) error {
 	if !filepath.IsAbs(wt) {
 		wt = filepath.Join(gitDir, wt)
 	}
-	rel, err := filepath.Rel(p.project, filepath.Join(wt, ".git"))
-	if err != nil || strings.HasPrefix(rel, "../") {
+	rel, ok := p.inside(filepath.Join(wt, ".git"))
+	if !ok {
 		return nil
 	}
-	rel = filepath.ToSlash(rel)
 	if err := p.noSymlinks(rel); err != nil {
 		return err
 	}
@@ -295,7 +479,7 @@ func (p *planner) firstMissing(rel string) string {
 // aside, and a fresh parent can hold anything.
 func (p *planner) pinAncestors() {
 	for _, m := range slices.Clone(p.plan.Mounts) {
-		if m.Pin {
+		if m.Pin || m.Mask {
 			continue
 		}
 		parts := strings.Split(m.Path, "/")
@@ -326,9 +510,16 @@ func (p *planner) noSymlinks(rel string) error {
 	return nil
 }
 
+// add adds m unless its path is already planned. A mask is stricter than
+// any other mount, so it takes over a path's read-only or pinned mount.
 func (p *planner) add(m Mount) {
-	if !slices.ContainsFunc(p.plan.Mounts, func(o Mount) bool { return o.Path == m.Path }) {
+	i := slices.IndexFunc(p.plan.Mounts, func(o Mount) bool { return o.Path == m.Path })
+	switch {
+	case i < 0:
 		p.plan.Mounts = append(p.plan.Mounts, m)
+	case m.Mask:
+		o := &p.plan.Mounts[i]
+		o.Mask, o.Pin = true, false
 	}
 }
 
@@ -338,8 +529,8 @@ func (p *planner) lstat(rel string) (fs.FileInfo, error) {
 	return os.Lstat(filepath.Join(p.project, filepath.FromSlash(rel)))
 }
 
-// Bind turns the layout into bind mounts for the sandbox. Placeholders are
-// backed by an empty file or directory created in scratch.
+// Bind turns the layout into bind mounts for the sandbox. Placeholders and
+// masks are backed by an empty file or directory created in scratch.
 func (l Layout) Bind(project, scratch string) (pinned, readOnly []sandbox.Mount, err error) {
 	emptyFile := filepath.Join(scratch, "empty-file")
 	emptyDir := filepath.Join(scratch, "empty-dir")
@@ -355,9 +546,9 @@ func (l Layout) Bind(project, scratch string) (pinned, readOnly []sandbox.Mount,
 			Target: sandbox.Workspace + "/" + m.Path,
 		}
 		switch {
-		case m.Placeholder && m.Dir:
+		case (m.Placeholder || m.Mask) && m.Dir:
 			mount.Source = emptyDir
-		case m.Placeholder:
+		case m.Placeholder || m.Mask:
 			mount.Source = emptyFile
 		}
 		if m.Pin {
@@ -367,6 +558,25 @@ func (l Layout) Bind(project, scratch string) (pinned, readOnly []sandbox.Mount,
 		}
 	}
 	return pinned, readOnly, nil
+}
+
+// Targets returns the in-sandbox paths the probes check: pinned paths must
+// be mount points, every other mount must reject writes, and masks must
+// read as empty.
+func (l Layout) Targets() (pinned, readOnly, masked []string) {
+	for _, m := range l.Mounts {
+		target := sandbox.Workspace + "/" + m.Path
+		switch {
+		case m.Pin:
+			pinned = append(pinned, target)
+		default:
+			readOnly = append(readOnly, target)
+		}
+		if m.Mask {
+			masked = append(masked, target)
+		}
+	}
+	return pinned, readOnly, masked
 }
 
 // Prepare writes the seeded files to the host. Call Cleanup afterwards.
@@ -429,6 +639,40 @@ func gitConfig(file string, args ...string) (string, error) {
 		return "", fmt.Errorf("git config -f %s: %w: %s", file, err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// inside returns the project-relative form of the absolute path abs, if it
+// lies inside the project. A path that is inside as written is returned as
+// written, so its own symlinks get checked: the agent could replace them.
+// Otherwise it counts when it resolves to inside, through links outside the
+// project that the agent can't touch.
+func (p *planner) inside(abs string) (string, bool) {
+	for _, candidate := range []string{filepath.Clean(abs), resolveExisting(abs)} {
+		rel, err := filepath.Rel(p.project, candidate)
+		if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, "../") {
+			return filepath.ToSlash(rel), true
+		}
+	}
+	return "", false
+}
+
+// resolveExisting resolves symlinks in the longest existing prefix of path,
+// so it compares with the resolved project path even when the rest doesn't
+// exist yet.
+func resolveExisting(path string) string {
+	path = filepath.Clean(path)
+	var rest []string
+	for {
+		if r, err := filepath.EvalSymlinks(path); err == nil {
+			return filepath.Join(append([]string{r}, rest...)...)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Join(append([]string{path}, rest...)...)
+		}
+		rest = append([]string{filepath.Base(path)}, rest...)
+		path = parent
+	}
 }
 
 func exists(path string) bool {

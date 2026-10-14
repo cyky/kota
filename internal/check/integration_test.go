@@ -237,7 +237,7 @@ func gitRepo(t *testing.T) string {
 // startProtected starts a sandbox for project with its mask layout applied.
 func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gateway, Mounts) {
 	t.Helper()
-	layout, err := mask.Plan(project)
+	layout, err := mask.Plan(project, mask.DefaultRules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,12 +250,7 @@ func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gate
 		t.Fatal(err)
 	}
 	var m Mounts
-	for _, p := range pinned {
-		m.Pinned = append(m.Pinned, p.Target)
-	}
-	for _, r := range readOnly {
-		m.ReadOnly = append(m.ReadOnly, r.Target)
-	}
+	m.Pinned, m.ReadOnly, m.Masked = layout.Targets()
 	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project, Pinned: pinned, ReadOnly: readOnly, Env: gitEnv}, nil)
 	return s, gw, m
 }
@@ -360,7 +355,7 @@ func TestEnvrcContentUnchanged(t *testing.T) {
 func TestPlaceholdersRemoved(t *testing.T) {
 	requireDocker(t)
 	project := gitRepo(t)
-	layout, err := mask.Plan(project)
+	layout, err := mask.Plan(project, mask.DefaultRules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +363,7 @@ func TestPlaceholdersRemoved(t *testing.T) {
 	s.Capture("true")
 	s.Close()
 	layout.Cleanup(project)
-	for _, rel := range []string{".envrc", ".git/commondir"} {
+	for _, rel := range []string{".envrc", ".git/commondir", mask.IgnoreFile} {
 		if _, err := os.Lstat(filepath.Join(project, rel)); !os.IsNotExist(err) {
 			t.Errorf("%s left on the host: %v", rel, err)
 		}
@@ -402,5 +397,74 @@ func TestMissingProtectionIsDetected(t *testing.T) {
 		if !slices.Contains(failed, want) {
 			t.Errorf("probe %q passed without the protection (failed: %v)", want, failed)
 		}
+	}
+}
+
+func TestSecretsMasked(t *testing.T) {
+	requireDocker(t)
+	project := gitRepo(t)
+	files := map[string]string{
+		".env":                    "API_KEY=secret\n",
+		"deploy/.aws/credentials": "aws_secret_access_key=secret\n",
+		"private/notes.txt":       "secret\n",
+		".localllmignore":         "private/\n",
+		"main.go":                 "package main\n",
+	}
+	for rel, content := range files {
+		path := filepath.Join(project, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, gw, mounts := startProtected(t, project)
+
+	results, err := Run(s, gw, mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePass(t, results)
+	for _, want := range []string{"masked /workspace/.env", "masked /workspace/deploy/.aws", "masked /workspace/private"} {
+		if !slices.ContainsFunc(results, func(r probe.Result) bool { return r.Name == want }) {
+			t.Errorf("no probe %q", want)
+		}
+	}
+
+	out, err := s.Capture("sh", "-c", `
+echo "env=[$(cat .env)] aws=[$(ls -A deploy/.aws)] private=[$(ls -A private)] main=[$(cat main.go)]"
+try() { name=$1; shift; "$@" >/dev/null 2>&1 && echo "ESCAPED $name"; }
+try env-write sh -c 'echo x > .env'
+try env-remove rm -f .env
+try aws-write touch deploy/.aws/new
+try ignore-edit sh -c 'echo "!.env" >> .localllmignore'
+echo DONE`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "env=[] aws=[] private=[] main=[package main]") || strings.Contains(out, "ESCAPED") || !strings.Contains(out, "DONE") {
+		t.Errorf("inside the sandbox:\n%s", out)
+	}
+	for rel, content := range files {
+		if b, _ := os.ReadFile(filepath.Join(project, rel)); string(b) != content {
+			t.Errorf("host %s = %q, want %q", rel, b, content)
+		}
+	}
+}
+
+func TestMissingMaskIsDetected(t *testing.T) {
+	requireDocker(t)
+	project := gitRepo(t)
+	if err := os.WriteFile(filepath.Join(project, ".env"), []byte("API_KEY=secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
+	results, err := Run(s, gw, Mounts{Masked: []string{"/workspace/.env"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(names(probe.Failed(results)), "masked /workspace/.env") {
+		t.Error("masked probe passed although .env is readable")
 	}
 }

@@ -61,6 +61,8 @@ type Targets struct {
 	// Pinned are paths that must be mount points, so they can't be renamed
 	// away and replaced.
 	Pinned []string
+	// Masked are paths that must read as an empty file or directory.
+	Masked []string
 }
 
 // Suite returns the network, workspace and mount probes for targets.
@@ -100,6 +102,13 @@ func Suite(t Targets) []Probe {
 			Name: "read-only " + path,
 			Cmd: []string{"sh", "-c", `[ -e "$1" ] || exit 0
 if [ -d "$1" ]; then f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"; else : >> "$1"; fi`, "sh", path},
+		})
+	}
+	for _, path := range t.Masked {
+		probes = append(probes, Probe{
+			Name:        "masked " + path,
+			Cmd:         []string{"sh", "-c", `if [ -d "$1" ]; then [ -z "$(ls -A "$1")" ]; else [ -f "$1" ] && [ ! -s "$1" ]; fi`, "sh", path},
+			MustSucceed: true,
 		})
 	}
 	for _, path := range t.Pinned {
