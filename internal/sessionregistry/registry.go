@@ -48,14 +48,59 @@ type Registry struct {
 type Lease struct {
 	registry *Registry
 	file     *os.File
+	caches   *os.File
 	session  Session
 	mu       sync.Mutex
+}
+
+// CachesBusy reports that a shared-cache reset conflicts with other sessions.
+type CachesBusy struct{ Exclusive bool }
+
+func (b *CachesBusy) Error() string {
+	if b.Exclusive {
+		return "shared caches are in use by another session; wait for all sessions to finish before cleaning shared caches"
+	}
+	return "shared caches are being cleaned; retry when cleanup finishes"
 }
 
 // Acquire atomically refuses an existing owner or locks the project. Paths
 // must already be resolved and validated by the caller. A free OS lock with
 // a nonempty record means the previous owner crashed, regardless of PID reuse.
 func (r *Registry) Acquire(project, agent, model string) (*Lease, error) {
+	return r.acquire(project, agent, model, false)
+}
+
+// AcquireExclusive reserves the shared caches as well as the project. Used
+// when cleaning shared caches; refuses while any other session is starting,
+// running or tearing down, including gaps between prep's Docker containers.
+func (r *Registry) AcquireExclusive(project, agent, model string) (*Lease, error) {
+	return r.acquire(project, agent, model, true)
+}
+
+func (r *Registry) acquire(project, agent, model string, exclusive bool) (*Lease, error) {
+	if err := os.MkdirAll(r.Dir, 0o700); err != nil {
+		return nil, err
+	}
+	caches, err := os.OpenFile(filepath.Join(r.Dir, ".caches"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			caches.Close()
+		}
+	}()
+	mode := syscall.LOCK_SH
+	if exclusive {
+		mode = syscall.LOCK_EX
+	}
+	if err := syscall.Flock(int(caches.Fd()), mode|syscall.LOCK_NB); err != nil {
+		if wouldBlock(err) {
+			return nil, &CachesBusy{Exclusive: exclusive}
+		}
+		return nil, err
+	}
 	guard, err := r.guard()
 	if err != nil {
 		return nil, err
@@ -69,7 +114,6 @@ func (r *Registry) Acquire(project, agent, model string) (*Lease, error) {
 	if err != nil {
 		return nil, err
 	}
-	keep := false
 	defer func() {
 		if !keep {
 			f.Close()
@@ -108,7 +152,7 @@ func (r *Registry) Acquire(project, agent, model string) (*Lease, error) {
 		return nil, err
 	}
 	keep = true
-	return &Lease{registry: r, file: f, session: s}, nil
+	return &Lease{registry: r, file: f, caches: caches, session: s}, nil
 }
 
 // Active returns a consistent snapshot of sessions with an OS lock still held.
@@ -199,15 +243,17 @@ func (l *Lease) Close() error {
 	guard, err := l.registry.guard()
 	if err != nil {
 		// Still release the OS lock; leave the record for recovery.
-		l.file.Close()
+		fileErr := l.file.Close()
+		cacheErr := l.caches.Close()
 		l.file = nil
-		return err
+		return errors.Join(err, fileErr, cacheErr)
 	}
 	defer guard.Close()
 	err = l.file.Truncate(0)
 	closeErr := l.file.Close()
+	cacheErr := l.caches.Close()
 	l.file = nil
-	return errors.Join(err, closeErr)
+	return errors.Join(err, closeErr, cacheErr)
 }
 
 func (r *Registry) filename(project string) string {

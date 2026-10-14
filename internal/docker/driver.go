@@ -74,6 +74,16 @@ func InspectImage(tag string) (id string, labels map[string]string, exists bool,
 	return images[0].ID, images[0].Config.Labels, true, nil
 }
 
+// ListVolumes lists existing volume names. Callers select exact names before
+// removal; the list includes old dependency volumes no longer in the manifest.
+func ListVolumes() ([]string, error) {
+	out, err := exec.Command("docker", "volume", "ls", "--format", "{{.Name}}").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("list volumes: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.Fields(string(out)), nil
+}
+
 // RemoveVolumes deletes the named volumes. Missing ones are fine; one in use
 // by a container is an error.
 func RemoveVolumes(names ...string) error {

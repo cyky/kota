@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -225,6 +226,23 @@ func DepVolume(projectDir, rel string) string {
 func DepVolumePrefix(projectDir string) string {
 	sum := sha256.Sum256([]byte(projectDir))
 	return fmt.Sprintf("localllm-deps-%s-", hex.EncodeToString(sum[:])[:32])
+}
+
+// ProjectVolumes selects existing state and dependency volumes belonging to
+// this exact resolved path, including volumes for retired agents/dependencies.
+func ProjectVolumes(projectDir string, available []string) []string {
+	sum := sha256.Sum256([]byte(projectDir))
+	hash := hex.EncodeToString(sum[:])[:32]
+	state := regexp.MustCompile(`^localllm-state-[a-z0-9][a-z0-9-]*-` + hash + `$`)
+	deps := regexp.MustCompile(`^` + regexp.QuoteMeta(DepVolumePrefix(projectDir)) + `[a-f0-9]{12}$`)
+	var volumes []string
+	for _, name := range available {
+		if state.MatchString(name) || deps.MatchString(name) {
+			volumes = append(volumes, name)
+		}
+	}
+	slices.Sort(volumes)
+	return slices.Compact(volumes)
 }
 
 // Build produces the compose spec for a session.

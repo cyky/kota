@@ -297,3 +297,53 @@ func TestActiveSkipsVanishedEntries(t *testing.T) {
 		t.Fatalf("vanished entry disrupted active sessions: %+v, %v", active, err)
 	}
 }
+
+func TestExclusiveCacheCleanup(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	first := acquire(t, r, "/projects/a", "prep", "")
+	second := acquire(t, r, "/projects/b", "run", "model")
+	// A lease without a container still protects the caches, including
+	// confirmations and the gap between prep's fetch/install containers.
+	_, err := r.AcquireExclusive("/projects/clean", "clean", "")
+	var busy *CachesBusy
+	if !errors.As(err, &busy) || !busy.Exclusive {
+		t.Fatalf("cache reset while projects active = %v", err)
+	}
+	first.Close()
+	if _, err := r.AcquireExclusive("/projects/clean", "clean", ""); err == nil {
+		t.Fatal("cache reset ignored remaining active project")
+	}
+	second.Close()
+	lease, err := r.AcquireExclusive("/projects/clean", "clean", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lease.Close() })
+	if _, err := r.Acquire("/projects/new", "run", ""); !errors.As(err, &busy) || busy.Exclusive {
+		t.Fatalf("session started during cache reset: %v", err)
+	}
+	if _, err := r.AcquireExclusive("/projects/other", "clean", ""); !errors.As(err, &busy) {
+		t.Fatalf("second cache reset started: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	acquire(t, r, "/projects/new", "run", "")
+}
+
+func TestFailedAcquireReleasesCacheReservation(t *testing.T) {
+	r := &Registry{Dir: t.TempDir(), Recover: func(string) error { return errors.New("recovery failed") }}
+	if err := os.WriteFile(r.filename("/projects/a"), []byte(`{"Project":"/projects/a"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.AcquireExclusive("/projects/a", "clean", ""); err == nil {
+		t.Fatal("failed recovery accepted")
+	}
+	lease := acquire(t, r, "/projects/b", "run", "")
+	lease.Close()
+	other, err := r.AcquireExclusive("/projects/c", "clean", "")
+	if err != nil {
+		t.Fatalf("failure leaked cache reservation: %v", err)
+	}
+	other.Close()
+}

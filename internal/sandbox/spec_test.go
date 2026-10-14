@@ -503,3 +503,24 @@ func TestDepVolume(t *testing.T) {
 		t.Errorf("dependency volume = %q", a)
 	}
 }
+
+func TestProjectVolumes(t *testing.T) {
+	const project = "/projects/app"
+	want := []string{
+		StateVolume(project, "opencode"), StateVolume(project, "pi"), StateVolume(project, "retired-agent"),
+		DepVolume(project, "node_modules"), DepVolume(project, "old-package/node_modules"),
+	}
+	slices.Sort(want)
+	available := append(slices.Clone(want),
+		StateVolume("/projects/app2", "opencode"), DepVolume("/projects/app2", "node_modules"),
+		DepVolumePrefix(project)+"abc", DepVolume(project, "node_modules")+"-backup",
+		StateVolume(project, "opencode")+"-backup", "unrelated-volume", want[0],
+	)
+	available = append(available, SharedCacheVolumes()...)
+	if got := ProjectVolumes(project, available); !slices.Equal(got, want) {
+		t.Errorf("project volumes = %v, want %v", got, want)
+	}
+	if got := ProjectVolumes(project, nil); len(got) != 0 {
+		t.Errorf("missing project has volumes: %v", got)
+	}
+}

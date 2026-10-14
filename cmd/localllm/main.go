@@ -67,6 +67,8 @@ commands:
   shell [flags] [dir]   verify containment, then open an interactive Bash
                         shell in the same sandbox as run
   check [flags] [dir]   show mounts and run the containment probes
+  clean [flags] [dir]  remove project state and dependency volumes after
+                        confirmation
 
 flags:
   --agent NAME          opencode (default) or pi; pi has no permission
@@ -78,6 +80,8 @@ flags:
   --auto                run only: opencode approves edits and commands without
                         asking; on uncommitted changes, asks you to type y
   --unsafe-skip-check   run only: start without the containment probes
+  --shared-caches       clean only: also reset shared caches; all sessions
+                        must be idle
 
 dir must be inside the allowed root ($LOCALLLM_ALLOWED_ROOT, default ~/Projects).
 A gateway API key (llama-swap apiKeys) is read from $LOCALLLM_GATEWAY_KEY or
@@ -101,6 +105,8 @@ func main() {
 		err = cmdShell(os.Args[2:])
 	case "check":
 		err = cmdCheck(os.Args[2:])
+	case "clean":
+		err = cmdClean(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -328,13 +334,14 @@ func (s *session) cleanup() {
 
 // sessionArgs are the [flags] [dir] [-- cmd...] shared by run, shell and check.
 type sessionArgs struct {
-	shell      bool
-	agent      string
-	gatewayURL string
-	model      string
-	dir        string
-	ro         []string
-	command    []string
+	exclusiveCaches bool
+	shell           bool
+	agent           string
+	gatewayURL      string
+	model           string
+	dir             string
+	ro              []string
+	command         []string
 }
 
 // stringList is a repeatable string flag.
@@ -617,7 +624,11 @@ func lockProject(sa sessionArgs, operation string) (*lockedProject, error) {
 	if sa.agent != "" {
 		operation += " (" + sa.agent + ")"
 	}
-	lease, err := r.Acquire(paths.Project, operation, "")
+	acquire := r.Acquire
+	if sa.exclusiveCaches {
+		acquire = r.AcquireExclusive
+	}
+	lease, err := acquire(paths.Project, operation, "")
 	if err != nil {
 		return nil, err
 	}
@@ -845,6 +856,86 @@ func cmdPrep(args []string) error {
 	if err != nil {
 		return fmt.Errorf("record prepped state: %w", err)
 	}
+	return nil
+}
+
+// cmdClean intentionally skips prepareSession: cleanup must work after a
+// manifest/config was removed or broken and must not create mount placeholders.
+func cmdClean(args []string) error {
+	fset := flag.NewFlagSet("clean", flag.ContinueOnError)
+	shared := fset.Bool("shared-caches", false, "also remove shared caches (requires all sessions to be idle)")
+	var dirs []string
+	for {
+		if err := fset.Parse(args); err != nil {
+			return err
+		}
+		if fset.NArg() == 0 {
+			break
+		}
+		dirs = append(dirs, fset.Arg(0))
+		args = fset.Args()[1:]
+	}
+	sa := sessionArgs{dir: ".", exclusiveCaches: *shared}
+	switch len(dirs) {
+	case 0:
+	case 1:
+		sa.dir = dirs[0]
+	default:
+		return errors.New("clean takes at most one directory")
+	}
+	lease, err := lockProject(sa, "clean")
+	if err != nil {
+		return err
+	}
+	defer releaseProject(lease)
+	return cleanProject(lease.paths.Project, *shared, os.Stdin, os.Stderr)
+}
+
+func cleanProject(project string, shared bool, in io.Reader, out io.Writer) error {
+	available, err := docker.ListVolumes()
+	if err != nil {
+		return err
+	}
+	volumes := sandbox.ProjectVolumes(project, available)
+	if shared {
+		for _, name := range sandbox.SharedCacheVolumes() {
+			if slices.Contains(available, name) {
+				volumes = append(volumes, name)
+			}
+		}
+		slices.Sort(volumes)
+	}
+	record := prepRecordFile(project)
+	_, err = os.Lstat(record)
+	hasRecord := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("inspect prep record: %w", err)
+	}
+	if len(volumes) == 0 && !hasRecord {
+		fmt.Fprintf(out, "nothing to clean for %s\n", project)
+		return nil
+	}
+	fmt.Fprintf(out, "Clean %s. Volumes to remove:\n", project)
+	for _, name := range volumes {
+		fmt.Fprintln(out, "  "+name)
+	}
+	if shared {
+		fmt.Fprintln(out, "Shared caches are included; other projects will need to fetch dependencies again.")
+	}
+	if hasRecord {
+		fmt.Fprintln(out, "The project's prep confirmation record will also be reset.")
+	}
+	fmt.Fprint(out, "Type y to clean: ")
+	if !readYes(in) {
+		return errors.New("clean not run")
+	}
+	if err := docker.RemoveVolumes(volumes...); err != nil {
+		return err
+	}
+	if err := os.Remove(record); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("reset prep record: %w", err)
+	}
+	fmt.Fprintln(out, "project volumes cleaned; run 'localllm prep' before the next session if dependencies are needed")
 	return nil
 }
 
