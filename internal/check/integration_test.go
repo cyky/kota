@@ -241,7 +241,10 @@ func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gate
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { layout.RemovePlaceholders(project) })
+	t.Cleanup(func() { layout.Cleanup(project) })
+	if err := layout.Prepare(project); err != nil {
+		t.Fatal(err)
+	}
 	pinned, readOnly, err := layout.Bind(project, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -291,6 +294,8 @@ try fsmonitor git config core.fsmonitor x
 try envrc-edit sh -c 'echo x > .envrc'
 try envrc-remove rm -f .envrc
 try git-rename mv .git .git-old
+try commondir sh -c 'echo ../evil > .git/commondir'
+try commondir-remove rm -f .git/commondir
 echo DONE`)
 	if err != nil {
 		t.Fatal(err)
@@ -345,9 +350,11 @@ func TestPlaceholdersRemoved(t *testing.T) {
 	s, _, _ := startProtected(t, project)
 	s.Capture("true")
 	s.Close()
-	layout.RemovePlaceholders(project)
-	if _, err := os.Lstat(filepath.Join(project, ".envrc")); !os.IsNotExist(err) {
-		t.Errorf(".envrc placeholder left on the host: %v", err)
+	layout.Cleanup(project)
+	for _, rel := range []string{".envrc", ".git/commondir"} {
+		if _, err := os.Lstat(filepath.Join(project, rel)); !os.IsNotExist(err) {
+			t.Errorf("%s left on the host: %v", rel, err)
+		}
 	}
 }
 

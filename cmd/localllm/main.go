@@ -106,7 +106,7 @@ type session struct {
 // cleanup removes what the session left on the host. Call it after the
 // containers are gone.
 func (s *session) cleanup() {
-	s.layout.RemovePlaceholders(s.project)
+	s.layout.Cleanup(s.project)
 	os.RemoveAll(s.sessionDir)
 }
 
@@ -193,8 +193,11 @@ func prepareSession(sa sessionArgs) (*session, error) {
 
 	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout}
 	pinned, protected, err := layout.Bind(project, sessionDir)
+	if err == nil {
+		err = layout.Prepare(project)
+	}
 	if err != nil {
-		os.RemoveAll(sessionDir)
+		sess.cleanup()
 		return nil, err
 	}
 	for _, m := range pinned {

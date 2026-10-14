@@ -30,8 +30,12 @@ type Mount struct {
 	Pin bool
 	// Placeholder is set when Path doesn't exist: an empty file or directory
 	// is mounted instead, so it can't be created. Docker leaves the empty
-	// mount point behind on the host; RemovePlaceholders cleans it up.
+	// mount point behind on the host; Cleanup removes it.
 	Placeholder bool
+	// Seed is written to Path on the host by Prepare when Path is missing,
+	// then mounted read-only over itself. Cleanup removes it if unchanged.
+	// Used where an empty placeholder would break git.
+	Seed string
 }
 
 // Layout is the set of mounts for a project.
@@ -87,15 +91,50 @@ func (p *planner) git() error {
 	if err := p.hooksPath(); err != nil {
 		return err
 	}
+	if err := p.worktrees(); err != nil {
+		return err
+	}
 	return p.modules()
 }
 
-// gitDir protects the hooks and config of the git dir at rel.
+// worktrees protects the commondir of each linked worktree's git dir, which
+// host git reads when used in that worktree.
+func (p *planner) worktrees() error {
+	if err := p.noSymlinks(".git/worktrees"); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Join(p.project, ".git", "worktrees"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		rel := ".git/worktrees/" + e.Name() + "/commondir"
+		if _, err := p.lstat(rel); err == nil {
+			if err := p.file(rel); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// gitDir protects the files of the git dir at rel that decide what git runs.
 func (p *planner) gitDir(rel string) error {
 	if err := p.dir(rel+"/hooks"); err != nil {
 		return err
 	}
 	if err := p.file(rel+"/config"); err != nil {
+		return err
+	}
+	// commondir redirects git to another directory's config and hooks. Git
+	// can't read an empty one, so a missing commondir is seeded with ".",
+	// which points back at the git dir itself.
+	if err := p.seeded(rel+"/commondir", ".\n"); err != nil {
 		return err
 	}
 	if on, _ := gitConfig(filepath.Join(p.project, rel, "config"), "--bool", "extensions.worktreeConfig"); on == "true" {
@@ -138,6 +177,9 @@ func (p *planner) modules() error { return p.modulesIn(".git/modules") }
 // modulesIn looks for git dirs under rel. Submodule names may contain
 // slashes, so a directory that isn't a git dir is searched further.
 func (p *planner) modulesIn(rel string) error {
+	if err := p.noSymlinks(rel); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(filepath.Join(p.project, filepath.FromSlash(rel)))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -183,8 +225,12 @@ func (p *planner) pointer(gitDir string) error {
 	if err != nil || strings.HasPrefix(rel, "../") {
 		return nil
 	}
+	rel = filepath.ToSlash(rel)
+	if err := p.noSymlinks(rel); err != nil {
+		return err
+	}
 	if info, err := p.lstat(rel); err == nil && info.Mode().IsRegular() {
-		p.add(Mount{Path: filepath.ToSlash(rel)})
+		p.add(Mount{Path: rel})
 	}
 	return nil
 }
@@ -195,6 +241,9 @@ func (p *planner) dir(rel string) error  { return p.protect(rel, true) }
 // protect adds a read-only mount for rel, or a placeholder when it is
 // missing, so it can't be created.
 func (p *planner) protect(rel string, dir bool) error {
+	if err := p.noSymlinks(rel); err != nil {
+		return err
+	}
 	info, err := p.lstat(rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -202,12 +251,43 @@ func (p *planner) protect(rel string, dir bool) error {
 		return nil
 	case err != nil:
 		return err
-	case info.Mode()&fs.ModeSymlink != 0:
-		return fmt.Errorf("refusing to protect %s: it is a symlink, which a read-only mount can't hold in place", rel)
 	case info.IsDir() != dir:
 		return fmt.Errorf("refusing to protect %s: expected a %s", rel, kind(dir))
 	}
 	p.add(Mount{Path: rel, Dir: dir})
+	return nil
+}
+
+// seeded protects the file rel, seeding it with content when missing.
+func (p *planner) seeded(rel, content string) error {
+	if err := p.noSymlinks(rel); err != nil {
+		return err
+	}
+	if _, err := p.lstat(rel); errors.Is(err, fs.ErrNotExist) {
+		p.add(Mount{Path: rel, Seed: content})
+		return nil
+	}
+	return p.file(rel)
+}
+
+// noSymlinks refuses rel when it or any directory on the way to it is a
+// symlink: the agent could replace the link with a real directory, and a
+// mount through a link may land somewhere else. Components that don't exist
+// end the check.
+func (p *planner) noSymlinks(rel string) error {
+	path := ""
+	for _, part := range strings.Split(rel, "/") {
+		path = strings.TrimPrefix(path+"/"+part, "/")
+		info, err := p.lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to protect %s: %s is a symlink, which a read-only mount can't hold in place", rel, path)
+		}
+	}
 	return nil
 }
 
@@ -254,20 +334,46 @@ func (l Layout) Bind(project, scratch string) (pinned, readOnly []sandbox.Mount,
 	return pinned, readOnly, nil
 }
 
-// RemovePlaceholders deletes the empty mount points Docker created on the
-// host for placeholder mounts. Anything that is no longer empty is kept.
-func (pl Layout) RemovePlaceholders(project string) {
-	// Deepest first, so a placeholder inside another is removed before it.
-	for _, m := range slices.Backward(pl.Mounts) {
-		if !m.Placeholder {
+// Prepare writes the seeded files to the host. Call Cleanup afterwards.
+func (pl Layout) Prepare(project string) error {
+	for _, m := range pl.Mounts {
+		if m.Seed == "" {
 			continue
 		}
+		path := filepath.Join(project, filepath.FromSlash(m.Path))
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			return fmt.Errorf("seed %s: %w", m.Path, err)
+		}
+		_, err = f.WriteString(m.Seed)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("seed %s: %w", m.Path, err)
+		}
+	}
+	return nil
+}
+
+// Cleanup removes what the session added to the host: seeded files that
+// are unchanged, and the empty mount points Docker created for placeholder
+// mounts. Anything with other content is kept.
+func (pl Layout) Cleanup(project string) {
+	// Deepest first, so a placeholder inside another is removed before it.
+	for _, m := range slices.Backward(pl.Mounts) {
 		path := filepath.Join(project, filepath.FromSlash(m.Path))
 		info, err := os.Lstat(path)
 		if err != nil {
 			continue
 		}
-		if m.Dir && info.IsDir() || !m.Dir && info.Mode().IsRegular() && info.Size() == 0 {
+		switch {
+		case m.Seed != "":
+			if b, err := os.ReadFile(path); err == nil && string(b) == m.Seed {
+				os.Remove(path)
+			}
+		case !m.Placeholder:
+		case m.Dir && info.IsDir(), !m.Dir && info.Mode().IsRegular() && info.Size() == 0:
 			os.Remove(path) // fails, and keeps it, for a non-empty directory
 		}
 	}

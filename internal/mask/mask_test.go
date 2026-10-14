@@ -64,6 +64,7 @@ var (
 	gitPin       = Mount{Path: ".git", Dir: true, Pin: true}
 	gitHooks     = Mount{Path: ".git/hooks", Dir: true}
 	gitConfigRO  = Mount{Path: ".git/config"}
+	gitCommondir = Mount{Path: ".git/commondir", Seed: ".\n"}
 	envrcMissing = Mount{Path: ".envrc", Placeholder: true}
 )
 
@@ -84,7 +85,7 @@ func TestPlan(t *testing.T) {
 		{
 			name:  "git repo",
 			setup: repo,
-			want:  []Mount{envrcMissing, gitPin, gitConfigRO, gitHooks},
+			want:  []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks},
 		},
 		{
 			name: "existing envrc",
@@ -93,7 +94,7 @@ func TestPlan(t *testing.T) {
 				write(t, filepath.Join(dir, ".envrc"), "use flake\n")
 				return dir
 			},
-			want: []Mount{{Path: ".envrc"}, gitPin, gitConfigRO, gitHooks},
+			want: []Mount{{Path: ".envrc"}, gitPin, gitCommondir, gitConfigRO, gitHooks},
 		},
 		{
 			name: "missing hooks dir",
@@ -104,7 +105,7 @@ func TestPlan(t *testing.T) {
 				}
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, {Path: ".git/hooks", Dir: true, Placeholder: true}},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, {Path: ".git/hooks", Dir: true, Placeholder: true}},
 		},
 		{
 			name: "hooksPath inside project",
@@ -114,7 +115,7 @@ func TestPlan(t *testing.T) {
 				git(t, dir, "config", "core.hooksPath", ".husky/_")
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, gitHooks, {Path: ".husky/_", Dir: true}},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: ".husky/_", Dir: true}},
 			note: "core.hooksPath is .husky/_",
 		},
 		{
@@ -124,7 +125,7 @@ func TestPlan(t *testing.T) {
 				git(t, dir, "config", "core.hooksPath", "githooks")
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, gitHooks, {Path: "githooks", Dir: true, Placeholder: true}},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: "githooks", Dir: true, Placeholder: true}},
 			note: "core.hooksPath is githooks",
 		},
 		{
@@ -134,7 +135,7 @@ func TestPlan(t *testing.T) {
 				git(t, dir, "config", "core.hooksPath", filepath.Join(dir, "githooks"))
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, gitHooks, {Path: "githooks", Dir: true, Placeholder: true}},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: "githooks", Dir: true, Placeholder: true}},
 			note: "core.hooksPath is githooks",
 		},
 		{
@@ -145,7 +146,7 @@ func TestPlan(t *testing.T) {
 				t.Cleanup(func() { os.Remove(os.Getenv("GIT_CONFIG_GLOBAL")) })
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, gitHooks, {Path: ".githooks", Dir: true, Placeholder: true}},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks, {Path: ".githooks", Dir: true, Placeholder: true}},
 			note: "core.hooksPath is .githooks",
 		},
 		{
@@ -155,7 +156,7 @@ func TestPlan(t *testing.T) {
 				git(t, dir, "config", "core.hooksPath", t.TempDir())
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, gitHooks},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks},
 		},
 		{
 			name: "hooksPath is the default",
@@ -164,7 +165,7 @@ func TestPlan(t *testing.T) {
 				git(t, dir, "config", "core.hooksPath", ".git/hooks")
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, gitHooks},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks},
 		},
 		{
 			name: "worktree config enabled",
@@ -173,7 +174,7 @@ func TestPlan(t *testing.T) {
 				git(t, dir, "config", "extensions.worktreeConfig", "true")
 				return dir
 			},
-			want: []Mount{envrcMissing, gitPin, gitConfigRO, {Path: ".git/config.worktree", Placeholder: true}, gitHooks},
+			want: []Mount{envrcMissing, gitPin, gitCommondir, gitConfigRO, {Path: ".git/config.worktree", Placeholder: true}, gitHooks},
 		},
 		{
 			name: "linked worktree",
@@ -195,7 +196,8 @@ func TestPlan(t *testing.T) {
 				return dir
 			},
 			want: []Mount{
-				envrcMissing, gitPin, gitConfigRO, gitHooks,
+				envrcMissing, gitPin, gitCommondir, gitConfigRO, gitHooks,
+				{Path: ".git/modules/libs/sub/commondir", Seed: ".\n"},
 				{Path: ".git/modules/libs/sub/config"},
 				{Path: ".git/modules/libs/sub/hooks", Dir: true},
 				{Path: "libs/sub/.git"},
@@ -239,7 +241,7 @@ func TestPlanRefusesSymlinks(t *testing.T) {
 	}
 }
 
-func TestRemovePlaceholders(t *testing.T) {
+func TestCleanup(t *testing.T) {
 	dir := t.TempDir()
 	p := Layout{Mounts: []Mount{
 		{Path: ".envrc", Placeholder: true},
@@ -257,7 +259,7 @@ func TestRemovePlaceholders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p.RemovePlaceholders(dir)
+	p.Cleanup(dir)
 
 	for _, gone := range []string{".envrc", "githooks"} {
 		if _, err := os.Lstat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
@@ -297,5 +299,53 @@ func TestBind(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(filepath.Join(scratch, "empty-dir")); err != nil || len(entries) != 0 {
 		t.Errorf("empty dir: %v %v", entries, err)
+	}
+}
+
+func TestPlanProtectsLinkedWorktreeCommondir(t *testing.T) {
+	isolateGit(t)
+	dir := repo(t)
+	git(t, dir, "worktree", "add", "-q", filepath.Join(t.TempDir(), "wt"))
+	p := mustPlan(t, dir)
+	if !slices.Contains(p.Mounts, Mount{Path: ".git/worktrees/wt/commondir"}) {
+		t.Errorf("worktree commondir not protected: %+v", p.Mounts)
+	}
+}
+
+func TestPlanRefusesSymlinkOnTheWay(t *testing.T) {
+	isolateGit(t)
+	dir := repo(t)
+	// core.hooksPath = tools/hooks, where tools is a link the agent could
+	// replace with a real directory holding its own hooks.
+	real := filepath.Join(dir, "real-tools")
+	write(t, filepath.Join(real, "hooks/pre-commit"), "")
+	if err := os.Symlink(real, filepath.Join(dir, "tools")); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "config", "core.hooksPath", "tools/hooks")
+	if _, err := Plan(dir); err == nil || !strings.Contains(err.Error(), "tools is a symlink") {
+		t.Errorf("err = %v, want refusal naming tools", err)
+	}
+}
+
+func TestPrepareAndCleanupSeeds(t *testing.T) {
+	dir := t.TempDir()
+	l := Layout{Mounts: []Mount{{Path: "seeded", Seed: ".\n"}, {Path: "changed", Seed: ".\n"}}}
+	if err := l.Prepare(dir); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "seeded")); string(b) != ".\n" {
+		t.Errorf("seeded = %q", b)
+	}
+	write(t, filepath.Join(dir, "changed"), "../elsewhere\n")
+	l.Cleanup(dir)
+	if _, err := os.Lstat(filepath.Join(dir, "seeded")); !os.IsNotExist(err) {
+		t.Error("unchanged seed not removed")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "changed")); err != nil {
+		t.Error("changed seed removed")
+	}
+	if err := l.Prepare(dir); err == nil {
+		t.Error("Prepare overwrote an existing file")
 	}
 }
