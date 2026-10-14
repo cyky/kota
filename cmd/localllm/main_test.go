@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"localllm/internal/prepgate"
 	"localllm/internal/projectimage"
 	"localllm/internal/sandbox"
+	"localllm/internal/sessionregistry"
 )
 
 // TestSessionMountsNoHostAgentConfig builds a session for each agent against
@@ -62,7 +64,7 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.agent, func(t *testing.T) {
-			sess, err := prepareSession(sessionArgs{
+			sess, err := prepareTestSession(sessionArgs{
 				agent:      c.agent,
 				gatewayURL: defaultGateway,
 				dir:        filepath.Join(home, "Projects/app"),
@@ -134,7 +136,7 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sess, err := prepareSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
+	sess, err := prepareTestSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +188,14 @@ func fakeHome(t *testing.T, files map[string]string) string {
 	return project
 }
 
+func prepareTestSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
+	paths, err := resolveSessionPaths(sa)
+	if err != nil {
+		return nil, err
+	}
+	return prepareSession(sa, mode, paths)
+}
+
 // TestPrepSession checks prep gets the same protections as run, the
 // dependency volumes, the install script, and no key or agent state.
 func TestPrepSession(t *testing.T) {
@@ -197,7 +207,7 @@ func TestPrepSession(t *testing.T) {
 	t.Setenv("LOCALLLM_GATEWAY_KEY", "sk-unit-test-secret")
 	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
 
-	sess, err := prepareSession(sessionArgs{dir: project}, sandbox.ModePrep)
+	sess, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +288,7 @@ func TestHostDependencyDirKept(t *testing.T) {
 	if err := os.Mkdir(nm, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sess, err := prepareSession(sessionArgs{dir: project}, sandbox.ModePrep)
+	sess, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +303,7 @@ func TestPrepRefusesVolumeOverProtectedPath(t *testing.T) {
 	if out, err := exec.Command("git", "-C", project, "config", "core.hooksPath", ".husky/_").CombinedOutput(); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if _, err := prepareSession(sessionArgs{dir: project}, sandbox.ModePrep); err == nil || !strings.Contains(err.Error(), ".husky") {
+	if _, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep); err == nil || !strings.Contains(err.Error(), ".husky") {
 		t.Errorf("err = %v, want refusal of the volume over .husky", err)
 	}
 }
@@ -339,7 +349,7 @@ func TestReadYes(t *testing.T) {
 }
 
 func TestUnknownAgentRefused(t *testing.T) {
-	_, err := prepareSession(sessionArgs{agent: "claude", gatewayURL: defaultGateway, dir: t.TempDir()}, sandbox.ModeRun)
+	_, err := prepareTestSession(sessionArgs{agent: "claude", gatewayURL: defaultGateway, dir: fakeHome(t, map[string]string{})}, sandbox.ModeRun)
 	if err == nil || !strings.Contains(err.Error(), "opencode, pi") {
 		t.Errorf("err = %v, want unknown agent listing opencode, pi", err)
 	}
@@ -428,7 +438,7 @@ func TestSessionImage(t *testing.T) {
 				want = projectimage.Tag(project)
 			}
 			for _, mode := range []sandbox.Mode{sandbox.ModeRun, sandbox.ModePrep} {
-				sess, err := prepareSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, mode)
+				sess, err := prepareTestSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, mode)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -467,7 +477,7 @@ func TestDockerfileReadOnly(t *testing.T) {
 	project := fakeHome(t, map[string]string{})
 	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
 	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
-	sess, err := prepareSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
+	sess, err := prepareTestSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +499,7 @@ func TestShellMatchesRun(t *testing.T) {
 			t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
 			reference := t.TempDir()
 			sa := sessionArgs{agent: name, gatewayURL: defaultGateway, dir: project, ro: []string{reference}}
-			run, err := prepareSession(sa, sandbox.ModeRun)
+			run, err := prepareTestSession(sa, sandbox.ModeRun)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -497,7 +507,7 @@ func TestShellMatchesRun(t *testing.T) {
 			runSpec, runMounts, runDir := run.spec, run.mounts, run.sessionDir
 			run.cleanup()
 			sa.shell = true
-			shell, err := prepareSession(sa, sandbox.ModeRun)
+			shell, err := prepareTestSession(sa, sandbox.ModeRun)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -561,5 +571,220 @@ func TestShellRejectsRunOnlyOptions(t *testing.T) {
 		if err := cmdShell(args); err == nil {
 			t.Errorf("shell accepted %q", args)
 		}
+	}
+}
+
+func TestCommandsRefuseBusyProjectBeforePreparation(t *testing.T) {
+	project := fakeHome(t, map[string]string{"package.json": "{}"})
+	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}
+	lease, err := lockProject(sa, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseProject(lease) })
+	for _, command := range []struct {
+		name string
+		run  func([]string) error
+	}{{"run", cmdRun}, {"shell", cmdShell}, {"prep", cmdPrep}, {"check", cmdCheck}} {
+		t.Run(command.name, func(t *testing.T) {
+			err := command.run([]string{project})
+			var busy *sessionregistry.Busy
+			if !errors.As(err, &busy) || busy.Session.Agent != "run (opencode)" {
+				t.Fatalf("command error = %v, want existing run session", err)
+			}
+			if _, err := os.Stat(filepath.Join(project, ".envrc")); !os.IsNotExist(err) {
+				t.Fatalf("busy command prepared mount placeholders: %v", err)
+			}
+		})
+	}
+	alias := project + "-alias"
+	if err := os.Symlink(project, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdRun([]string{alias}); err == nil {
+		t.Fatal("symlink alias bypassed project lock")
+	}
+	other := filepath.Join(filepath.Dir(project), "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sa.dir = other
+	otherLease, err := lockProject(sa, "shell")
+	if err != nil {
+		t.Fatalf("different project refused: %v", err)
+	}
+	releaseProject(otherLease)
+}
+
+func TestStartupFailureReleasesProject(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "test"})
+	if err := cmdRun([]string{"--agent", "unknown", project}); err == nil {
+		t.Fatal("unknown agent accepted")
+	}
+	if err := cmdPrep([]string{project}); err == nil || !strings.Contains(err.Error(), "nothing to install") {
+		t.Fatalf("prep error = %v", err)
+	}
+	lease, err := lockProject(sessionArgs{dir: project}, "run")
+	if err != nil {
+		t.Fatalf("startup error leaked lock: %v", err)
+	}
+	releaseProject(lease)
+}
+
+func TestRunWarnsOnDifferentSessionModel(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "test"})
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	other := filepath.Join(filepath.Dir(project), "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := lockProject(sessionArgs{dir: other, agent: "pi"}, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseProject(lease) })
+	if _, err := lease.SetModel("model-a"); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	script := `#!/bin/sh
+case "$*" in
+  *wget*) printf '%s\n' '{"data":[{"id":"model-a"},{"id":"model-b"}]}' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	stderr := os.Stderr
+	os.Stderr = out
+	defer func() { os.Stderr = stderr }()
+	if err := cmdRun([]string{"--model", "model-b", "--unsafe-skip-check", project, "--", "true"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"model model-b differs from model-a", other, "run (pi)", "llama-swap will swap models back and forth"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("startup output lacks %q: %s", want, data)
+		}
+	}
+}
+
+func TestLockedSessionKeepsResolvedPaths(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "a"})
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	other := filepath.Join(filepath.Dir(project), "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := project + "-alias"
+	if err := os.Symlink(project, alias); err != nil {
+		t.Fatal(err)
+	}
+	refA, refB := t.TempDir(), t.TempDir()
+	refAlias := filepath.Join(t.TempDir(), "reference")
+	if err := os.Symlink(refA, refAlias); err != nil {
+		t.Fatal(err)
+	}
+	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: alias, ro: []string{refAlias}}
+	lease, err := lockProject(sa, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseProject(lease)
+	// Retarget both original arguments after taking the lease. Preparation
+	// must use the validated paths that the lease actually covers.
+	for alias, target := range map[string]string{alias: other, refAlias: refB} {
+		if err := os.Remove(alias); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, alias); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherLease, err := lockProject(sessionArgs{dir: other}, "shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseProject(otherLease)
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.cleanup()
+	if sess.project != project || sess.spec.Name != sandbox.ProjectName(project) {
+		t.Errorf("lease covers %s, but prepared project %s (%s)", project, sess.project, sess.spec.Name)
+	}
+	refA, err = filepath.EvalSymlinks(refA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, mount := range sess.spec.Services[sandbox.AgentService].Volumes {
+		if mount.Source == refA && mount.ReadOnly {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("preparation resolved the read-only alias again")
+	}
+}
+
+func TestRunContinuesAfterModelWarningFailure(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "test"})
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Opening a directory read-write fails deterministically, including
+	// when tests run as root. Only the advisory registry scan touches it.
+	if err := os.MkdirAll(filepath.Join(cache, "localllm", "registry", "unreadable.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	entered := filepath.Join(bin, "entered")
+	t.Setenv("TEST_RUN_ENTERED", entered)
+	script := `#!/bin/sh
+case "$*" in
+  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
+  *'run --rm agent') touch "$TEST_RUN_ENTERED" ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	stderr := os.Stderr
+	os.Stderr = out
+	defer func() { os.Stderr = stderr }()
+	if err := cmdRun([]string{"--unsafe-skip-check", project, "--", "true"}); err != nil {
+		t.Errorf("advisory model scan aborted run: %v", err)
+	}
+	if _, err := os.Stat(entered); err != nil {
+		t.Errorf("interactive command wasn't started: %v", err)
+	}
+	data, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "WARNING: could not check for model clashes:") {
+		t.Errorf("missing model scan warning: %s", data)
 	}
 }

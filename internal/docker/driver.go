@@ -87,6 +87,25 @@ func RemoveVolumes(names ...string) error {
 	return nil
 }
 
+// RecoverProject removes containers left by a crashed host session. The caller
+// must hold the project's registry lease so no new session can start meanwhile.
+// Include stopped and one-off containers: compose run can outlive its CLI.
+func RecoverProject(projectName string) error {
+	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+projectName).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("list orphaned containers: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	ids := strings.Fields(string(out))
+	if len(ids) == 0 {
+		return nil
+	}
+	out, err = exec.Command("docker", append([]string{"rm", "-f"}, ids...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("remove orphaned containers: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // Session is a started sandbox: networks and forwarder are up, the agent
 // container is run on demand. Close tears everything down.
 type Session struct {

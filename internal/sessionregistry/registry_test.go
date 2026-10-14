@@ -1,0 +1,299 @@
+package sessionregistry
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func acquire(t *testing.T, r *Registry, project, agent, model string) *Lease {
+	t.Helper()
+	lease, err := r.Acquire(project, agent, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return lease
+}
+
+func TestAcquireBusyRelease(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	lease := acquire(t, r, "/projects/a", "run (pi)", "model-a")
+	// Another registry instance must see the same OS lock, even in this PID.
+	other := &Registry{Dir: r.Dir}
+	_, err := other.Acquire("/projects/a", "prep", "")
+	var busy *Busy
+	if !errors.As(err, &busy) {
+		t.Fatalf("acquire = %v, want Busy", err)
+	}
+	if busy.Session.Agent != "run (pi)" || busy.Session.PID != os.Getpid() || !strings.Contains(err.Error(), "/projects/a") {
+		t.Errorf("busy session = %+v (%v)", busy.Session, err)
+	}
+	active, err := other.Active()
+	if err != nil || len(active) != 1 || active[0].Model != "model-a" {
+		t.Fatalf("active = %+v, %v", active, err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	other.Recover = func(string) error { t.Error("cleanly released lease needs no recovery"); return nil }
+	acquire(t, other, "/projects/a", "prep", "")
+	if _, err := lease.SetModel("x"); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("SetModel on closed lease = %v", err)
+	}
+}
+
+func TestDifferentProjectsAndClashes(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	a := acquire(t, r, "/projects/a", "run (opencode)", "model-a")
+	b := acquire(t, r, "/projects/b", "run (pi)", "model-a")
+	acquire(t, r, "/projects/shell", "shell (pi)", "")
+	acquire(t, r, "/projects/prep", "prep", "")
+	if clashes, err := b.SetModel("model-a"); err != nil || len(clashes) != 0 {
+		t.Fatalf("same-model clashes = %v, %v", clashes, err)
+	}
+	clashes, err := b.SetModel("model-b")
+	if err != nil || len(clashes) != 1 || clashes[0].Project != "/projects/a" || clashes[0].Model != "model-a" {
+		t.Fatalf("different-model clashes = %+v, %v", clashes, err)
+	}
+	if clashes, err := a.SetModel("model-b"); err != nil || len(clashes) != 0 {
+		t.Fatalf("updated-model clashes = %v, %v", clashes, err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if clashes, err := a.SetModel("model-c"); err != nil || len(clashes) != 0 {
+		t.Fatalf("released-session clashes = %v, %v", clashes, err)
+	}
+}
+
+func TestConcurrentAcquire(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	const count = 16
+	start := make(chan struct{})
+	results := make(chan *Lease, count)
+	var wg sync.WaitGroup
+	for range count {
+		wg.Go(func() {
+			<-start
+			lease, err := r.Acquire("/projects/a", "run", "")
+			var busy *Busy
+			if err != nil && !errors.As(err, &busy) {
+				t.Errorf("acquire: %v", err)
+			}
+			results <- lease
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	var owners int
+	for lease := range results {
+		if lease != nil {
+			owners++
+			lease.Close()
+		}
+	}
+	if owners != 1 {
+		t.Fatalf("%d owners, want 1", owners)
+	}
+}
+
+func TestSimultaneousModelPublication(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	a := acquire(t, r, "/projects/a", "run", "")
+	b := acquire(t, r, "/projects/b", "run", "")
+	start := make(chan struct{})
+	counts := make(chan int, 2)
+	for i, lease := range []*Lease{a, b} {
+		go func() {
+			<-start
+			clashes, err := lease.SetModel(fmt.Sprintf("model-%d", i))
+			if err != nil {
+				t.Error(err)
+			}
+			counts <- len(clashes)
+		}()
+	}
+	close(start)
+	if total := <-counts + <-counts; total != 1 {
+		t.Fatalf("simultaneous starts reported %d clashes, want 1", total)
+	}
+}
+
+// The helper is killed without closing its lease. This tests actual process
+// death and OS lock release, rather than approximating it with a fake PID.
+func TestCrashedProcessRecovery(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRegistryProcessHelper$")
+	cmd.Env = append(os.Environ(), "LOCALLLM_REGISTRY_HELPER="+dir)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("helper: %q, %v", line, err)
+	}
+	r := &Registry{Dir: dir}
+	active, err := r.Active()
+	if err != nil || len(active) != 1 || active[0].PID != cmd.Process.Pid {
+		t.Fatalf("live helper = %+v, %v", active, err)
+	}
+	if _, err := r.Acquire("/projects/crashed", "run", ""); err == nil {
+		t.Fatal("acquired helper's live lock")
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Wait()
+	if active, err := r.Active(); err != nil || len(active) != 0 {
+		t.Fatalf("crashed session still active = %+v, %v", active, err)
+	}
+	// Recovery failures must refuse startup and keep the stale record so a
+	// later attempt can finish cleaning up the orphaned container.
+	failed := errors.New("Docker unavailable")
+	r.Recover = func(string) error { return failed }
+	if _, err := r.Acquire("/projects/crashed", "run", ""); !errors.Is(err, failed) {
+		t.Fatalf("recovery failure = %v", err)
+	}
+	var recovered int
+	r.Recover = func(project string) error {
+		if project != "/projects/crashed" {
+			t.Errorf("recover project = %q", project)
+		}
+		recovered++
+		return nil
+	}
+	lease := acquire(t, r, "/projects/crashed", "shell", "")
+	if recovered != 1 || lease.session.PID != os.Getpid() {
+		t.Fatalf("recovery count = %d, new owner = %+v", recovered, lease.session)
+	}
+}
+
+func TestRegistryProcessHelper(t *testing.T) {
+	dir := os.Getenv("LOCALLLM_REGISTRY_HELPER")
+	if dir == "" {
+		return
+	}
+	r := &Registry{Dir: dir}
+	lease, err := r.Acquire("/projects/crashed", "run (pi)", "old-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	fmt.Println("ready")
+	var b [1]byte
+	os.Stdin.Read(b[:])
+}
+
+func TestPartialRecordRecovery(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	// A process may die halfway through writing its metadata. A free OS
+	// lock is enough to recover, even when its record can't be decoded.
+	if err := os.WriteFile(r.filename("/projects/a"), []byte(`{"Project":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	r.Recover = func(string) error { called = true; return nil }
+	acquire(t, r, "/projects/a", "run", "")
+	if !called {
+		t.Fatal("partial record wasn't recovered")
+	}
+	if info, err := os.Stat(filepath.Join(r.Dir, ".guard")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("registry guard permissions: %v, %v", info, err)
+	}
+}
+
+func TestRecoveryDoesNotHoldRegistryGuard(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	if err := os.WriteFile(r.filename("/projects/crashed"), []byte(`{"Project":"/projects/crashed","Agent":"run","PID":123}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entered, resume := make(chan struct{}), make(chan struct{})
+	r.Recover = func(string) error {
+		close(entered)
+		<-resume
+		return nil
+	}
+	recovered := make(chan error, 1)
+	go func() {
+		lease, err := r.Acquire("/projects/crashed", "run", "")
+		if err == nil {
+			err = lease.Close()
+		}
+		recovered <- err
+	}()
+	<-entered
+	operations := make(chan error, 1)
+	go func() {
+		_, err := r.Acquire("/projects/crashed", "shell", "")
+		var busy *Busy
+		if !errors.As(err, &busy) {
+			operations <- fmt.Errorf("recovering project isn't locked: %v", err)
+			return
+		}
+		lease, err := r.Acquire("/projects/other", "run", "")
+		if err != nil {
+			operations <- err
+			return
+		}
+		_, modelErr := lease.SetModel("model-b")
+		_, activeErr := r.Active()
+		operations <- errors.Join(modelErr, activeErr, lease.Close())
+	}()
+	completed := false
+	select {
+	case err := <-operations:
+		completed = true
+		if err != nil {
+			t.Error(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("recovery blocked Busy reporting, unrelated Acquire, SetModel, Active or Close")
+	}
+	close(resume)
+	if err := <-recovered; err != nil {
+		t.Error(err)
+	}
+	if !completed {
+		<-operations
+	}
+}
+
+func TestActiveSkipsVanishedEntries(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	acquire(t, r, "/projects/a", "run", "model-a")
+	// A dangling symlink gives the same ENOENT at OpenFile as an entry
+	// disappearing between ReadDir and OpenFile, without a timing race.
+	if err := os.Symlink(filepath.Join(r.Dir, "gone"), filepath.Join(r.Dir, "vanished.lock")); err != nil {
+		t.Fatal(err)
+	}
+	active, err := r.Active()
+	if err != nil || len(active) != 1 || active[0].Project != "/projects/a" {
+		t.Fatalf("vanished entry disrupted active sessions: %+v, %v", active, err)
+	}
+}

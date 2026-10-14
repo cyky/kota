@@ -35,6 +35,7 @@ import (
 	"localllm/internal/probe"
 	"localllm/internal/projectimage"
 	"localllm/internal/sandbox"
+	"localllm/internal/sessionregistry"
 )
 
 const (
@@ -382,11 +383,21 @@ func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) 
 	return sa, nil
 }
 
-// prepareSession validates paths and builds the compose spec. The agent
-// config is written later by configure. The caller removes sessionDir when
-// done. A prep session has no agent, gateway or key, and runs the
-// dependency install.
-func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
+// resolveSessionPaths validates the project and read-only mounts once, before
+// taking the lease. Preparation must use these exact paths rather than resolve
+// the original CLI arguments again after a symlink might have changed.
+func resolveSessionPaths(sa sessionArgs) (pathpolicy.Paths, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return pathpolicy.Paths{}, err
+	}
+	return pathpolicy.Validate(sa.dir, sa.ro, pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT")))
+}
+
+// prepareSession builds the compose spec from the paths covered by the lease.
+// The agent config is written later by configure. The caller removes sessionDir
+// when done. Prep has no agent, gateway or key and runs the dependency install.
+func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths) (*session, error) {
 	prep := mode == sandbox.ModePrep
 	var agent agentSetup
 	var err error
@@ -394,14 +405,6 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 		if agent, err = agentFor(sa.agent); err != nil {
 			return nil, err
 		}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	paths, err := pathpolicy.Validate(sa.dir, sa.ro, pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT")))
-	if err != nil {
-		return nil, err
 	}
 	project := paths.Project
 	var gw sandbox.Gateway
@@ -587,9 +590,58 @@ func cmdShell(args []string) error {
 	return cmdOffline(sa, false, false)
 }
 
+// lockedProject keeps the validated mount paths with the lease that covers them.
+type lockedProject struct {
+	*sessionregistry.Lease
+	paths pathpolicy.Paths
+}
+
+// lockProject runs before prepareSession can create protection placeholders or
+// touch dependency volumes. check also needs a lease: it uses the same compose
+// project and mounts, and would otherwise tear down a running session.
+func lockProject(sa sessionArgs, operation string) (*lockedProject, error) {
+	paths, err := resolveSessionPaths(sa)
+	if err != nil {
+		return nil, err
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return nil, err
+	}
+	r := &sessionregistry.Registry{
+		Dir: filepath.Join(cache, "localllm", "registry"),
+		Recover: func(project string) error {
+			return docker.RecoverProject(sandbox.ProjectName(project))
+		},
+	}
+	if sa.agent != "" {
+		operation += " (" + sa.agent + ")"
+	}
+	lease, err := r.Acquire(paths.Project, operation, "")
+	if err != nil {
+		return nil, err
+	}
+	return &lockedProject{Lease: lease, paths: paths}, nil
+}
+
+func releaseProject(lease *lockedProject) {
+	if err := lease.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "WARNING: release project session:", err)
+	}
+}
+
 // cmdOffline shares startup, cleanup and change reporting for run and shell.
 func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
-	sess, err := prepareSession(sa, sandbox.ModeRun)
+	operation := "run"
+	if sa.shell {
+		operation = "shell"
+	}
+	lease, err := lockProject(sa, operation)
+	if err != nil {
+		return err
+	}
+	defer releaseProject(lease)
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths)
 	if err != nil {
 		return err
 	}
@@ -611,7 +663,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
-	err = runSession(sess, sa.model, auto, skipCheck)
+	err = runSession(sess, lease.Lease, sa.model, auto, skipCheck)
 	sess.cleanup()
 	reportChanges(os.Stderr, sess.project, before)
 	return err
@@ -619,7 +671,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
 // agent or shell. The containers are gone when it returns.
-func runSession(sess *session, model string, auto, skipCheck bool) error {
+func runSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) error {
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'localllm check' to list them\n", n)
@@ -635,6 +687,14 @@ func runSession(sess *session, model string, auto, skipCheck bool) error {
 	catalog, err := sess.configure(ds, model, auto)
 	if err != nil {
 		return err
+	}
+	if !sess.shell {
+		clashes, err := lease.SetModel(catalog.Default)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "WARNING: could not check for model clashes:", err)
+		} else {
+			printModelClashes(os.Stderr, catalog.Default, clashes)
+		}
 	}
 	for _, n := range catalog.Notes {
 		fmt.Fprintln(os.Stderr, "note:", n)
@@ -662,6 +722,13 @@ func runSession(sess *session, model string, auto, skipCheck bool) error {
 	return ds.Interactive()
 }
 
+func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Session) {
+	for _, other := range clashes {
+		fmt.Fprintf(w, "WARNING: model %s differs from %s in %s (%s, PID %d); llama-swap will swap models back and forth.\n",
+			model, other.Model, other.Project, other.Agent, other.PID)
+	}
+}
+
 // reportChanges warns about watched files the session added, modified or
 // deleted.
 func reportChanges(w io.Writer, project string, before changereport.Files) {
@@ -686,7 +753,12 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	sa.command = nil
-	sess, err := prepareSession(sa, sandbox.ModeRun)
+	lease, err := lockProject(sa, "check")
+	if err != nil {
+		return err
+	}
+	defer releaseProject(lease)
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths)
 	if err != nil {
 		return err
 	}
@@ -737,7 +809,12 @@ func cmdPrep(args []string) error {
 	default:
 		return errors.New("prep takes at most one directory")
 	}
-	sess, err := prepareSession(sa, sandbox.ModePrep)
+	lease, err := lockProject(sa, "prep")
+	if err != nil {
+		return err
+	}
+	defer releaseProject(lease)
+	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths)
 	if err != nil {
 		return err
 	}
