@@ -1,7 +1,7 @@
 # DONE — 05 — Secret masking with default ignore list and .localllmignore
 
 Status: done
-Resolved in: `2bf8cda`
+Resolved in: `2bf8cda`, `b01f5dc`
 
 ## Parent
 
@@ -65,3 +65,5 @@ Decisions:
 Not covered: `--ro` paths aren't masked.
 
 Also fixed here, an issue 04 gap: an absolute `core.hooksPath` reached through a symlink outside the project went unprotected. A path inside the project as written is still checked for symlinks; only a path that lands inside after resolving through links outside the project is matched by its resolved form.
+
+**2026-10-14 — Follow-up fix in `b01f5dc`.** A security review found that a mask over or around a protected path dropped the protection, and the directories above the mask weren't pinned. With `core.hooksPath` set to `tools/git/hooks` and `tools/git/` masked, the agent could rename `tools` and recreate the hooks. Parent directories of protected paths are now pinned before masking. Masks of ordinary secrets still don't pin their parents: renaming one only moves the empty mask, and the secret stays hidden.
