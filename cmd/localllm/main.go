@@ -9,13 +9,16 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"localllm/assets"
 	"localllm/internal/check"
 	"localllm/internal/docker"
+	"localllm/internal/mask"
 	"localllm/internal/opencode"
 	"localllm/internal/pathpolicy"
 	"localllm/internal/probe"
@@ -94,8 +97,17 @@ type session struct {
 	spec       sandbox.Compose
 	gateway    sandbox.Gateway
 	sessionDir string
-	// readOnly are the in-sandbox targets of the --ro mounts.
-	readOnly []string
+	project    string
+	layout     mask.Layout
+	// mounts are what the probes verify.
+	mounts check.Mounts
+}
+
+// cleanup removes what the session left on the host. Call it after the
+// containers are gone.
+func (s *session) cleanup() {
+	s.layout.RemovePlaceholders(s.project)
+	os.RemoveAll(s.sessionDir)
 }
 
 // sessionArgs are the [flags] [dir] [-- cmd...] shared by run and check.
@@ -159,6 +171,10 @@ func prepareSession(sa sessionArgs) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
+	layout, err := mask.Plan(project)
+	if err != nil {
+		return nil, err
+	}
 
 	sessionDir, err := newSessionDir(project)
 	if err != nil {
@@ -175,22 +191,56 @@ func prepareSession(sa sessionArgs) (*session, error) {
 		return nil, err
 	}
 
-	spec := sandbox.Build(sandbox.Inputs{
+	sess := &session{gateway: gw, sessionDir: sessionDir, project: project, layout: layout}
+	pinned, protected, err := layout.Bind(project, sessionDir)
+	if err != nil {
+		os.RemoveAll(sessionDir)
+		return nil, err
+	}
+	for _, m := range pinned {
+		sess.mounts.Pinned = append(sess.mounts.Pinned, m.Target)
+	}
+	for _, m := range append(protected, paths.ReadOnly...) {
+		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
+	}
+
+	env := opencode.Env(agentConfigPath)
+	for k, v := range gitEnv(project) {
+		env[k] = v
+	}
+	sess.spec = sandbox.Build(sandbox.Inputs{
 		ProjectDir:     project,
 		UID:            os.Getuid(),
 		GID:            os.Getgid(),
 		Gateway:        gw,
 		AgentImage:     baseImage,
 		ForwarderImage: forwarderImage,
-		ReadOnly:       append([]sandbox.Mount{{Source: cfgFile, Target: agentConfigPath}}, paths.ReadOnly...),
-		Env:            opencode.Env(agentConfigPath),
+		Pinned:         pinned,
+		ReadOnly:       append(append([]sandbox.Mount{{Source: cfgFile, Target: agentConfigPath}}, protected...), paths.ReadOnly...),
+		Env:            env,
 		Command:        sa.command,
 	})
-	var readOnly []string
-	for _, m := range paths.ReadOnly {
-		readOnly = append(readOnly, m.Target)
+	return sess, nil
+}
+
+// gitEnv lets git work inside the sandbox without writing config there:
+// files on the shared mount can appear owned by another user, and commits
+// need the host identity. GIT_CONFIG_* is command-line scope, which git
+// trusts for safe.directory.
+func gitEnv(project string) map[string]string {
+	settings := [][2]string{{"safe.directory", "*"}}
+	for _, key := range []string{"user.name", "user.email"} {
+		out, err := exec.Command("git", "-C", project, "config", "--get", key).Output()
+		if v := strings.TrimSpace(string(out)); err == nil && v != "" {
+			settings = append(settings, [2]string{key, v})
+		}
 	}
-	return &session{spec: spec, gateway: gw, sessionDir: sessionDir, readOnly: readOnly}, nil
+	env := map[string]string{"GIT_CONFIG_COUNT": strconv.Itoa(len(settings))}
+	for i, kv := range settings {
+		env["GIT_CONFIG_KEY_"+strconv.Itoa(i)] = kv[0]
+		env["GIT_CONFIG_VALUE_"+strconv.Itoa(i)] = kv[1]
+	}
+	return env
 }
 
 func cmdRun(args []string) error {
@@ -205,7 +255,10 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(sess.sessionDir)
+	defer sess.cleanup()
+	for _, n := range sess.layout.Notes {
+		fmt.Fprintln(os.Stderr, "note:", n)
+	}
 
 	ds, err := docker.Start(sess.spec, sess.sessionDir)
 	if err != nil {
@@ -216,7 +269,7 @@ func cmdRun(args []string) error {
 	if skipCheck {
 		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
 	} else {
-		results, err := check.Run(ds, sess.gateway, sess.readOnly)
+		results, err := check.Run(ds, sess.gateway, sess.mounts)
 		if err != nil {
 			return fmt.Errorf("containment probes: %w", err)
 		}
@@ -239,9 +292,12 @@ func cmdCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(sess.sessionDir)
+	defer sess.cleanup()
 
 	printMounts(os.Stdout, sess.spec)
+	for _, n := range sess.layout.Notes {
+		fmt.Println("note:", n)
+	}
 
 	ds, err := docker.Start(sess.spec, sess.sessionDir)
 	if err != nil {
@@ -250,7 +306,7 @@ func cmdCheck(args []string) error {
 	defer ds.Close()
 
 	start := time.Now()
-	results, err := check.Run(ds, sess.gateway, sess.readOnly)
+	results, err := check.Run(ds, sess.gateway, sess.mounts)
 	if err != nil {
 		return fmt.Errorf("containment probes: %w", err)
 	}

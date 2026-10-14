@@ -14,6 +14,7 @@ func testInputs() Inputs {
 		Gateway:        Gateway{Host: "host.docker.internal", Port: 8080},
 		AgentImage:     "agent:test",
 		ForwarderImage: "forwarder:test",
+		Pinned:         []Mount{{Source: "/Users/me/Projects/foo/.git", Target: "/workspace/.git"}},
 		ReadOnly:       []Mount{{Source: "/tmp/cfg.json", Target: "/etc/localllm/opencode.json"}},
 		Env:            map[string]string{"FOO": "bar"},
 	}
@@ -109,6 +110,7 @@ func TestMounts(t *testing.T) {
 
 	want := []Volume{
 		{Type: "bind", Source: "/Users/me/Projects/foo", Target: Workspace},
+		{Type: "bind", Source: "/Users/me/Projects/foo/.git", Target: "/workspace/.git"},
 		{Type: "bind", Source: "/tmp/cfg.json", Target: "/etc/localllm/opencode.json", ReadOnly: true},
 	}
 	if !slices.Equal(agent.Volumes, want) {

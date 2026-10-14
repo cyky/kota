@@ -77,7 +77,7 @@ func AgentGatewayURL() string {
 	return fmt.Sprintf("http://%s:%d", GatewayHost, GatewayPort)
 }
 
-// Mount is a read-only bind mount of a host file or directory.
+// Mount is a bind mount of a host file or directory.
 type Mount struct {
 	Source string
 	Target string
@@ -93,6 +93,10 @@ type Inputs struct {
 	AgentImage     string
 	ForwarderImage string
 
+	// Pinned are read-write mounts of a path over itself. A mount point can't
+	// be renamed or removed, so the path stays where read-only mounts inside
+	// it expect it.
+	Pinned []Mount
 	// ReadOnly are extra read-only mounts, e.g. the rendered agent config.
 	ReadOnly []Mount
 	// Env is passed to the agent container in addition to HOME.
@@ -138,6 +142,9 @@ func Build(in Inputs) Compose {
 	}
 
 	volumes := []Volume{{Type: "bind", Source: in.ProjectDir, Target: Workspace}}
+	for _, m := range in.Pinned {
+		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target})
+	}
 	for _, m := range in.ReadOnly {
 		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target, ReadOnly: true})
 	}

