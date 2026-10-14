@@ -17,6 +17,7 @@ import (
 	"localllm/internal/check"
 	"localllm/internal/docker"
 	"localllm/internal/opencode"
+	"localllm/internal/pathpolicy"
 	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
@@ -41,7 +42,10 @@ commands:
 
 flags:
   --gateway URL         model gateway (default $LOCALLLM_GATEWAY or ` + defaultGateway + `)
+  --ro PATH             mount PATH read-only at ` + sandbox.ReadOnlyRoot + `/<name> (repeatable)
   --unsafe-skip-check   run only: start without the containment probes
+
+dir must be inside the allowed root ($LOCALLLM_ALLOWED_ROOT, default ~/Projects).
 `
 
 func main() {
@@ -90,24 +94,41 @@ type session struct {
 	spec       sandbox.Compose
 	gateway    sandbox.Gateway
 	sessionDir string
+	// readOnly are the in-sandbox targets of the --ro mounts.
+	readOnly []string
 }
 
-// parseSessionArgs parses [flags] [dir] [-- cmd...] shared by run and check.
-func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (gatewayURL, dir string, command []string, err error) {
+// sessionArgs are the [flags] [dir] [-- cmd...] shared by run and check.
+type sessionArgs struct {
+	gatewayURL string
+	dir        string
+	ro         []string
+	command    []string
+}
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string     { return fmt.Sprint(*l) }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
+
+func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
 	fset := flag.NewFlagSet(name, flag.ContinueOnError)
 	gw := fset.String("gateway", envOr("LOCALLLM_GATEWAY", defaultGateway), "model gateway URL")
+	var ro stringList
+	fset.Var(&ro, "ro", "mount `PATH` read-only (repeatable)")
 	if register != nil {
 		register(fset)
 	}
 	if err := fset.Parse(args); err != nil {
-		return "", "", nil, err
+		return sessionArgs{}, err
 	}
 
-	dir = "."
+	sa := sessionArgs{gatewayURL: *gw, dir: ".", ro: ro}
 	rest := fset.Args()
 	for i, a := range rest {
 		if a == "--" {
-			command = rest[i+1:]
+			sa.command = rest[i+1:]
 			rest = rest[:i]
 			break
 		}
@@ -115,21 +136,26 @@ func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) 
 	switch len(rest) {
 	case 0:
 	case 1:
-		dir = rest[0]
+		sa.dir = rest[0]
 	default:
-		return "", "", nil, fmt.Errorf("%s takes at most one directory", name)
+		return sessionArgs{}, fmt.Errorf("%s takes at most one directory", name)
 	}
-	return *gw, dir, command, nil
+	return sa, nil
 }
 
-// prepareSession resolves inputs, renders the agent config and builds the
+// prepareSession validates paths, renders the agent config and builds the
 // compose spec. The caller removes sessionDir when done.
-func prepareSession(gatewayURL, dir string, command []string) (*session, error) {
-	project, err := resolveDir(dir)
+func prepareSession(sa sessionArgs) (*session, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	gw, err := sandbox.ParseGateway(gatewayURL)
+	paths, err := pathpolicy.Validate(sa.dir, sa.ro, pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT")))
+	if err != nil {
+		return nil, err
+	}
+	project := paths.Project
+	gw, err := sandbox.ParseGateway(sa.gatewayURL)
 	if err != nil {
 		return nil, err
 	}
@@ -156,22 +182,26 @@ func prepareSession(gatewayURL, dir string, command []string) (*session, error) 
 		Gateway:        gw,
 		AgentImage:     baseImage,
 		ForwarderImage: forwarderImage,
-		ReadOnly:       []sandbox.Mount{{Source: cfgFile, Target: agentConfigPath}},
+		ReadOnly:       append([]sandbox.Mount{{Source: cfgFile, Target: agentConfigPath}}, paths.ReadOnly...),
 		Env:            opencode.Env(agentConfigPath),
-		Command:        command,
+		Command:        sa.command,
 	})
-	return &session{spec: spec, gateway: gw, sessionDir: sessionDir}, nil
+	var readOnly []string
+	for _, m := range paths.ReadOnly {
+		readOnly = append(readOnly, m.Target)
+	}
+	return &session{spec: spec, gateway: gw, sessionDir: sessionDir, readOnly: readOnly}, nil
 }
 
 func cmdRun(args []string) error {
 	var skipCheck bool
-	gatewayURL, dir, command, err := parseSessionArgs("run", args, func(f *flag.FlagSet) {
+	sa, err := parseSessionArgs("run", args, func(f *flag.FlagSet) {
 		f.BoolVar(&skipCheck, "unsafe-skip-check", false, "start without running the containment probes")
 	})
 	if err != nil {
 		return err
 	}
-	sess, err := prepareSession(gatewayURL, dir, command)
+	sess, err := prepareSession(sa)
 	if err != nil {
 		return err
 	}
@@ -186,7 +216,7 @@ func cmdRun(args []string) error {
 	if skipCheck {
 		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
 	} else {
-		results, err := check.Run(ds, sess.gateway)
+		results, err := check.Run(ds, sess.gateway, sess.readOnly)
 		if err != nil {
 			return fmt.Errorf("containment probes: %w", err)
 		}
@@ -200,11 +230,12 @@ func cmdRun(args []string) error {
 }
 
 func cmdCheck(args []string) error {
-	gatewayURL, dir, _, err := parseSessionArgs("check", args, nil)
+	sa, err := parseSessionArgs("check", args, nil)
 	if err != nil {
 		return err
 	}
-	sess, err := prepareSession(gatewayURL, dir, nil)
+	sa.command = nil
+	sess, err := prepareSession(sa)
 	if err != nil {
 		return err
 	}
@@ -219,7 +250,7 @@ func cmdCheck(args []string) error {
 	defer ds.Close()
 
 	start := time.Now()
-	results, err := check.Run(ds, sess.gateway)
+	results, err := check.Run(ds, sess.gateway, sess.readOnly)
 	if err != nil {
 		return fmt.Errorf("containment probes: %w", err)
 	}
@@ -262,25 +293,6 @@ func printResults(w io.Writer, results []probe.Result) {
 		}
 		fmt.Fprintf(w, "  %s  %-34s %-13s %s\n", status, r.Name, want, outcome)
 	}
-}
-
-func resolveDir(dir string) (string, error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", dir)
-	}
-	return resolved, nil
 }
 
 // newSessionDir creates a per-session directory under the user cache dir,

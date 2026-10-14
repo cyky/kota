@@ -1,7 +1,9 @@
 package probe
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -130,4 +132,64 @@ func TestScriptRuns(t *testing.T) {
 			t.Errorf("%s: %+v\noutput:\n%s", r.Name, r, out)
 		}
 	}
+}
+
+// TestReadOnlyProbe runs the read-only probe locally: it may only pass when
+// the path exists and rejects writes.
+func TestReadOnlyProbe(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores permissions")
+	}
+	dir := t.TempDir()
+	writable := filepath.Join(dir, "writable")
+	locked := filepath.Join(dir, "locked")
+	lockedFile := filepath.Join(dir, "locked.md")
+	for _, d := range []string{writable, locked} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(lockedFile, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	tt := testTargets()
+	tt.ReadOnly = []string{writable, locked, lockedFile, filepath.Join(dir, "missing")}
+	want := map[string]bool{writable: false, locked: true, lockedFile: true, filepath.Join(dir, "missing"): false}
+
+	for _, p := range Suite(tt) {
+		path, ok := strings.CutPrefix(p.Name, "read-only ")
+		if !ok {
+			continue
+		}
+		if p.MustSucceed {
+			t.Errorf("probe %q must fail", p.Name)
+		}
+		err := exec.Command(p.Cmd[0], p.Cmd[1:]...).Run()
+		passed := Result{Probe: p, ExitCode: exitCode(err)}.Passed()
+		if passed != want[path] {
+			t.Errorf("probe %q passed = %v, want %v", p.Name, passed, want[path])
+		}
+		delete(want, path)
+	}
+	if len(want) > 0 {
+		t.Errorf("no probes for %v", want)
+	}
+	if entries, _ := os.ReadDir(writable); len(entries) > 0 {
+		t.Errorf("probe left files behind: %v", entries)
+	}
+}
+
+func exitCode(err error) int {
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	if err != nil {
+		return -1
+	}
+	return 0
 }

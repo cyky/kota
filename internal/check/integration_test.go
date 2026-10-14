@@ -109,7 +109,7 @@ func TestContainedSandboxPassesAllProbes(t *testing.T) {
 	requireDocker(t)
 	s, gw := startSandbox(t, nil)
 
-	results, err := Run(s, gw)
+	results, err := Run(s, gw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestBrokenSandboxIsDetected(t *testing.T) {
 		spec.Services[sandbox.AgentService] = agent
 	})
 
-	results, err := Run(s, gw)
+	results, err := Run(s, gw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,4 +170,35 @@ func names(results []probe.Result) []string {
 		n = append(n, r.Name)
 	}
 	return n
+}
+
+func TestReadOnlyMountRejectsWrites(t *testing.T) {
+	requireDocker(t)
+	target := sandbox.ReadOnlyRoot + "/ref"
+	for _, readOnly := range []bool{true, false} {
+		ref := projectDir(t)
+		s, gw := startSandbox(t, func(spec *sandbox.Compose) {
+			agent := spec.Services[sandbox.AgentService]
+			agent.Volumes = append(agent.Volumes, sandbox.Volume{Type: "bind", Source: ref, Target: target, ReadOnly: readOnly})
+			spec.Services[sandbox.AgentService] = agent
+		})
+
+		results, err := Run(s, gw, []string{target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, r := range results {
+			if r.Name != "read-only "+target {
+				continue
+			}
+			found = true
+			if r.Passed() != readOnly {
+				t.Errorf("read_only=%v: probe passed = %v (exit %d)", readOnly, r.Passed(), r.ExitCode)
+			}
+		}
+		if !found {
+			t.Errorf("no read-only probe in %v", names(results))
+		}
+	}
 }

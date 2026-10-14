@@ -19,9 +19,12 @@ import (
 var extraHostPorts = []int{22, 80, 443, 2375, 6443}
 
 // Run discovers the addresses that lead out of the sandbox, runs the probe
-// suite in a fresh agent container and returns every result.
-func Run(s *docker.Session, gw sandbox.Gateway) ([]probe.Result, error) {
-	probes := probe.Suite(Targets(s, gw))
+// suite in a fresh agent container and returns every result. readOnly are the
+// in-sandbox targets of the --ro mounts.
+func Run(s *docker.Session, gw sandbox.Gateway, readOnly []string) ([]probe.Result, error) {
+	t := Targets(s, gw)
+	t.ReadOnly = readOnly
+	probes := probe.Suite(t)
 	out, err := s.Capture("bash", "-c", probe.Script(probes))
 	if err != nil {
 		return nil, err

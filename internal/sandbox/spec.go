@@ -25,6 +25,8 @@ const (
 	GatewayPort = 8080
 	// Workspace is where the project is mounted inside the agent container.
 	Workspace = "/workspace"
+	// ReadOnlyRoot holds the read-only reference mounts, one per --ro path.
+	ReadOnlyRoot = "/ro"
 	// Home is the agent user's HOME, backed by a tmpfs.
 	Home = "/home/agent"
 

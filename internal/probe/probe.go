@@ -55,9 +55,11 @@ type Targets struct {
 	HostPorts []int
 	// Workspace is the project mount inside the sandbox.
 	Workspace string
+	// ReadOnly are the --ro mounts inside the sandbox, which must reject writes.
+	ReadOnly []string
 }
 
-// Suite returns the network and workspace probes for targets.
+// Suite returns the network, workspace and read-only mount probes for targets.
 func Suite(t Targets) []Probe {
 	probes := []Probe{
 		tcp("internet 1.1.1.1:443", "1.1.1.1", 443),
@@ -87,6 +89,15 @@ func Suite(t Targets) []Probe {
 			MustSucceed: true,
 		},
 	)
+	for _, path := range t.ReadOnly {
+		// A missing mount exits 0, so it fails the probe rather than passing
+		// because there is nothing to write to.
+		probes = append(probes, Probe{
+			Name: "read-only " + path,
+			Cmd: []string{"sh", "-c", `[ -e "$1" ] || exit 0
+if [ -d "$1" ]; then f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"; else : >> "$1"; fi`, "sh", path},
+		})
+	}
 	return probes
 }
 
