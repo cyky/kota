@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"localllm/assets"
+	"localllm/internal/approval"
 	"localllm/internal/changereport"
 	"localllm/internal/check"
 	"localllm/internal/docker"
@@ -50,6 +51,8 @@ flags:
   --model ID            model to start with (default: models.yaml's default);
                         the agent is offered every model the gateway serves
   --ro PATH             mount PATH read-only at ` + sandbox.ReadOnlyRoot + `/<name> (repeatable)
+  --auto                run only: opencode approves edits and commands without
+                        asking; on uncommitted changes, asks you to type y
   --unsafe-skip-check   run only: start without the containment probes
 
 dir must be inside the allowed root ($LOCALLLM_ALLOWED_ROOT, default ~/Projects).
@@ -261,9 +264,10 @@ func gitEnv(project string) map[string]string {
 }
 
 func cmdRun(args []string) error {
-	var skipCheck bool
+	var skipCheck, auto bool
 	sa, err := parseSessionArgs("run", args, func(f *flag.FlagSet) {
 		f.BoolVar(&skipCheck, "unsafe-skip-check", false, "start without running the containment probes")
+		f.BoolVar(&auto, "auto", false, "approve edits and commands without asking")
 	})
 	if err != nil {
 		return err
@@ -277,6 +281,10 @@ func cmdRun(args []string) error {
 		sess.cleanup()
 		return err
 	}
+	if err := confirmFullAuto(sess.project, opencode.Agent, auto); err != nil {
+		sess.cleanup()
+		return err
+	}
 	// Snapshot before Docker creates any mount points, and compare after
 	// cleanup has removed them, so placeholders aren't reported.
 	before, err := changereport.Snapshot(sess.project)
@@ -284,7 +292,7 @@ func cmdRun(args []string) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
-	err = runSession(sess, sa.model, skipCheck)
+	err = runSession(sess, sa.model, auto, skipCheck)
 	sess.cleanup()
 	reportChanges(os.Stderr, sess.project, before)
 	return err
@@ -292,7 +300,7 @@ func cmdRun(args []string) error {
 
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
 // agent. The containers are gone when it returns.
-func runSession(sess *session, model string, skipCheck bool) error {
+func runSession(sess *session, model string, auto, skipCheck bool) error {
 	for _, n := range sess.layout.Notes {
 		fmt.Fprintln(os.Stderr, "note:", n)
 	}
@@ -309,7 +317,7 @@ func runSession(sess *session, model string, skipCheck bool) error {
 	}
 	defer ds.Close()
 
-	catalog, err := sess.configure(ds, model)
+	catalog, err := sess.configure(ds, model, auto)
 	if err != nil {
 		return err
 	}
@@ -317,6 +325,11 @@ func runSession(sess *session, model string, skipCheck bool) error {
 		fmt.Fprintln(os.Stderr, "note:", n)
 	}
 	fmt.Fprintf(os.Stderr, "model: %s (%d offered)\n", catalog.Default, len(catalog.Models))
+	if auto {
+		fmt.Fprintln(os.Stderr, "approval: auto (opencode edits files and runs commands without asking)")
+	} else {
+		fmt.Fprintln(os.Stderr, "approval: ask (opencode asks before edits and commands; --auto to skip)")
+	}
 
 	if skipCheck {
 		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
@@ -381,7 +394,7 @@ func cmdCheck(args []string) error {
 
 	// A gateway problem is reported here and by the gateway probe; the
 	// other probes still run.
-	catalog, modelErr := sess.configure(ds, sa.model)
+	catalog, modelErr := sess.configure(ds, sa.model, false)
 	printModels(os.Stdout, catalog, modelErr)
 
 	start := time.Now()
@@ -403,7 +416,7 @@ func cmdCheck(args []string) error {
 // configure resolves the session's models from the gateway, through the
 // started sandbox, and writes the agent config. No agent container exists
 // yet, so the config is complete before the agent first sees it.
-func (s *session) configure(ds *docker.Session, model string) (models.Catalog, error) {
+func (s *session) configure(ds *docker.Session, model string, auto bool) (models.Catalog, error) {
 	file, err := models.ParseFile(assets.Models)
 	if err != nil {
 		return models.Catalog{}, err
@@ -424,11 +437,34 @@ func (s *session) configure(ds *docker.Session, model string) (models.Catalog, e
 	if err != nil {
 		return models.Catalog{}, err
 	}
-	cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: catalog})
+	cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: catalog, Auto: auto})
 	if err != nil {
 		return models.Catalog{}, err
 	}
 	return catalog, os.WriteFile(s.cfgFile, cfg, 0o644)
+}
+
+// confirmFullAuto asks the user to type y before a full-auto session on a
+// project with uncommitted changes. It returns an error when they decline.
+func confirmFullAuto(project, agent string, auto bool) error {
+	if !approval.FullAuto(agent, auto) {
+		return nil
+	}
+	status, err := approval.ReadStatus(project)
+	if err != nil {
+		return err
+	}
+	if !approval.NeedsConfirmation(true, status) {
+		return nil
+	}
+	if !approval.Confirm(os.Stdin, os.Stderr, agent, status) {
+		msg := "not started; commit or stash your changes first (git stash -u)"
+		if !approval.FullAuto(agent, false) {
+			msg += ", or run without --auto"
+		}
+		return errors.New(msg)
+	}
+	return nil
 }
 
 func printModels(w io.Writer, c models.Catalog, err error) {

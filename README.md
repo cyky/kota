@@ -19,6 +19,7 @@ localllm run [dir] -- opencode run "…" # any command inside the sandbox
 localllm run --ro ../specs [dir]       # also mount ../specs read-only at /ro/specs
 localllm run [dir] -- opencode -c      # continue the project's last opencode session
 localllm run --model qwen3.5-2b-instruct [dir]  # start with another model
+localllm run --auto [dir]              # opencode acts without asking
 localllm check [dir]                   # show mounts and run the containment probes
 ```
 
@@ -29,6 +30,8 @@ The project must be inside the allowed root, `~/Projects` by default (set `LOCAL
 ## How it works
 
 The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway. Inside the sandbox the gateway is `http://gateway:8080`. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
+
+By default opencode asks before it edits a file or runs a shell command. `--auto` approves both, so it works without interruption. In a non-interactive `opencode run`, a request that needs approval is rejected. Before a full-auto session in a git project with uncommitted changes (modified, staged or untracked files inside the project), `run` lists them and asks you to type `y`. Anything else aborts before a container starts, so you can commit or stash first. Non-git projects aren't asked.
 
 Models come from the gateway. At launch, `run` reads `/v1/models` through the sandbox's forwarder, so a model added to llama-swap shows up in opencode without editing anything. `assets/models.yaml` adds what llama-swap doesn't report:
 - the context window, maximum output and tool-call support per model;

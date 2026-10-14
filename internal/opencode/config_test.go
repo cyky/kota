@@ -139,3 +139,31 @@ func TestEnvIgnoresProjectConfig(t *testing.T) {
 		t.Errorf("env = %v", env)
 	}
 }
+
+func TestRenderPermissions(t *testing.T) {
+	cases := []struct {
+		name string
+		base []byte
+		auto bool
+		want map[string]string
+	}{
+		{"ask by default", base(t), false, map[string]string{"edit": "ask", "bash": "ask", "webfetch": "deny"}},
+		{"auto allows edits and commands", base(t), true, map[string]string{"edit": "allow", "bash": "allow", "webfetch": "deny"}},
+		{"auto without base permissions", []byte(`{}`), true, map[string]string{"edit": "allow", "bash": "allow"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data, err := Render(c.base, Settings{GatewayURL: "http://gateway:8080", Models: catalog, Auto: c.auto})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg rendered
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !maps.Equal(cfg.Permission, c.want) {
+				t.Errorf("permission = %v, want %v", cfg.Permission, c.want)
+			}
+		})
+	}
+}

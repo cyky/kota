@@ -17,17 +17,23 @@ const ProviderID = "localllm"
 // BaseConfig is the path of the base config in assets.Agents.
 const BaseConfig = "agents/opencode/opencode.json"
 
+// autoAllowed are the permissions Auto switches from ask to allow.
+var autoAllowed = []string{"edit", "bash"}
+
 // Settings are the inputs for a session's opencode config.
 type Settings struct {
 	// GatewayURL is the gateway base URL as seen from inside the sandbox.
 	GatewayURL string
 	// Models are the models offered, with the default and small model.
 	Models models.Catalog
+	// Auto approves edits and shell commands instead of asking.
+	Auto bool
 }
 
 // Render returns the opencode.json content for a session: base (the
 // versioned permissions and defaults) with the gateway provider, its models
-// and the default and small model set on top.
+// and the default and small model set on top. With Auto, edits and shell
+// commands are allowed; other permissions keep their base values.
 func Render(base []byte, s Settings) ([]byte, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
@@ -46,6 +52,16 @@ func Render(base []byte, s Settings) ([]byte, error) {
 	delete(cfg, "small_model")
 	if s.Models.Small != "" {
 		cfg["small_model"] = ProviderID + "/" + s.Models.Small
+	}
+	if s.Auto {
+		perm, _ := cfg["permission"].(map[string]any)
+		if perm == nil {
+			perm = map[string]any{}
+		}
+		for _, k := range autoAllowed {
+			perm[k] = "allow"
+		}
+		cfg["permission"] = perm
 	}
 	cfg["provider"] = map[string]any{
 		ProviderID: map[string]any{
