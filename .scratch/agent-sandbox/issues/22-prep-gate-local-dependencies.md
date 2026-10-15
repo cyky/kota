@@ -1,6 +1,8 @@
-# 22 — Prep gate: local and git dependencies run project code
+# DONE — 22 — Prep gate: local and git dependencies run project code
 
-Status: ready-for-agent
+Status: done
+
+Resolved in: 2ddadc4
 
 ## Parent
 
@@ -19,12 +21,18 @@ Count each of these as project code. Read the dependency fields of the root and 
 
 ## Acceptance criteria
 
-- [ ] A `file:` dependency inside the project with a `postinstall` is listed as project code, and changed files are shown before prep asks
-- [ ] A git dependency is listed as project code
-- [ ] Registry dependencies and local dependencies without lifecycle scripts don't count
-- [ ] Unit tests for each case
-- [ ] README's list of what triggers the confirmation updated
+- [x] A `file:` dependency inside the project with a `postinstall` is listed as project code, and changed files are shown before prep asks
+- [x] A git dependency is listed as project code
+- [x] Registry dependencies and local dependencies without lifecycle scripts don't count
+- [x] Unit tests for each case
+- [x] README's list of what triggers the confirmation updated
 
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+**2026-10-15 — Done.** `deps.node` reads `dependencies`, `devDependencies` and `optionalDependencies` of the root and workspace manifests. Local dependencies (`file:`, `link:`, `portal:`, or a bare `./`/`../` path, inside the project) add their lifecycle scripts as hook lines, and their own local dependencies are followed, each package once. A local tarball (`file:vendor/x.tgz`) is listed as project code without being opened. Git dependencies (`git+`, `git:`, `github:`, `gitlab:`, `bitbucket:`, `gist:`, URLs ending in `.git`, and the `user/repo` shorthand) get a line each. Skipped: registry versions, `npm:` aliases, `workspace:`, remote tarball URLs, and local paths outside the project, which aren't in the sandbox. `link:` is listed when it has lifecycle scripts, as asked, although pnpm doesn't run them for links. `confirmPrep`'s comparison moved into `prepDecision` so it can be tested without stdin. README's list of what triggers the confirmation is updated.
+
+Verified: `TestDependencyHooks` (every spec form, nested local deps, workspace overlap, skipped specs, and a project with only registry and script-free local deps getting no hooks) and `TestPrepGateLocalDependency` (real project and record: after changing `tools/tool/build.js`, prep asks and the prompt lists the postinstall and the changed file). `go vet`, the unit suite and the full integration suite pass.
