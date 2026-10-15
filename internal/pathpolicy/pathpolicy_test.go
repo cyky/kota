@@ -259,3 +259,26 @@ func TestRefusalNamesResolvedPath(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestCheckReadOnly(t *testing.T) {
+	home := fixture(t)
+	tests := []struct {
+		path    string
+		refusal string
+	}{
+		{path: "Projects/app"},
+		{path: "Docs/specs-link"},
+		{path: ".", refusal: "home directory"},
+		{path: "/", refusal: "home directory"},
+		{path: ".ssh", refusal: "never mounted"},
+		{path: ".config/tool", refusal: "never mounted"},
+		{path: "Docs/ssh-link", refusal: "never mounted"},
+		{path: "Projects/nope", refusal: "no such file"},
+	}
+	for _, tt := range tests {
+		err := testPolicy(home).CheckReadOnly(filepath.Join(home, tt.path))
+		if tt.refusal == "" && err != nil || tt.refusal != "" && (err == nil || !strings.Contains(err.Error(), tt.refusal)) {
+			t.Errorf("CheckReadOnly(%s) = %v, want refusal %q", tt.path, err, tt.refusal)
+		}
+	}
+}

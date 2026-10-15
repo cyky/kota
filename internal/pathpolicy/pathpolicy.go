@@ -126,6 +126,28 @@ func Validate(project string, roExtras []string, p Policy) (Paths, error) {
 	return out, nil
 }
 
+// CheckReadOnly refuses path as a read-only mount when it contains the home
+// directory or overlaps a forbidden location, as for --ro paths. It is for
+// other paths a session reads, such as a linked worktree's git dir.
+func (p Policy) CheckReadOnly(path string) error {
+	home, err := resolve(p.Home)
+	if err != nil {
+		return fmt.Errorf("home directory: %w", err)
+	}
+	resolved, err := resolve(path)
+	if err != nil {
+		return err
+	}
+	c := checker{fold: p.CaseInsensitive}
+	if c.within(home, resolved) {
+		return fmt.Errorf("refusing to mount %s: it contains your home directory", path)
+	}
+	if f, ok := c.overlapsAny(resolved, p.forbidden()); ok {
+		return fmt.Errorf("refusing to mount %s: it overlaps %s, which is never mounted", path, f)
+	}
+	return nil
+}
+
 // forbidden returns each forbidden path plus, where it exists, its resolved
 // form: /var/run/docker.sock may be a link into ~/.rd, and /var into /private.
 func (p Policy) forbidden() []string {

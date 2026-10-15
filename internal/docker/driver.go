@@ -3,6 +3,7 @@ package docker
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,6 +115,43 @@ func RecoverProject(projectName string) error {
 		return fmt.Errorf("remove orphaned containers: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// RunOffline runs cmd with working directory dir in a throwaway container
+// of image, as uid:gid, with no network, a read-only root, no capabilities
+// and only mounts, each bind-mounted read-only at its own host path. It
+// returns stdout; a non-zero exit is an error carrying stderr.
+func RunOffline(image string, uid, gid int, mounts []string, dir string, cmd ...string) (string, error) {
+	args := []string{"run", "--rm", "--pull", "never", "--network", "none",
+		"--read-only", "--tmpfs", "/tmp", "-e", "HOME=/tmp",
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+		"--user", fmt.Sprintf("%d:%d", uid, gid), "--workdir", dir}
+	for _, m := range mounts {
+		arg, err := bindArg(m)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, "--mount", arg)
+	}
+	c := exec.Command("docker", append(append(args, "--", image), cmd...)...)
+	var stdout, stderr bytes.Buffer
+	c.Stdout, c.Stderr = &stdout, &stderr
+	if err := c.Run(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+// bindArg is the --mount value for a read-only bind of path at itself. The
+// value is CSV, so a path with a comma or quote is quoted.
+func bindArg(path string) (string, error) {
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	if err := w.Write([]string{"type=bind", "source=" + path, "target=" + path, "readonly"}); err != nil {
+		return "", err
+	}
+	w.Flush()
+	return strings.TrimSuffix(b.String(), "\n"), w.Error()
 }
 
 // Session is a started sandbox: networks and forwarder are up, the agent

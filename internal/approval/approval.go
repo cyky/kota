@@ -4,9 +4,13 @@
 package approval
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"os/exec"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -36,17 +40,26 @@ func NeedsConfirmation(fullAuto bool, s Status) bool {
 	return fullAuto && s.Git && len(s.Changes) > 0
 }
 
+// Runner runs cmd with working directory dir in an offline container that
+// sees only mounts, each read-only at its own host path, and returns its
+// stdout. A non-zero exit is an error.
+type Runner func(mounts []string, dir string, cmd ...string) (string, error)
+
 // ReadStatus returns the working tree state of project. Only changes inside
 // project count: in a subdirectory of a larger repository, the rest is out
-// of the agent's reach. Optional locks and fsmonitor are off, so git
-// neither writes the index nor runs a configured fsmonitor command.
-func ReadStatus(project string) (Status, error) {
-	inside, err := exec.Command("git", "-C", project, "rev-parse", "--is-inside-work-tree").Output()
-	if err != nil || strings.TrimSpace(string(inside)) != "true" {
-		return Status{}, nil
+// of the agent's reach.
+//
+// git never runs on the host here: the agent may have written the
+// repository's config (in a repository it created) or its .gitattributes,
+// and git status runs the filters and fsmonitor they name. run keeps
+// whatever they start offline and unable to write.
+func ReadStatus(project string, run Runner) (Status, error) {
+	repo, ok, err := FindRepo(project)
+	if err != nil || !ok {
+		return Status{}, err
 	}
-	out, err := exec.Command("git", "--no-optional-locks", "-c", "core.fsmonitor=false",
-		"-C", project, "status", "--porcelain", "--untracked-files=normal", "--", ".").Output()
+	out, err := run(repo.Mounts, project, "git", "-c", "safe.directory=*", "-c", "core.fsmonitor=false",
+		"--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--", ".")
 	if err != nil {
 		return Status{}, fmt.Errorf("git status: %w", err)
 	}
@@ -57,6 +70,87 @@ func ReadStatus(project string) (Status, error) {
 		}
 	}
 	return s, nil
+}
+
+// Repo is the git repository a project belongs to.
+type Repo struct {
+	// Mounts are the host paths git reads for the project's status: the
+	// project, plus the .git that holds it and, when .git is a file, the git
+	// dir and common dir it leads to. None lies inside another.
+	Mounts []string
+}
+
+// FindRepo finds the repository of project the way git discovers it, by
+// looking for .git in project and each directory above it, without running
+// git. ok is false when there is none.
+func FindRepo(project string) (repo Repo, ok bool, err error) {
+	for dir := project; ; dir = filepath.Dir(dir) {
+		dotGit := filepath.Join(dir, ".git")
+		info, err := os.Lstat(dotGit)
+		switch {
+		case err == nil:
+			return repoAt(project, dotGit, info)
+		case !errors.Is(err, fs.ErrNotExist):
+			return Repo{}, false, err
+		case filepath.Dir(dir) == dir:
+			return Repo{}, false, nil
+		}
+	}
+}
+
+func repoAt(project, dotGit string, info fs.FileInfo) (Repo, bool, error) {
+	paths := []string{project, dotGit}
+	switch {
+	case info.IsDir():
+	case info.Mode().IsRegular():
+		// A linked worktree or submodule checkout: .git names the git dir,
+		// whose commondir names the directory holding config and objects.
+		gitDir, err := pointer(dotGit, "gitdir: ")
+		if err != nil {
+			return Repo{}, false, err
+		}
+		paths = append(paths, gitDir)
+		common, err := pointer(filepath.Join(gitDir, "commondir"), "")
+		if err == nil {
+			paths = append(paths, common)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return Repo{}, false, err
+		}
+	default:
+		return Repo{}, false, fmt.Errorf("%s is a %s, not a directory or file", dotGit, info.Mode().Type())
+	}
+	return Repo{Mounts: outermost(paths)}, true, nil
+}
+
+// pointer reads a file holding one path after prefix, as .git files and
+// commondir do, and returns it made absolute against the file's directory.
+func pointer(file, prefix string) (string, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	p, ok := strings.CutPrefix(strings.TrimSpace(string(data)), prefix)
+	if !ok || p == "" {
+		return "", fmt.Errorf("%s: unexpected content", file)
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(filepath.Dir(file), p)
+	}
+	return filepath.Clean(p), nil
+}
+
+// outermost drops each path that is inside another one.
+func outermost(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		inside := slices.ContainsFunc(paths, func(o string) bool {
+			return o != p && strings.HasPrefix(p, strings.TrimSuffix(o, "/")+"/")
+		})
+		if !inside && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // maxListed is how many changed paths the prompt shows.

@@ -1123,7 +1123,7 @@ func confirmFullAuto(project, agent string, auto bool) error {
 	if !approval.FullAuto(agent, auto) {
 		return nil
 	}
-	status, err := approval.ReadStatus(project)
+	status, err := approval.ReadStatus(project, offlineRunner)
 	if err != nil {
 		return err
 	}
@@ -1138,6 +1138,24 @@ func confirmFullAuto(project, agent string, auto bool) error {
 		return errors.New(msg)
 	}
 	return nil
+}
+
+// offlineRunner runs git for approval.ReadStatus in the base image, offline
+// and read-only, so filters or an fsmonitor the agent configured never run
+// on the host. Paths outside the project, such as a linked worktree's git
+// dir, must pass the --ro path policy.
+func offlineRunner(mounts []string, dir string, cmd ...string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	policy := pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT"))
+	for _, m := range mounts {
+		if err := policy.CheckReadOnly(m); err != nil {
+			return "", err
+		}
+	}
+	return docker.RunOffline(baseImage, os.Getuid(), os.Getgid(), mounts, dir, cmd...)
 }
 
 func printModels(w io.Writer, c models.Catalog, err error) {

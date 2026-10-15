@@ -56,3 +56,15 @@ esac
 		})
 	}
 }
+
+func TestBindArg(t *testing.T) {
+	for path, want := range map[string]string{
+		"/Users/me/app":    "type=bind,source=/Users/me/app,target=/Users/me/app,readonly",
+		"/Users/me/a,b":    `type=bind,"source=/Users/me/a,b","target=/Users/me/a,b",readonly`,
+		`/Users/me/say"hi`: `type=bind,"source=/Users/me/say""hi","target=/Users/me/say""hi",readonly`,
+	} {
+		if got, err := bindArg(path); err != nil || got != want {
+			t.Errorf("bindArg(%q) = %q, %v; want %q", path, got, err, want)
+		}
+	}
+}

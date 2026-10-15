@@ -97,12 +97,32 @@ func git(t *testing.T, dir string, args ...string) {
 	}
 }
 
-func TestReadStatus(t *testing.T) {
+// hostRunner runs the command on the host. Only tests use it; it checks
+// that the command's directory is among the mounts.
+func hostRunner(t *testing.T) Runner {
+	return func(mounts []string, dir string, cmd ...string) (string, error) {
+		if !slices.ContainsFunc(mounts, func(m string) bool { return dir == m || strings.HasPrefix(dir, m+"/") }) {
+			t.Errorf("dir %s not in mounts %q", dir, mounts)
+		}
+		c := exec.Command(cmd[0], cmd[1:]...)
+		c.Dir = dir
+		out, err := c.Output()
+		return string(out), err
+	}
+}
+
+func isolateGit(t *testing.T) {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+func TestReadStatus(t *testing.T) {
+	isolateGit(t)
+	ReadStatus := func(project string) (Status, error) { return ReadStatus(project, hostRunner(t)) }
 
 	plain := t.TempDir()
 	if s, err := ReadStatus(plain); err != nil || s.Git {
@@ -158,5 +178,69 @@ func TestConfirmLeavesTheRestOfInput(t *testing.T) {
 	rest := new(strings.Builder)
 	if _, err := io.Copy(rest, in); err != nil || rest.String() != "for the agent\n" {
 		t.Errorf("rest of input = %q, %v", rest.String(), err)
+	}
+}
+
+func TestReadStatusNeverRunsGitWithoutARepo(t *testing.T) {
+	called := false
+	run := func([]string, string, ...string) (string, error) { called = true; return "", nil }
+	if s, err := ReadStatus(t.TempDir(), run); err != nil || s.Git || called {
+		t.Errorf("non-git project: %+v, %v, runner called %v", s, err, called)
+	}
+}
+
+func TestFindRepo(t *testing.T) {
+	isolateGit(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(root, "main")
+	os.Mkdir(main, 0o755)
+	git(t, main, "init", "-q")
+	git(t, main, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+	sub := filepath.Join(main, "sub")
+	os.Mkdir(sub, 0o755)
+	wt := filepath.Join(root, "wt")
+	git(t, main, "worktree", "add", "-q", wt)
+	os.Mkdir(filepath.Join(wt, "sub"), 0o755)
+	plain := filepath.Join(root, "plain")
+	os.Mkdir(plain, 0o755)
+	linked := filepath.Join(root, "linked")
+	os.Mkdir(linked, 0o755)
+	os.Symlink(filepath.Join(main, ".git"), filepath.Join(linked, ".git"))
+
+	tests := []struct {
+		name    string
+		project string
+		ok      bool
+		mounts  []string
+		err     string
+	}{
+		{name: "repository root", project: main, ok: true, mounts: []string{main}},
+		{name: "subdirectory", project: sub, ok: true, mounts: []string{sub, filepath.Join(main, ".git")}},
+		{name: "linked worktree", project: wt, ok: true, mounts: []string{wt, filepath.Join(main, ".git")}},
+		{name: "worktree subdirectory", project: filepath.Join(wt, "sub"), ok: true,
+			mounts: []string{filepath.Join(wt, "sub"), filepath.Join(wt, ".git"), filepath.Join(main, ".git")}},
+		{name: "no repository", project: plain},
+		{name: "symlinked .git", project: linked, err: "not a directory or file"},
+	}
+	for _, tt := range tests {
+		repo, ok, err := FindRepo(tt.project)
+		switch {
+		case tt.err != "":
+			if err == nil || !strings.Contains(err.Error(), tt.err) {
+				t.Errorf("%s: err = %v, want %q", tt.name, err, tt.err)
+			}
+		case err != nil || ok != tt.ok || !slices.Equal(repo.Mounts, tt.mounts):
+			t.Errorf("%s: FindRepo = %q, %v, %v; want %q, %v", tt.name, repo.Mounts, ok, err, tt.mounts, tt.ok)
+		}
+	}
+
+	// The worktree's status works with only those paths.
+	os.WriteFile(filepath.Join(wt, "sub", "x.txt"), []byte("x"), 0o644)
+	s, err := ReadStatus(wt, hostRunner(t))
+	if err != nil || !slices.Equal(s.Changes, []string{"?? sub/"}) {
+		t.Errorf("worktree status: %+v, %v", s, err)
 	}
 }
