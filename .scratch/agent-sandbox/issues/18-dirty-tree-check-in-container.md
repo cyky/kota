@@ -1,6 +1,8 @@
-# 18 — Run the full-auto dirty-tree check in an offline container
+# DONE — 18 — Run the full-auto dirty-tree check in an offline container
 
-Status: ready-for-agent
+Status: done
+
+Resolved in: b500603
 
 ## Parent
 
@@ -18,13 +20,21 @@ The prompt, the listed changes and the abort message stay the same. Non-git proj
 
 ## Acceptance criteria
 
-- [ ] No host `git` command runs against the project's repository as part of the full-auto confirmation
-- [ ] Integration test: a repo whose config sets a clean filter that writes a marker file; the confirmation runs, and no marker appears on the host
-- [ ] Uncommitted changes inside the project (modified, staged, untracked) are still listed and require typing `y`; changes outside a subdirectory project are still ignored
-- [ ] Non-git projects, and worktrees or submodule checkouts whose git dir is outside the project, behave as documented (no prompt, or a clear message)
-- [ ] The check container gets no network and cannot write the project
-- [ ] README updated
+- [x] No host `git` command runs against the project's repository as part of the full-auto confirmation
+- [x] Integration test: a repo whose config sets a clean filter that writes a marker file; the confirmation runs, and no marker appears on the host
+- [x] Uncommitted changes inside the project (modified, staged, untracked) are still listed and require typing `y`; changes outside a subdirectory project are still ignored
+- [x] Non-git projects, and worktrees or submodule checkouts whose git dir is outside the project, behave as documented (no prompt, or a clear message)
+- [x] The check container gets no network and cannot write the project
+- [x] README updated
 
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+**2026-10-15 — Done.** `approval.FindRepo` finds the repository without git: `.git` in the project or a directory above, following the `gitdir:` and `commondir` pointers of a `.git` file; a symlinked `.git` is refused. `git status` runs through `docker.RunOffline`: base image, `--network none`, read-only root, all capabilities dropped, `no-new-privileges`, host UID, `--pull never`, and read-only mounts of only the project, its `.git`, and the git dir and common dir, each at its host path. Paths outside the project must pass `pathpolicy.CheckReadOnly` (the `--ro` rules).
+
+Verified: an integration test with a clean filter and a changed file timestamp. In the container the filter wrote nothing on the host and the status was correct; a control run through host git did create the marker. A linked-worktree status works in the container, with a comma in the path to check `--mount` quoting. Unit tests cover discovery (repo root, subdirectory, worktree, worktree subdirectory, no repo, symlinked `.git`), the policy check and the mount quoting.
+
+Not verified: the CLI wrapper that applies the policy before calling Docker has no end-to-end test (no CLI end-to-end tests, per the PRD). Behaviour change: bare-repository files at the project root no longer count as a repository, so such a project isn't asked about.
