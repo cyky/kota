@@ -12,12 +12,13 @@ I can't give the agent the host's Docker. Controlling a Docker engine is root on
 
 ## Solution
 
-Projects that need containers declare their **Engine images** in `localllm.yaml`. Each such project gets its own **Engine VM**: a small Lima VM, managed by localllm, that runs only the containers the agent starts.
+Projects that need containers declare their **Engine images** in `localllm.yaml`. Each such project gets its own **Engine VM**: a small QEMU VM, managed by localllm, that runs only the containers the agent starts. Every **Engine VM** boots from one **Engine base disk** that `localllm build` makes.
 
 - **Its network is locked down from outside the VM,** by the hypervisor's network setup on the host. The agent has root inside the VM, so rules inside it would mean nothing. It reaches only its own project's **Sandbox**: no internet, no DNS, no host loopback, no LAN. It never has a route out, not even during **Prep**.
 - **Prep downloads the images,** outside the **Engine VM**, in its fetch phase, with no project code running. It checks them against recorded digests and keeps them as archives. **Prep**'s existing confirmation already covers changes to `localllm.yaml`.
 - **Every Session starts the Engine VM from a clean disk** with the **Engine images** loaded, so nothing carries over between **Sessions**.
 - **Probes check it before every Session,** like the **Sandbox**. A failure blocks the **Session**.
+- **Only that project's Sandbox can use its Engine VM.** The Docker API requires a TLS client certificate made for that project, because the route passes through the host's loopback, which other containers can reach.
 - **The agent's environment points Docker and testcontainers at its Engine VM.** testcontainers works without changes to the project's tests.
 - **`--no-engine` starts a Session without the Engine VM on purpose.** The agent is then told its container **Gates** can't run, so it reports them as not run instead of passed.
 - **It must work on Linux as well as macOS.** No macOS-only networking.
@@ -54,7 +55,7 @@ Projects without an `engine:` section are unchanged: no VM, no extra probes, no 
 18. As a developer, I want the extra startup time of a project with an **Engine VM** to stay around 15 seconds, so that the engine doesn't make **Sessions** painful to start.
 19. As a developer, I want `localllm shell` to get the **Engine VM** too, so that I can run the container **Gates** by hand exactly as the agent would.
 20. As a developer, I want the **Engine VM** stopped when the **Session** ends, including on Ctrl-C or a crash, so that idle VMs don't hold memory.
-21. As a developer, I want a **Session** to refuse to start, with the reason and a fix, when the **Engine VM** can't start, its images haven't been prepped, or Lima isn't installed, so that I never get an agent that silently can't run its **Gates**.
+21. As a developer, I want a **Session** to refuse to start, with the reason and a fix, when the **Engine VM** can't start, its images haven't been prepped, the **Engine base disk** hasn't been built, or QEMU isn't installed, so that I never get an agent that silently can't run its **Gates**.
 22. As a developer, I want `--no-engine` to start a **Session** without the **Engine VM**, so that I can let the agent work on something that doesn't need containers when the engine is unavailable.
 23. As a developer, I want the agent told in its instructions and environment when the **Engine VM** is unavailable, so that it reports container **Gates** as not run instead of claiming the task is done.
 
@@ -72,7 +73,7 @@ Projects without an `engine:` section are unchanged: no VM, no extra probes, no 
 
 ### Verification
 
-33. As a developer, I want probes run inside the **Engine VM** before every **Session**, checking that the internet, external DNS, the host and the LAN are unreachable, so that a Lima, QEMU or OS update can't silently open the **Engine VM**.
+33. As a developer, I want probes run inside the **Engine VM** before every **Session**, checking that the internet, external DNS, the host and the LAN are unreachable, so that a QEMU or OS update can't silently open the **Engine VM**.
 34. As a developer, I want probes from the **Sandbox** checking that the **Engine VM**'s Docker API answers and that a container's published port is reachable, so that I know the engine is usable, not just closed.
 35. As a developer, I want a failing **Engine VM** probe to block the **Session** the same way a **Sandbox** probe does, so that there's one rule for containment.
 36. As a developer, I want `localllm check` to show the **Engine VM**'s status, its declared images and its probe results, so that I can inspect it without starting an agent.
@@ -94,24 +95,39 @@ Projects without an `engine:` section are unchanged: no VM, no extra probes, no 
 43. As a developer, I want the **Engine VM** to work on Linux with KVM as well as on macOS, so that I can use localllm on a Linux machine later.
 44. As a developer, I want a clear error on a Linux machine without `/dev/kvm`, so that I don't get an **Engine VM** too slow to use without knowing why.
 
+### Engine base disk and the engine route (added after the spike)
+
+45. As a developer, I want `localllm build` to build the **Engine base disk** once, online, from a digest-checked cloud image, so that every **Engine VM** boots from a known clean disk.
+46. As a developer, I want the **Engine base disk** build to run no project code and to be separate from any project's **Engine VM**, so that "the **Engine VM** never has a route out" stays true.
+47. As a developer, I want **Sessions** to warn when the **Engine base disk** is older than the current build definition, with the command that rebuilds it, as the project image does today, so that I pick up updates without them changing under a running project.
+48. As a developer, I want each project's **Engine VM** to accept only a TLS client certificate made for that project, so that other containers on my machine, including another project's **Prep**, can't use it.
+49. As a developer, I want the TLS material to reach the **Engine VM** at boot without being stored on the **Engine base disk**, so that the shared disk holds no keys.
+50. As a developer, I want Docker in the **Engine VM** to publish container ports only in a fixed range, and only that range and the API forwarded, so that the agent's route opens nothing else.
+51. As a developer, I want the **Engine VM** booted directly into its kernel, skipping firmware and boot menu, so that a **Session** with an engine starts in seconds.
+
 ## Implementation Decisions
 
 ### Order of work
 
-- **A spike comes first** and decides the VM backend. It must show, on macOS and ideally on Linux:
-  1. that the **Engine VM**'s network can be locked down from outside the VM, with only the agent's route open;
-  2. that the agent's route reaches both the Docker API and the containers' published ports;
-  3. how long a clean-disk start with images loaded takes.
+- **The spike (issue 01) is done.** Findings are in its comments. In short: Lima can't restrict its network, and plain QEMU can. User-mode networking with `restrict=on` blocked the internet, DNS, the host and the LAN, even for root with a default route added. A real testcontainers Postgres test passed over the agent's route. A clean-disk boot with TLS and a direct kernel boot reached a ready Docker API in 3.3 s, and 5.4 s with `postgres:16-alpine` loaded. Not yet tested on Linux.
 
-  Try in this order: Lima's own network settings, then Lima on QEMU, then plain QEMU with user-mode networking `restrict=on` and explicit port forwards. If none works, the feature isn't built. If a clean-disk start can't get near 15 seconds, the user decides before falling back to keeping the VM between **Sessions**.
-- Everything else depends on the spike's result. The interfaces below don't, so the pure modules can be built in parallel once the spike confirms the approach.
+### Engine VM setup (from the spike)
+
+- **QEMU, run directly by localllm.** No Lima.
+- **Network:** `-netdev user,restrict=on`, with `hostfwd` bound to 127.0.0.1 only for the Docker API port and the published-port range. The agent reaches them through its forwarder, as it reaches the **Gateway**.
+- **Disk:** `-snapshot` over the **Engine base disk**, so every boot is clean and the base disk never changes.
+- **Boot:** direct kernel boot, with `-kernel` and `-initrd` taken from the **Engine base disk** at build time. No UEFI or GRUB, which cost about 14 s.
+- **Engine API:** dockerd listens on TCP with `--tlsverify`. Without TLS, dockerd also delays its own start by 15 s on purpose. A per-project CA, server certificate and client certificate are made by localllm. The server side reaches the VM through `-fw_cfg` and is read at boot, and the client side goes only into that project's **Sandbox**.
+- **Published ports:** the **Engine base disk** sets `net.ipv4.ip_local_port_range` to a small fixed range (40000-40099 in the spike), so `docker run -P` and testcontainers only use forwarded ports. Several projects' **Engine VMs** need different host-side ports, so localllm maps each VM's range to free host ports, and the forwarder maps them back to the in-VM numbers the agent sees.
+- **Engine base disk build:** one online boot of a digest-checked Debian cloud image with a cloud-init seed. It installs Docker, sets the port range and the TLS service, disables cloud-init and `systemd-networkd-wait-online`, and powers off. Part of `localllm build`, like the base image.
+- **Portability:** everything above is QEMU core and works the same on Linux, where the accelerator is KVM instead of HVF, and an x86_64 host needs amd64 artifacts. No macOS-only parts (vmnet, Virtualization.framework) are used.
 
 ### Modules
 
 New deep modules, pure and testable without a VM:
 
 - **EngineConfig.** `Parse(localllm.yaml engine section) → config | none | error`. It holds the image references and the VM size. It validates image references, rejects unknown keys and applies defaults (2 CPUs, 2 GB). An absent section means "no engine".
-- **EngineSpec.** `Build(project, config, paths) → VM definition`. The definition has no host mounts, a network locked down from outside the VM, only the agent's ports forwarded, a throwaway disk layer over a clean base disk, and the configured size. Its output format (a Lima config or QEMU arguments) follows the spike, behind the same interface. Per-project names derive from the same project hash as the volumes.
+- **EngineSpec.** `Build(project, config, paths) → VM definition`. The definition has no host mounts, a network locked down from outside the VM, only the agent's ports forwarded, a throwaway disk layer over a clean base disk, and the configured size. Its output is the QEMU command line: the accelerator per host OS, `restrict=on`, the forwards, `-snapshot`, the direct kernel boot, and the `fw_cfg` entries. Per-project names derive from the same project hash as the volumes.
 - **EngineImages.** `Plan(declared images, recorded digests) → downloads, changes, new record`. It works out which images to download, the added, removed and moved tags for **Prep**'s confirmation, and the digest record to store after a successful **Prep**.
 
 Changed modules:
@@ -123,7 +139,9 @@ Changed modules:
 
 Thin adapters and wiring:
 
-- **EngineDriver.** A thin adapter over `limactl` or QEMU: start from the clean base disk, load image archives through the Docker API, stop, delete, status.
+- **EngineDriver.** A thin adapter over QEMU: start from the **Engine base disk**, wait for the TLS API, load image archives through the Docker API, stop, status.
+- **EngineCerts.** Makes and stores the per-project CA, server and client certificates in localllm's data directory, outside the project and outside the **Sandbox**.
+- **Engine base disk build.** Part of `localllm build`: download and check the cloud image, build the seed, run the one online boot, and keep the kernel and initrd next to the disk.
 - **Prep.** The fetch phase downloads missing or moved images with a registry tool (for example `crane` or `skopeo`) into a per-project archive cache, checked against digests.
 - **CLI.** `run` and `shell` start and stop the **Engine VM** around the **Session**, with stop on interrupt through the existing interrupt handling. `--no-engine` on `run` and `shell`. `check` shows engine status, images and probes. `clean` deletes the **Engine VM** and the archives.
 - **Base image.** Adds the Docker CLI and the registry tool.
@@ -133,7 +151,7 @@ Thin adapters and wiring:
 - The **Engine VM** is opt-in: only projects with an `engine:` section get one.
 - One **Engine VM** per project. It runs only while a **Session** of that project does, and the existing one-**Session**-per-project rule covers concurrency.
 - Every **Session** start resets the VM's disk to the clean base and loads the archives.
-- A failure to start, missing archives, a missing Lima or QEMU, or a failed probe refuses the **Session**, unless `--no-engine` is given.
+- A failure to start, missing archives, a missing **Engine base disk** or QEMU, or a failed probe refuses the **Session**, unless `--no-engine` is given.
 - Default VM size: 2 CPUs, 2 GB, configurable per project.
 
 ## Testing Decisions
@@ -141,13 +159,15 @@ Thin adapters and wiring:
 - Good tests check external behaviour through module interfaces: given inputs, assert on the returned config, definition, plan or probe list. They don't assert on internal helpers or call order.
 - **Unit tests (table-driven, no VM):**
   - EngineConfig: absent section, defaults, valid and invalid image references, unknown keys, size overrides.
-  - EngineSpec: no host mounts ever; the network is restricted; only the agent's ports are forwarded; the throwaway disk layer is used; names are stable per project and differ across projects; the size is applied.
+  - EngineSpec: no host mounts ever; the network is restricted; only the agent's ports are forwarded; the throwaway disk layer is used; names are stable per project and differ across projects; the size is applied; forwards bind only to 127.0.0.1; the accelerator matches the host OS; the TLS material is passed through `fw_cfg`, never through a host mount.
+  - EngineCerts: a client certificate signed for one project is not accepted by another project's CA.
   - EngineImages: first **Prep**, unchanged images, an added or removed image, a moved tag, and the record after success.
   - SandboxSpec: engine variables are present only for engine projects; `--no-engine` sets the unavailable signal; the **Sandbox** container is still unprivileged with no Docker socket.
   - Probes: the engine probe set covers internet, DNS, host and LAN, and the reachability probes cover the API and a published port.
   - Agent config: the instructions mention engine availability correctly in both states, for opencode and pi.
-- **Integration tests**, tagged and skipped when Lima or QEMU isn't available, like the Docker integration tests:
-  - Containment: boot a real **Engine VM** and assert every must-fail probe fails and every must-succeed probe succeeds.
+- **Integration tests**, tagged and skipped when QEMU or the **Engine base disk** isn't available, like the Docker integration tests:
+  - Containment: boot a real **Engine VM** and assert every must-fail probe fails and every must-succeed probe succeeds, including from a privileged host-network container with a root-added default route.
+  - Route authentication: a client without the project's certificate, and a client with another project's certificate, are refused.
   - Clean disk: something written in one **Session**'s **Engine VM** is gone in the next.
   - End to end: a temp Go or TypeScript project with a testcontainers Postgres test and `postgres` declared as an **Engine image**. Prep it, then run the test in a `shell` **Session**, and it passes offline.
 - No tests for EngineDriver, Prep wiring or the CLI, which stay thin.
@@ -167,6 +187,7 @@ Thin adapters and wiring:
 ## Further Notes
 
 - This amends stories 22 and 24 of the agent sandbox PRD (`.scratch/agent-sandbox/PRD.md`) without weakening them. The host's Docker socket stays out of reach, and the **Sandbox** container stays unprivileged. The new engine lives outside both.
-- On this Mac, Lima 2.2.1 and QEMU are installed through Homebrew. libvirt and socket_vmnet aren't.
+- On this Mac, QEMU is installed through Homebrew. Lima is installed too, but isn't used.
+- Linux support is tested later (issue 09). Until then, nothing in the engine code may assume macOS.
 - testcontainers' Ryuk needs the Docker socket mounted into a container. Disabling it is safe here, because localllm resets the **Engine VM** at every **Session** start.
 - Memory: the **Engine VM** runs alongside the local model, so its default size stays small.

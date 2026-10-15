@@ -25,8 +25,12 @@ A project check (tests, lint, build) that the agent runs itself inside the **Ses
 _Avoid_: CI, verification step, quality check
 
 **Engine VM**:
-A dedicated Lima VM, managed by localllm, whose container engine runs the containers the agent starts during a **Session** (for example testcontainers), apart from the host's Docker.
-_Avoid_: Docker-in-Docker, sidecar engine, host Docker
+A dedicated QEMU VM, managed by localllm, whose container engine runs the containers the agent starts during a **Session** (for example testcontainers), apart from the host's Docker.
+_Avoid_: Docker-in-Docker, sidecar engine, host Docker, Lima VM
+
+**Engine base disk**:
+The clean disk every **Engine VM** boots from, built once online by localllm and never changed by a **Session**.
+_Avoid_: engine image (that's an **Engine image**), template
 
 **Engine image**:
 A container image a project declares in `localllm.yaml` for its **Engine VM**, downloaded during **Prep** outside the **Engine VM** and loaded into it, because the **Engine VM** never has a route out.
@@ -38,6 +42,7 @@ _Avoid_: test image, service image
 - A **Gate** runs inside a **Session**, never on the host
 - **Prep** runs before **Sessions** and is the only step with network access to registries
 - A **Gate** that needs containers (for example testcontainers) starts them in the **Engine VM**, never in the host's Docker
+- Every **Engine VM** boots from the same **Engine base disk**, through a throwaway layer
 - An **Engine VM** belongs to exactly one project. It runs only while a **Session** of that project does, and starts every **Session** from a clean disk with its **Engine images** loaded, so nothing carries over between **Sessions**
 - An **Engine VM** has the same network containment as the **Sandbox**: it reaches only its own project's **Sandbox**, never has a route out (not even during **Prep**), is enforced from outside the VM, and checked by probes before every **Session**
 - A project has an **Engine VM** only if it declares **Engine images**; other projects' **Sessions** never start one
@@ -56,4 +61,5 @@ _Avoid_: test image, service image
 ## Flagged ambiguities
 
 - "gate" could have meant a check localllm runs after the **Session**, before the user accepts the changes. Resolved: a **Gate** is run by the agent inside the **Session**.
+- The **Engine VM** was first planned as a Lima VM. Resolved: it is a QEMU VM, because Lima can't lock its network down from outside the VM.
 - "a separate container that serves Docker" was considered for the agent's containers. Resolved: they run in the **Engine VM**, because a Docker-serving container would have to be privileged on the same VM as the host's Docker.
