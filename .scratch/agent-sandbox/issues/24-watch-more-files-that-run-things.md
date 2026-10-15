@@ -1,6 +1,8 @@
-# 24 — Report more files that run things
+# DONE — 24 — Report more files that run things
 
-Status: ready-for-agent
+Status: done
+
+Resolved in: 1526816
 
 ## Parent
 
@@ -20,10 +22,16 @@ Add them to the watched list, at any depth where the tool reads them there. Keep
 
 ## Acceptance criteria
 
-- [ ] Each file above is reported when added, modified or deleted
-- [ ] Unit tests cover the new patterns, including a nested `build.rs` and a file inside `.idea/`
-- [ ] README's list of reported files updated
+- [x] Each file above is reported when added, modified or deleted
+- [x] Unit tests cover the new patterns, including a nested `build.rs` and a file inside `.idea/`
+- [x] README's list of reported files updated
 
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+**2026-10-15 — Done.** `changereport.Watched` gains `mise.toml`, `.mise.toml`, `mise.local.toml`, `.mise.local.toml`, `.tool-versions`, `.gitattributes`, `.gitmodules`, `.cargo/`, `build.rs`, `justfile`, `Justfile`, `.justfile`, `Taskfile.yml`, `Taskfile.yaml` and `.idea/`, all matched at any depth (cargo reads `.cargo/config.toml` in every directory up from where it runs). The `mise.local.toml` variants and `.justfile` go beyond the issue's list. As for every watched file, those under skipped directories (`target/`, `node_modules/`, ...) aren't reported. README's list of reported files updated.
+
+Verified: a new `TestDiff` case adds every new file at the root and nested (`crates/core/build.rs`, `.idea/runConfigurations/x.xml`, ...) and checks that `target/debug/build.rs` and `src/build.rs.md` aren't reported. `TestHostToolFilesModifiedAndDeleted` covers modification and deletion of a nested `build.rs`, an `.idea/` file, `.cargo/config.toml` and `Justfile`. `go vet` and the unit suite pass; the integration suite wasn't run, since only the pattern list changed.
