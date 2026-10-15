@@ -1,6 +1,8 @@
-# 25 — Probe and build polish
+# DONE — 25 — Probe and build polish
 
-Status: ready-for-agent
+Status: done
+
+Resolved in: 85ba688
 
 ## Parent
 
@@ -17,12 +19,24 @@ Small fixes found in the pre-trial review, done together:
 
 ## Acceptance criteria
 
-- [ ] Pinned probe passes for a pinned path containing a space (unit test on the decoding, integration test with such a path)
-- [ ] IPv6 internet and DNS probes run, must fail, and fail on the current sandbox
-- [ ] Base and forwarder images build from digest-pinned `FROM` lines
-- [ ] Usage text aligned
-- [ ] README probe list updated
+- [x] Pinned probe passes for a pinned path containing a space (unit test on the decoding, integration test with such a path)
+- [x] IPv6 internet and DNS probes run, must fail, and fail on the current sandbox
+- [x] Base and forwarder images build from digest-pinned `FROM` lines
+- [x] Usage text aligned
+- [x] README probe list updated
 
 ## Blocked by
 
 None - can start immediately
+
+## Comments
+
+**2026-10-15 — Done.**
+1. The pinned probe escapes the path as the kernel writes mountinfo (`probe.MountinfoEscape`: space, tab, newline and backslash as octal) and compares it with the raw field. The path now goes to awk through the environment, since `awk -v` interprets backslashes and would have broken those paths too.
+2. New must-fail probes: `internet [2606:4700:4700::1111]:443` and `internet dns ipv6 example.com` (`getent ahostsv6`).
+3. `NODE_IMAGE`, `GO_IMAGE` and `ALPINE_IMAGE` default to `tag@sha256:<index digest>` (today's registry digests), so the tag stays on the line instead of in a comment; Docker uses the digest. A comment says how to bump them.
+4. The `clean` usage line is aligned.
+
+README probe description mentions IPv4/IPv6 and AAAA lookups.
+
+Verified: `TestMountinfoEscape`; `TestPinnedProbeRuns` runs the real probe command against a mountinfo fixture with escaped paths. Integration `TestPinnedPathWithSpace` (`core.hooksPath` = `git hooks/_`, so `/workspace/git hooks` is pinned) passes, and both IPv6 probes ran and failed; without the escaping it fails on the real sandbox. Both Dockerfiles built from the pinned digests under throwaway tags, which were then removed; the user's `localllm-base` and `localllm-forwarder` images weren't rebuilt. `go vet`, the unit suite and the full integration suite pass.
