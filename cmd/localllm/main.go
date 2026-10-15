@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +26,8 @@ import (
 	"localllm/internal/check"
 	"localllm/internal/deps"
 	"localllm/internal/docker"
+	"localllm/internal/engine"
+	"localllm/internal/enginevm"
 	"localllm/internal/gatewaykey"
 	"localllm/internal/interrupt"
 	"localllm/internal/mask"
@@ -44,6 +47,11 @@ const (
 	forwarderImage = "localllm-forwarder:latest"
 	defaultGateway = "http://host.docker.internal:8080"
 	defaultAgent   = opencode.Agent
+	// engineHostAlias is the host as the engine forwarder reaches it, where
+	// QEMU's port forwards listen on 127.0.0.1.
+	engineHostAlias = "host.docker.internal"
+	// engineBootTimeout bounds the Engine VM's boot to a ready Docker API.
+	engineBootTimeout = 60 * time.Second
 
 	opencodeConfigPath = "/etc/localllm/opencode.json"
 	// piAgentDir is pi's config directory. It is writable, because pi
@@ -57,7 +65,8 @@ const (
 const usage = `usage: localllm <command> [flags]
 
 commands:
-  build                 build the sandbox images
+  build                 build the sandbox images and, with QEMU installed,
+                        the Engine base disk
   build dir             build dir's image from its ` + projectimage.File + `, on top
                         of the base image; prep, run, shell and check use it
   prep [dir]            install dir's dependencies with network access and
@@ -156,8 +165,30 @@ func buildBase() error {
 			return fmt.Errorf("build %s: %w", images[name], err)
 		}
 	}
-	return nil
+	layout, err := engineLayout()
+	if err != nil {
+		return err
+	}
+	err = enginevm.BuildBase(layout, engineHost(), os.Stdout)
+	if errors.Is(err, enginevm.ErrNoQEMU) {
+		fmt.Printf("skipping the Engine base disk: %v. Projects with an engine section in %s need it.\n", err, engine.ConfigFile)
+		return nil
+	}
+	return err
 }
+
+// engineLayout is where engine data lives: the Engine base disk and each
+// project's image archives, in the user cache dir with localllm's other
+// host state, outside every project and sandbox.
+func engineLayout() (engine.Layout, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return engine.Layout{}, err
+	}
+	return engine.Layout{Root: filepath.Join(cache, "localllm", "engine")}, nil
+}
+
+func engineHost() engine.Host { return engine.Host{OS: runtime.GOOS, Arch: runtime.GOARCH} }
 
 // buildProject builds a project's image from its Dockerfile on top of the
 // base image.
@@ -311,6 +342,142 @@ type session struct {
 	// image is the agent container's image: the base image or the
 	// project's own.
 	image projectimage.Choice
+	// engine is the session's Engine VM, nil when it has none.
+	engine *engineSession
+}
+
+// engineSession is a session's Engine VM: worked out by prepareEngine,
+// started by start and stopped by stop.
+type engineSession struct {
+	vm         engine.VM
+	cmd        engine.Command
+	certs      engine.Certs
+	archiveDir string
+	archives   []engine.Archive
+	// warning says the Engine base disk should be rebuilt.
+	warning string
+	running *enginevm.VM
+	started time.Time
+}
+
+// prepareEngine works out project's Engine VM for a session: the Engine
+// base disk, the prepped archives, host ports, and TLS certificates made
+// for this session in sessionDir. It returns nil when the project has no
+// engine section, and an error with the fix when the VM can't start.
+func prepareEngine(project, sessionDir string) (*engineSession, error) {
+	layout, err := engineLayout()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := engine.Read(project)
+	if err != nil {
+		// A broken localllm.yaml shouldn't block a project that never used
+		// an engine, but an engine project can't tell which images to load.
+		if rec, rerr := engine.LoadRecord(layout.ArchiveDir(project)); rerr == nil && rec == nil {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w; the Engine VM can't start without knowing its images", err)
+	}
+	if cfg == nil {
+		return nil, nil
+	}
+	host := engineHost()
+	m, err := engine.MachineFor(host)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := enginevm.FindQEMU(m); err != nil {
+		return nil, fmt.Errorf("%s declares engine images, but %w", engine.ConfigFile, err)
+	}
+	base, warning, err := layout.LoadBase(host.Arch)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := engine.LoadRecord(layout.ArchiveDir(project))
+	if err != nil {
+		return nil, err
+	}
+	archives, err := rec.Select(cfg.Images)
+	if err != nil {
+		return nil, fmt.Errorf("%w; run 'localllm prep %s'", err, project)
+	}
+	ports, err := enginevm.FreePorts(1 + len(engine.PublishedPorts()))
+	if err != nil {
+		return nil, err
+	}
+	certs, err := engine.NewCerts(time.Now(), []string{sandbox.EngineHost, "127.0.0.1"})
+	if err != nil {
+		return nil, err
+	}
+	server, err := certs.WriteServer(filepath.Join(sessionDir, "engine-server"))
+	if err != nil {
+		return nil, err
+	}
+	vm := engine.VM{
+		Project:   project,
+		Host:      host,
+		CPUs:      cfg.CPUs,
+		MemoryMiB: cfg.MemoryMiB,
+		Base:      base,
+		Certs:     server,
+		Ports:     engine.Ports{API: ports[0], Published: ports[1:]},
+		Serial:    filepath.Join(sessionDir, "engine-console.log"),
+		Pidfile:   layout.Pidfile(project),
+	}
+	cmd, err := engine.Build(vm)
+	if err != nil {
+		return nil, err
+	}
+	return &engineSession{vm: vm, cmd: cmd, certs: certs, archiveDir: layout.ArchiveDir(project), archives: archives, warning: warning}, nil
+}
+
+// route writes the client certificate into dir and returns the sandbox's
+// route to the VM. The agent sees the VM's own port numbers.
+func (e *engineSession) route(dir string) (*sandbox.EngineRoute, error) {
+	if err := e.certs.WriteClient(dir); err != nil {
+		return nil, err
+	}
+	fwds, err := e.vm.Ports.Forwards()
+	if err != nil {
+		return nil, err
+	}
+	r := &sandbox.EngineRoute{Host: engineHostAlias, APIPort: engine.GuestAPIPort, CertDir: dir}
+	for _, f := range fwds {
+		r.Forwards = append(r.Forwards, sandbox.PortForward{Listen: f.Guest, Target: f.Host})
+	}
+	return r, nil
+}
+
+// start boots the VM without waiting for it, so it boots while the
+// sandbox starts.
+func (e *engineSession) start() error {
+	vm, err := enginevm.Start(e.cmd, e.vm, e.certs.CA, e.certs.ClientCert, e.certs.ClientKey)
+	if err != nil {
+		return err
+	}
+	e.running, e.started = vm, time.Now()
+	return nil
+}
+
+// ready waits for the VM's Docker API and loads the archives.
+func (e *engineSession) ready(w io.Writer) error {
+	if err := e.running.WaitReady(engineBootTimeout); err != nil {
+		return err
+	}
+	booted := time.Since(e.started)
+	loadStart := time.Now()
+	if err := e.running.Load(e.archiveDir, e.archives); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "Engine VM ready: booted in %s, loaded %d image(s) in %s\n",
+		booted.Round(100*time.Millisecond), len(e.archives), time.Since(loadStart).Round(100*time.Millisecond))
+	return nil
+}
+
+func (e *engineSession) stop() {
+	if e.running != nil {
+		e.running.Stop()
+	}
 }
 
 // printWarnings prints the layout's notes and warnings, and which image
@@ -331,6 +498,9 @@ func (s *session) printWarnings(w io.Writer) {
 	if s.deps.Fallback != "" {
 		fmt.Fprintln(w, "WARNING:", s.deps.Fallback)
 	}
+	if s.engine != nil && s.engine.warning != "" {
+		fmt.Fprintln(w, "WARNING:", s.engine.warning)
+	}
 }
 
 // cleanup removes what the session left on the host. Call it after the
@@ -348,12 +518,14 @@ func (s *session) cleanup() {
 type sessionArgs struct {
 	exclusiveCaches bool
 	shell           bool
-	agent           string
-	gatewayURL      string
-	model           string
-	dir             string
-	ro              []string
-	command         []string
+	// engine starts the project's Engine VM, if it declares one.
+	engine     bool
+	agent      string
+	gatewayURL string
+	model      string
+	dir        string
+	ro         []string
+	command    []string
 }
 
 // stringList is a repeatable string flag.
@@ -508,6 +680,17 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 	}
 
 	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan, image: image}
+	var engineRoute *sandbox.EngineRoute
+	if sa.engine && !prep {
+		sess.engine, err = prepareEngine(project, sessionDir)
+		if err == nil && sess.engine != nil {
+			engineRoute, err = sess.engine.route(filepath.Join(sessionDir, "engine-client"))
+		}
+		if err != nil {
+			os.RemoveAll(sessionDir)
+			return nil, err
+		}
+	}
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {
 		sess.mountPoints = append(sess.mountPoints, missingDirs(project, d.Path)...)
@@ -528,6 +711,9 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 	}
 	for _, m := range paths.ReadOnly {
 		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
+	}
+	if engineRoute != nil {
+		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, sandbox.EngineCertDir)
 	}
 
 	env := map[string]string{}
@@ -563,6 +749,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 		Deps:           depMounts,
 		Env:            env,
 		Command:        command,
+		Engine:         engineRoute,
 	}
 	sess.spec = sandbox.Build(in)
 	if prep {
@@ -631,6 +818,7 @@ func cmdShell(args []string) error {
 		return errors.New("shell does not take a command; use 'localllm run [dir] -- cmd...' instead")
 	}
 	sa.shell = true
+	sa.engine = true
 	return cmdOffline(sa, false, false)
 }
 
@@ -655,6 +843,13 @@ func lockProject(sa sessionArgs, operation string) (*lockedProject, error) {
 	r := &sessionregistry.Registry{
 		Dir: filepath.Join(cache, "localllm", "registry"),
 		Recover: func(project string) error {
+			layout, err := engineLayout()
+			if err != nil {
+				return err
+			}
+			if err := enginevm.Recover(layout.Pidfile(project)); err != nil {
+				return err
+			}
 			return docker.RecoverProject(sandbox.ProjectName(project))
 		},
 	}
@@ -726,21 +921,64 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
 // agent or shell. The containers are gone when it returns.
 func runSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) error {
+	ds, stop, err := startSession(sess, lease, model, auto, skipCheck)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	return ds.Interactive()
+}
+
+// startSession starts and verifies the sandbox and the Engine VM, if the
+// session has one, up to where the agent or shell runs. stop tears both
+// down; on an error, nothing is left running.
+func startSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) (ds *docker.Session, stop func(), err error) {
+	var stops []func()
+	teardown := func() {
+		for _, f := range slices.Backward(stops) {
+			f()
+		}
+	}
+	defer func() {
+		if err != nil {
+			teardown()
+		}
+	}()
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'localllm check' to list them\n", n)
 	}
 
-	ds, err := docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
-	if err != nil {
-		return err
+	// The Engine VM boots while the sandbox starts, and stops after the
+	// sandbox's containers are gone.
+	if sess.engine != nil {
+		if err := sess.engine.start(); err != nil {
+			return nil, nil, err
+		}
+		stops = append(stops, sess.engine.stop)
 	}
-	defer ds.Close()
+	ds, err = docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	stops = append(stops, ds.Close)
+	if sess.engine != nil {
+		// Teardown runs stops last to first, so this disarms the watch
+		// before the sandbox and the VM go.
+		closing := make(chan struct{})
+		stops = append(stops, func() { close(closing) })
+		go watchEngine(sess.engine.running.Done(), closing, ds)
+	}
 	printEmptyDeps(os.Stderr, sess, ds.EmptyDeps())
 
 	catalog, err := sess.configure(ds, model, auto)
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+	if sess.engine != nil {
+		if err := sess.engine.ready(os.Stderr); err != nil {
+			return nil, nil, err
+		}
 	}
 	if !sess.shell {
 		clashes, err := lease.SetModel(catalog.Default)
@@ -765,19 +1003,35 @@ func runSession(sess *session, lease *sessionregistry.Lease, model string, auto,
 	} else {
 		results, err := check.Run(ds, sess.gateway, sess.mounts)
 		if err != nil {
-			return fmt.Errorf("containment probes: %w", err)
+			return nil, nil, fmt.Errorf("containment probes: %w", err)
 		}
 		if failed := probe.Failed(results); len(failed) > 0 {
 			printResults(os.Stderr, failed)
-			return fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'localllm check' for details)", len(failed), len(results))
+			return nil, nil, fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'localllm check' for details)", len(failed), len(results))
 		}
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
 	}
 	// A probe cut short by a signal may still have produced output.
 	if err := interrupt.Err(); err != nil {
-		return err
+		return nil, nil, err
 	}
-	return ds.Interactive()
+	return ds, teardown, nil
+}
+
+// watchEngine kills the engine forwarder when the Engine VM exits during
+// the session, e.g. because the agent powered it off as root inside it.
+// QEMU's host ports are free then, and the forwarder would relay the agent
+// to whatever binds them next, such as another project's Engine VM.
+func watchEngine(vmDone, closing <-chan struct{}, ds *docker.Session) {
+	select {
+	case <-closing:
+		return
+	case <-vmDone:
+	}
+	fmt.Fprintln(os.Stderr, "\r\nWARNING: the Engine VM stopped; its route is closed for the rest of the session")
+	if err := ds.Kill(sandbox.EngineService); err != nil {
+		fmt.Fprintln(os.Stderr, "WARNING:", err)
+	}
 }
 
 func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Session) {
@@ -881,10 +1135,14 @@ func cmdPrep(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(depPlan.Steps) == 0 {
+	engineCfg, err := engine.Read(project)
+	if err != nil {
+		return err
+	}
+	if len(depPlan.Steps) == 0 && engineCfg == nil {
 		return fmt.Errorf("nothing to install in %s: no package.json or go.mod; set prep.command in %s", project, deps.ConfigFile)
 	}
-	if err := confirmPrep(project, depPlan); err != nil {
+	if err := confirmPrep(project, depPlan, engineCfg); err != nil {
 		return err
 	}
 	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, depPlan)
@@ -896,7 +1154,7 @@ func cmdPrep(args []string) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
-	err = runPrep(sess)
+	err = runPrep(sess, engineCfg)
 	sess.cleanup()
 	reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
 	if err != nil {
@@ -1007,7 +1265,7 @@ func prepRecordFile(project string) string {
 // confirmPrep asks the user to type y before a prep whose inputs changed
 // since the last prep, or before the first one: an agent session may have
 // written what prep is about to run with network access.
-func confirmPrep(project string, plan deps.Plan) error {
+func confirmPrep(project string, plan deps.Plan, engineCfg *engine.Config) error {
 	d, err := prepDecision(project, plan)
 	if err != nil {
 		return err
@@ -1015,7 +1273,11 @@ func confirmPrep(project string, plan deps.Plan) error {
 	if !d.Ask() {
 		return nil
 	}
-	printPrepGate(os.Stderr, project, plan, d)
+	var images []string
+	if engineCfg != nil {
+		images = engineCfg.Images
+	}
+	printPrepGate(os.Stderr, project, plan, images, d)
 	fmt.Fprint(os.Stderr, "Type y to run prep: ")
 	if !interrupt.Ask(func() bool { return readYes(os.Stdin) }) {
 		return errors.New("prep not run")
@@ -1037,7 +1299,7 @@ func prepDecision(project string, plan deps.Plan) (prepgate.Decision, error) {
 	return prepgate.Decide(last, now, len(plan.Hooks) > 0), nil
 }
 
-func printPrepGate(w io.Writer, project string, plan deps.Plan, d prepgate.Decision) {
+func printPrepGate(w io.Writer, project string, plan deps.Plan, images []string, d prepgate.Decision) {
 	if d.First {
 		fmt.Fprintf(w, "First prep of %s. These run with network access:\n", project)
 		for _, s := range plan.Steps {
@@ -1046,6 +1308,9 @@ func printPrepGate(w io.Writer, project string, plan deps.Plan, d prepgate.Decis
 					fmt.Fprintf(w, "  %s: %s\n", s.Name, c)
 				}
 			}
+		}
+		if len(images) > 0 {
+			fmt.Fprintf(w, "  engine images, downloaded with crane: %s\n", strings.Join(images, ", "))
 		}
 	} else {
 		fmt.Fprintf(w, "%s changed since its last prep, and prep runs with network access.\n", project)
@@ -1086,8 +1351,9 @@ func readYes(r io.Reader) bool {
 }
 
 // runPrep runs the install steps with network access, without an agent,
-// the gateway or its key. The containers are gone when it returns.
-func runPrep(sess *session) error {
+// the gateway or its key, and downloads engineCfg's images if set. The
+// containers are gone when it returns.
+func runPrep(sess *session, engineCfg *engine.Config) error {
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); install scripts can't read them\n", n)
@@ -1112,6 +1378,14 @@ func runPrep(sess *session) error {
 	if err := interrupt.Err(); err != nil {
 		return err
 	}
+	if engineCfg != nil {
+		if err := fetchEngineImages(sess.project, engineCfg); err != nil {
+			return err
+		}
+	}
+	if err := interrupt.Err(); err != nil {
+		return err
+	}
 	if sess.deps.Script() != "" {
 		fmt.Fprintln(os.Stderr, "installing (shared caches read-only)")
 		if err := runAttached(sess.spec, sess.sessionDir); err != nil {
@@ -1120,6 +1394,63 @@ func runPrep(sess *session) error {
 	}
 	fmt.Fprintln(os.Stderr, "dependencies installed; 'localllm run' uses them offline")
 	return nil
+}
+
+// fetchEngineImages downloads the project's Engine images into its archive
+// cache. crane runs in a throwaway container of the base image that has
+// only the new archive directory mounted: no project files, so no project
+// code. Each image is pulled by the digest its tag resolves to. The
+// previous archives are replaced only after every download succeeded.
+func fetchEngineImages(project string, cfg *engine.Config) error {
+	layout, err := engineLayout()
+	if err != nil {
+		return err
+	}
+	m, err := engine.MachineFor(engineHost())
+	if err != nil {
+		return err
+	}
+	dir := layout.ArchiveDir(project)
+	staging := dir + ".new"
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
+	fmt.Fprintf(os.Stderr, "downloading %d engine image(s) for %s (no project code runs)\n", len(cfg.Images), m.Platform)
+	if err := docker.RunOnline(baseImage, os.Getuid(), os.Getgid(), staging, "sh", "-c", engine.FetchScript(cfg.Images, m.Platform)); err != nil {
+		return fmt.Errorf("download engine images: %w", err)
+	}
+	// The directory was written by a container: take only regular files,
+	// so a symlink can't point the host at its own files.
+	if err := regularFile(filepath.Join(staging, engine.DigestsFile)); err != nil {
+		return fmt.Errorf("download engine images: %w", err)
+	}
+	digests, err := os.ReadFile(filepath.Join(staging, engine.DigestsFile))
+	if err != nil {
+		return fmt.Errorf("download engine images: %w", err)
+	}
+	rec, err := engine.ParseDigests(cfg.Images, string(digests))
+	if err != nil {
+		return err
+	}
+	for _, a := range rec.Archives {
+		if err := regularFile(filepath.Join(staging, a.File)); err != nil {
+			return fmt.Errorf("download engine image %s: %w", a.Ref, err)
+		}
+	}
+	if err := os.Remove(filepath.Join(staging, engine.DigestsFile)); err != nil {
+		return err
+	}
+	if err := rec.Save(staging); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return os.Rename(staging, dir)
 }
 
 // runAttached starts spec and runs its agent service attached to the
@@ -1131,6 +1462,19 @@ func runAttached(spec sandbox.Compose, sessionDir string) error {
 	}
 	defer ds.Close()
 	return ds.Interactive()
+}
+
+// regularFile returns an error unless file is a non-empty regular file,
+// not a symlink.
+func regularFile(file string) error {
+	info, err := os.Lstat(file)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return fmt.Errorf("%s is not a non-empty regular file", file)
+	}
+	return nil
 }
 
 // printEmptyDeps hints at prep for each dependency volume that is empty.

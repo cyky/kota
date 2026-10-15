@@ -7,19 +7,28 @@ ARG GO_IMAGE=golang:1.27-trixie@sha256:47667934874913a449b96faa7ef4777fa285d9ec2
 
 FROM ${GO_IMAGE} AS go
 
+# crane downloads Engine images during prep. go install checks the module
+# against the Go checksum database.
+FROM ${GO_IMAGE} AS crane
+ARG CRANE_VERSION=v0.22.1
+RUN CGO_ENABLED=0 GOBIN=/out go install github.com/google/go-containerregistry/cmd/crane@${CRANE_VERSION}
+
 FROM ${NODE_IMAGE}
 
 ARG OPENCODE_VERSION=2.0.25
 # pi needs Node >= 22.19.
 ARG PI_VERSION=1.2.0
 
+# docker-cli is the client only: in a session it talks to the project's
+# Engine VM, never to a local daemon.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates curl fd-find git jq ripgrep \
+      build-essential ca-certificates curl docker-cli fd-find git jq ripgrep \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=go /usr/local/go /usr/local/go
+COPY --from=crane /out/crane /usr/local/bin/crane
 ENV PATH=/usr/local/go/bin:$PATH
 
 RUN corepack enable \

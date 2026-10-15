@@ -145,12 +145,36 @@ func RunOffline(image string, uid, gid int, mounts []string, dir string, cmd ...
 	return stdout.String(), nil
 }
 
-// bindArg is the --mount value for a read-only bind of path at itself. The
-// value is CSV, so a path with a comma or quote is quoted.
-func bindArg(path string) (string, error) {
+// RunOnline runs cmd in a throwaway container of image, as uid:gid, on the
+// default network, with a read-only root, no capabilities and dir as its
+// only mount, writable at /out and its working directory. Output goes to
+// the terminal.
+func RunOnline(image string, uid, gid int, dir string, cmd ...string) error {
+	arg, err := mountArg(dir, "/out", false)
+	if err != nil {
+		return err
+	}
+	args := []string{"run", "--rm", "--pull", "never",
+		"--read-only", "--tmpfs", "/tmp", "-e", "HOME=/tmp",
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+		"--user", fmt.Sprintf("%d:%d", uid, gid), "--mount", arg, "--workdir", "/out",
+		"--", image}
+	return run("docker", append(args, cmd...)...)
+}
+
+// bindArg is the --mount value for a read-only bind of path at itself.
+func bindArg(path string) (string, error) { return mountArg(path, path, true) }
+
+// mountArg is the --mount value for a bind of source at target. The value
+// is CSV, so a path with a comma or quote is quoted.
+func mountArg(source, target string, readOnly bool) (string, error) {
 	var b strings.Builder
 	w := csv.NewWriter(&b)
-	if err := w.Write([]string{"type=bind", "source=" + path, "target=" + path, "readonly"}); err != nil {
+	fields := []string{"type=bind", "source=" + source, "target=" + target}
+	if readOnly {
+		fields = append(fields, "readonly")
+	}
+	if err := w.Write(fields); err != nil {
 		return "", err
 	}
 	w.Flush()
@@ -213,8 +237,14 @@ func Start(spec sandbox.Compose, sessionDir, gatewayKey string) (*Session, error
 			}
 		}
 	}
-	if _, ok := spec.Services[sandbox.ForwarderService]; ok {
-		if _, err := s.output("up", "-d", "--quiet-pull", sandbox.ForwarderService); err != nil {
+	var forwarders []string
+	for _, name := range []string{sandbox.ForwarderService, sandbox.EngineService} {
+		if _, ok := spec.Services[name]; ok {
+			forwarders = append(forwarders, name)
+		}
+	}
+	if len(forwarders) > 0 {
+		if _, err := s.output(append([]string{"up", "-d", "--quiet-pull"}, forwarders...)...); err != nil {
 			s.Close()
 			return nil, fmt.Errorf("start forwarder: %w", err)
 		}
@@ -338,6 +368,17 @@ func (s *Session) Interactive() error {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = s.env
 	return cmd.Run()
+}
+
+// Kill kills one service's containers at once, e.g. a forwarder whose
+// target went away. It runs even after an interrupt.
+func (s *Session) Kill(service string) error {
+	c := exec.Command("docker", append(slices.Clone(s.compose), "kill", service)...)
+	c.Env = s.env
+	if out, err := c.CombinedOutput(); err != nil {
+		return fmt.Errorf("kill %s: %w: %s", service, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // Close removes the session's containers and networks. It runs even after

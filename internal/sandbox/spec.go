@@ -52,6 +52,15 @@ const (
 	// GatewayKeyEnv carries the gateway API key into the agent container.
 	GatewayKeyEnv = "LOCALLLM_GATEWAY_KEY"
 
+	// EngineHost is the engine forwarder's alias on the internal network:
+	// the Docker API and published container ports of the project's Engine
+	// VM are reached there.
+	EngineHost = "engine"
+	// EngineService is the compose service name of the engine forwarder.
+	EngineService = "engine"
+	// EngineCertDir holds the session's Docker client certificate, read-only.
+	EngineCertDir = "/etc/localllm/engine"
+
 	stateKey = "state"
 
 	internalNetwork = "sandbox"
@@ -151,6 +160,28 @@ type Mount struct {
 	Target string
 }
 
+// EngineRoute is the agent's route to its project's Engine VM, whose port
+// forwards listen on the host's loopback.
+type EngineRoute struct {
+	// Host is the host as the forwarder reaches it, e.g.
+	// host.docker.internal.
+	Host string
+	// APIPort is the Docker API's port as the agent sees it, one of the
+	// Forwards' Listen ports.
+	APIPort int
+	// Forwards are the agent-side ports and the host ports they relay to:
+	// the API and each published port.
+	Forwards []PortForward
+	// CertDir is the host directory with the client's ca.pem, cert.pem and
+	// key.pem, mounted read-only at EngineCertDir.
+	CertDir string
+}
+
+// PortForward relays Listen on the engine forwarder to Target on the host.
+type PortForward struct {
+	Listen, Target int
+}
+
 // Inputs describes one sandbox session.
 type Inputs struct {
 	Mode Mode
@@ -192,6 +223,8 @@ type Inputs struct {
 	Env map[string]string
 	// Command overrides the agent image's default command when non-empty.
 	Command []string
+	// Engine, when set, gives a ModeRun session its Engine VM.
+	Engine *EngineRoute
 }
 
 // ProjectName returns a stable compose project name for a project directory.
@@ -295,6 +328,21 @@ func Build(in Inputs) Compose {
 	for k, v := range in.Env {
 		env[k] = v
 	}
+	engine := in.Engine
+	if prep {
+		engine = nil
+	}
+	if engine != nil {
+		// Docker and testcontainers use the Engine VM, with the session's
+		// client certificate. Ryuk would need the Docker socket mounted
+		// into a container; the Engine VM is reset every session instead.
+		env["DOCKER_HOST"] = fmt.Sprintf("tcp://%s:%d", EngineHost, engine.APIPort)
+		env["DOCKER_TLS_VERIFY"] = "1"
+		env["DOCKER_CERT_PATH"] = EngineCertDir
+		env["TESTCONTAINERS_HOST_OVERRIDE"] = EngineHost
+		env["TESTCONTAINERS_RYUK_DISABLED"] = "true"
+		volumes = append(volumes, Volume{Type: "bind", Source: engine.CertDir, Target: EngineCertDir, ReadOnly: true})
+	}
 
 	services := map[string]Service{}
 	var depKeys []string
@@ -350,6 +398,10 @@ func Build(in Inputs) Compose {
 	}
 	agent.Networks = map[string]*NetworkAttach{internalNetwork: {}}
 	agent.DependsOn = []string{ForwarderService}
+	if engine != nil {
+		services[EngineService] = engineForwarder(hardening, in.ForwarderImage, engine)
+		agent.DependsOn = append(agent.DependsOn, EngineService)
+	}
 	services[AgentService] = agent
 	services[ForwarderService] = forwarder
 	spec.Networks = map[string]Network{
@@ -362,6 +414,31 @@ func Build(in Inputs) Compose {
 		egressNetwork: {},
 	}
 	return spec
+}
+
+// engineForwarder relays each of the route's ports from the internal
+// network, under the alias EngineHost, to the Engine VM's forwards on the
+// host: one socat per port. Like the gateway forwarder, it is the agent's
+// only way to those ports.
+func engineForwarder(hardening Service, image string, r *EngineRoute) Service {
+	const script = `host=$1; shift
+while [ $# -gt 0 ]; do
+  socat "TCP-LISTEN:$1,fork,reuseaddr" "TCP:$host:$2" &
+  shift 2
+done
+wait`
+	s := hardening
+	s.Image = image
+	s.ReadOnly = true
+	s.Entrypoint = []string{"sh", "-c", script, "sh", r.Host}
+	for _, f := range r.Forwards {
+		s.Entrypoint = append(s.Entrypoint, strconv.Itoa(f.Listen), strconv.Itoa(f.Target))
+	}
+	s.Networks = map[string]*NetworkAttach{
+		internalNetwork: {Aliases: []string{EngineHost}},
+		egressNetwork:   {},
+	}
+	return s
 }
 
 // volumesService chowns each dependency volume's root to the session user:

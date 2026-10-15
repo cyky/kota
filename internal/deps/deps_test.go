@@ -264,6 +264,10 @@ func TestConfigErrors(t *testing.T) {
 	if _, err := Detect(project(t, map[string]string{ConfigFile: ""}), Options{}); err != nil {
 		t.Errorf("empty config: %v", err)
 	}
+	// The engine section is package engine's to check.
+	if _, err := Detect(project(t, map[string]string{ConfigFile: "engine:\n  images: [postgres:16-alpine]\n"}), Options{}); err != nil {
+		t.Errorf("config with an engine section: %v", err)
+	}
 }
 
 func TestSymlinkedDependencyDirRefused(t *testing.T) {

@@ -8,12 +8,13 @@ Status: early. Network containment, secret masking and git-hook protection are v
 
 - Docker with compose (tested with Rancher Desktop on macOS)
 - A model gateway on the host, by default llama-swap on port 8080
+- QEMU, only for projects with an Engine VM (see below)
 
 ## Usage
 
 ```sh
 go install ./cmd/localllm
-localllm build                         # build the sandbox images
+localllm build                         # build the sandbox images and the Engine base disk
 localllm build [dir]                   # build dir's image from its localllm.Dockerfile
 localllm prep [dir]                    # install dependencies (network, no agent)
 localllm run [dir]                     # opencode in dir (default: current dir)
@@ -139,6 +140,43 @@ Cleanup holds the project's session lease through listing, confirmation and remo
 
 Shared caches are retained by default. `localllm clean --shared-caches [dir]` includes the Go module cache, corepack releases and pnpm store in the confirmed list. It requires exclusive access: any starting, running or finishing session prevents the reset, and a reset in progress prevents new sessions from starting. The cache reservation covers confirmations and gaps between prep containers too. Other projects keep their own state and dependency volumes, but need `prep` again to refill shared caches. Docker refuses removal of a volume still attached to a container. If listing or removal fails, clean reports the error and retains the prep confirmation record; a removal error can occur after some of the listed volumes were already deleted.
 
+## Engine VM
+
+Some projects' tests start containers, for example testcontainers with Postgres. The sandbox has no Docker of its own, and never gets the host's: controlling a Docker engine is root on the machine that runs it. A project that needs containers declares the images in `localllm.yaml` instead, and gets its own **Engine VM**: a small QEMU VM, managed by localllm, that runs only the containers started in its sessions.
+
+```yaml
+engine:
+  images: [postgres:16-alpine]   # plain references with an optional tag
+```
+
+`localllm prep` downloads the images with crane, after the dependency fetch and with no project code running: crane runs in a throwaway container of the base image that has only the project's new archive directory mounted, not the project. Each tag is resolved to its digest and the image pulled by that digest, so every manifest and layer is checked against it. The archives and their digests are kept in `localllm/engine/projects/<hash of the project path>/images/` under the user cache dir, outside the project and the sandbox. A failed download keeps the previous archives. The first `prep` lists the images in its confirmation, and a change to `localllm.yaml` asks again, as for any prep input.
+
+`localllm shell` starts the project's Engine VM, waits for its Docker API, loads the archives, and points the sandbox at it:
+
+- `DOCKER_HOST=tcp://engine:2376`, `DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/etc/localllm/engine`, so the Docker CLI (in the base image) and testcontainers use it;
+- `TESTCONTAINERS_HOST_OVERRIDE=engine`, so tests connect to their containers' published ports through the same route;
+- `TESTCONTAINERS_RYUK_DISABLED=true`. Ryuk would need the Docker socket mounted into a container, and the VM is reset every session anyway.
+
+The tests need no changes. The VM stops when the shell exits, including on Ctrl-C, SIGTERM or a closed terminal. If localllm itself is killed outright, the next command for the project stops the VM, found through its pidfile. `run` and `check` don't start the Engine VM yet. Projects without an `engine:` section start no VM and behave as before.
+
+Containment, set from outside the VM, since the agent has root inside it:
+
+- **No route out.** The VM uses QEMU's user-mode networking with `restrict=on`, so the guest can't open connections to the internet, DNS servers, the host or the LAN, even as root with its own routes. It never has a route out, not even during prep. Images come in only as the archives prep downloaded.
+- **Only the agent's ports.** QEMU forwards only the Docker API and the published port range (40000-40099, set as the VM's `ip_local_port_range`, so Docker publishes container ports only there), each from a free port on the host's `127.0.0.1`. An engine forwarder container, like the gateway's, relays them to the sandbox's internal network as `engine`, with the VM's own port numbers.
+- **Only this session's client.** The forwards listen on the host's loopback, which any container can reach, so dockerd requires TLS with a client certificate. Each session makes a new CA, server and client certificate (EC P-256) in its session directory. The server side reaches the VM through QEMU's `fw_cfg` and is read at boot, so the shared disk holds no keys. Only the client side is mounted, read-only, into the sandbox, and the probes check that it rejects writes. A certificate from another session or project, or none, is refused.
+- **The route dies with the VM.** If the VM stops during a session (the agent can power it off as root), localllm kills the engine forwarder at once, so the agent can't reach whatever binds the freed host ports next.
+- **Limit: published ports have no authentication.** Like the API, the published-port forwards listen on the host's `127.0.0.1`, which other containers can reach, for example another project's `prep`. Only the API requires the certificate; a container the agent publishes (a test database) is as open to them as its own credentials make it.
+- **Nothing carries over.** Every session boots from the **Engine base disk** through `-snapshot`, a throwaway layer, so files, containers and images from the last session are gone. The VM has no host directories mounted.
+- **The sandbox stays as it was.** The agent container is still unprivileged with all capabilities dropped, on the internal network only, and without the host's Docker socket.
+
+The VM boots its kernel directly, without firmware or a boot loader. With `postgres:16-alpine` it is ready in about 5 seconds, booting while the sandbox starts. It has 2 CPUs and 2 GB of memory.
+
+`localllm build` also builds the Engine base disk, once, in `localllm/engine/base/` under the user cache dir. It downloads the Debian 13 cloud image and checks it against its pinned SHA-512, then runs one online boot that installs Docker from Debian, sets up the port range and the TLS service, disables cloud-init and powers off (about 1.5 minutes). That boot gets its cloud-init seed from a server on the host's loopback, which also receives the kernel, initrd and root partition for the direct boot. It runs no project code and isn't any project's Engine VM. Later builds skip it while it is up to date; sessions warn when the disk is from an older definition. Without QEMU, `build` skips the disk with a note.
+
+A `shell` of an engine project refuses to start, with the fix, when QEMU isn't installed, the Engine base disk isn't built (`localllm build`), or a declared image hasn't been prepped (`localllm prep`). If `localllm.yaml` can't be parsed, a project that was prepped with an engine refuses too, since its images aren't known; other projects start as before.
+
+Requirements: QEMU (`brew install qemu` on macOS; it ships the UEFI firmware the base disk build uses). The setup uses only QEMU features that Linux has too, with KVM instead of macOS's HVF, but it is so far only tested on macOS on Apple silicon.
+
 ## Project image
 
 A project that needs more than Node and Go can add a `localllm.Dockerfile` at its root, on top of the base image:
@@ -184,4 +222,4 @@ To make Rust available to every project instead, add the same `COPY` and `ENV` l
 
 ## Tests
 
-Integration tests need Docker: `go test -tags integration ./...`. The prep and project image tests also need network access.
+Integration tests need Docker: `go test -tags integration ./...`. The prep and project image tests also need network access. The Engine VM tests also need QEMU and the Engine base disk (`localllm build`), and are skipped without them.

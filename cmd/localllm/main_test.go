@@ -371,7 +371,7 @@ func TestPrepGateOutput(t *testing.T) {
 		Hooks: []string{"package.json: postinstall: node setup.js"},
 	}
 	var first strings.Builder
-	printPrepGate(&first, "/p", plan, prepgate.Decision{First: true})
+	printPrepGate(&first, "/p", plan, nil, prepgate.Decision{First: true})
 	for _, want := range []string{"First prep of /p", "pnpm: pnpm fetch", "pnpm: pnpm install", "postinstall: node setup.js"} {
 		if !strings.Contains(first.String(), want) {
 			t.Errorf("first prep output lacks %q:\n%s", want, first.String())
@@ -383,7 +383,7 @@ func TestPrepGateOutput(t *testing.T) {
 		others = append(others, changereport.Change{Path: fmt.Sprintf("src/f%02d.js", i), Kind: changereport.Modified})
 	}
 	var changed strings.Builder
-	printPrepGate(&changed, "/p", plan, prepgate.Decision{
+	printPrepGate(&changed, "/p", plan, nil, prepgate.Decision{
 		Inputs: []changereport.Change{{Path: "package.json", Kind: changereport.Modified}},
 		Others: others,
 	})
@@ -427,7 +427,7 @@ func TestPrepGateLocalDependency(t *testing.T) {
 		t.Fatal("prep would run without asking")
 	}
 	var out strings.Builder
-	printPrepGate(&out, project, plan, d)
+	printPrepGate(&out, project, plan, nil, d)
 	for _, want := range []string{"tools/tool/package.json: postinstall: node build.js", "tools/tool/build.js"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("prompt lacks %q:\n%s", want, out.String())

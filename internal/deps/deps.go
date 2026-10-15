@@ -79,6 +79,8 @@ type config struct {
 		// Dirs are extra dependency directories.
 		Dirs []string `yaml:"dirs"`
 	} `yaml:"prep"`
+	// Engine is parsed by package engine.
+	Engine yaml.Node `yaml:"engine"`
 }
 
 // skipDirs are not searched for manifests: dependency and build output,

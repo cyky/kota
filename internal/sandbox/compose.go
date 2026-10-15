@@ -17,6 +17,7 @@ type Compose struct {
 
 type Service struct {
 	Image       string            `json:"image"`
+	Entrypoint  []string          `json:"entrypoint,omitempty"`
 	Command     []string          `json:"command,omitempty"`
 	User        string            `json:"user,omitempty"`
 	WorkingDir  string            `json:"working_dir,omitempty"`
@@ -92,6 +93,7 @@ func (c Compose) Literal() Compose {
 	out.Services = make(map[string]Service, len(c.Services))
 	for name, s := range c.Services {
 		s.Image = literal(s.Image)
+		s.Entrypoint = literalAll(s.Entrypoint)
 		s.Command = literalAll(s.Command)
 		s.User = literal(s.User)
 		s.WorkingDir = literal(s.WorkingDir)
