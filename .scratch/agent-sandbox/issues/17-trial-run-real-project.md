@@ -1,6 +1,8 @@
-# 17 — Trial run on a real project
+# DONE — 17 — Trial run on a real project
 
-Status: ready-for-human
+Status: done
+
+Resolved in: 6da0a84, 8e937eb
 
 ## Parent
 
@@ -18,9 +20,9 @@ Step-by-step checklist: `.scratch/agent-sandbox/trial-run-checklist.md`.
 
 ## Acceptance criteria
 
-- [ ] One real task completed with opencode (ask mode) and one with pi
-- [ ] Tool calling confirmed working, or a fix recorded
-- [ ] Follow-up issues filed for any friction found
+- [x] One real task completed with opencode (ask mode) and one with pi
+- [x] Tool calling confirmed working, or a fix recorded
+- [x] Follow-up issues filed for any friction found
 
 ## Blocked by
 
@@ -35,3 +37,13 @@ Step-by-step checklist: `.scratch/agent-sandbox/trial-run-checklist.md`.
 - `23-git-config-project-references.md`
 - `24-watch-more-files-that-run-things.md`
 - `25-probe-and-build-polish.md`
+
+## Comments
+
+**2026-10-15 — Done.** Trial run by the user on a personal TypeScript project (the real repo rather than a fresh clone) against llama-swap with `qwen3.6-coder`. Results are in `.scratch/agent-sandbox/trial-run-checklist.md`.
+
+Verified: all 71 probes pass, including the IPv6 ones. `.env` reads as empty in the agent session and in the shell. Hook and git config writes fail, there's no internet, and the gateway answers. Prep asks on first run and on manifest changes, and not otherwise. opencode completed a task in ask mode (it asked before `npm test`) and one in full auto, after the uncommitted-changes check. pi completed a task too. Tool calling works with both agents, so no llama-swap fix is needed. Ctrl-C at a prompt exits with 130 and leaves nothing behind. `clean` removes the project's volumes.
+
+Follow-up issues: 26 (agent commits capture mask placeholders), 27 (change report says what changed), 28 (output polish). Recorded in the checklist but not filed: Ctrl-C after the agent starts exits with 1 instead of 130; a cold model makes the first message hang with no message; the `.npmrc` warning says "secret" for a settings-only file.
+
+Not verified: the step 8 check that `localllm shell` opens with a broken `package.json` and has the last prep's `node_modules`. The warning itself was seen with `localllm run`. Agent changes made to the project during the trial (a commit, edits, the test `.env`) were discarded afterwards.
