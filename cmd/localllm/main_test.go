@@ -302,6 +302,59 @@ func TestHostDependencyDirKept(t *testing.T) {
 	}
 }
 
+// TestBrokenManifestSession checks run, shell and check still start on a
+// broken manifest, with volumes over the last prep's directories and over
+// every host node_modules, while prep refuses.
+func TestBrokenManifestSession(t *testing.T) {
+	project := fakeHome(t, map[string]string{
+		"package.json":                   "{broken",
+		"packages/a/package.json":        "{}",
+		"packages/a/node_modules/x/i.js": "host",
+	})
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "sk-unit-test-secret")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	record := prepgate.Record{Dirs: []deps.Dir{
+		{Path: "node_modules", Manifest: "package.json"},
+		{Path: "packages/b/node_modules", Manifest: "packages/b/package.json"},
+	}}
+	if err := record.Save(prepRecordFile(project)); err != nil {
+		t.Fatal(err)
+	}
+
+	depPlan, err := sessionDeps(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}
+	paths, err := resolveSessionPaths(sa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := prepareSession(sa, sandbox.ModeRun, paths, depPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.cleanup()
+	volumes := map[string]string{}
+	for _, v := range sess.spec.Services[sandbox.AgentService].Volumes {
+		volumes[v.Target] = sess.spec.Volumes[v.Source].Name
+	}
+	for _, dir := range []string{"node_modules", "packages/a/node_modules", "packages/b/node_modules"} {
+		if got := volumes[sandbox.Workspace+"/"+dir]; got != sandbox.DepVolume(project, dir) {
+			t.Errorf("%s volume = %q, want %q", dir, got, sandbox.DepVolume(project, dir))
+		}
+	}
+	var out strings.Builder
+	sess.printWarnings(&out)
+	if !strings.Contains(out.String(), "WARNING: can't work out the dependencies (parse package.json") {
+		t.Errorf("warnings = %q", out.String())
+	}
+
+	if err := cmdPrep([]string{project}); err == nil || !strings.Contains(err.Error(), "parse package.json") {
+		t.Errorf("prep error = %v, want the parse error", err)
+	}
+}
+
 func TestPrepRefusesVolumeOverProtectedPath(t *testing.T) {
 	project := fakeHome(t, map[string]string{deps.ConfigFile: "prep:\n  dirs: [.husky]\n", ".husky/_/h": ""})
 	if out, err := exec.Command("git", "-C", project, "config", "core.hooksPath", ".husky/_").CombinedOutput(); err != nil {

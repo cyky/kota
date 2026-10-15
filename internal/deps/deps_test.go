@@ -1,6 +1,7 @@
 package deps
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -231,6 +232,73 @@ func TestSymlinkedDependencyDirRefused(t *testing.T) {
 	}
 	if _, err := Detect(dir, Options{}); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Errorf("err = %v, want symlink refusal", err)
+	}
+}
+
+func TestFallback(t *testing.T) {
+	files := map[string]string{
+		"package.json":                    "{broken",
+		"packages/a/package.json":         "{}",
+		"packages/a/node_modules/x/i.js":  "host",
+		"new/node_modules/y/i.js":         "host",
+		"dist/node_modules/z/i.js":        "host",
+		"node_modules/dep/node_modules/q": "host",
+		".git/node_modules/x":             "",
+		"packages/b/package.json":         "{}",
+	}
+	cause := errors.New("parse package.json: bad")
+	cases := []struct {
+		name string
+		last []Dir
+		want []string
+		note string
+	}{
+		{
+			"prepped",
+			[]Dir{{Path: "node_modules", Manifest: "package.json"}, {Path: "packages/b/node_modules", Manifest: "packages/b/package.json"}, {Path: ".venv", Manifest: ConfigFile}},
+			[]string{".venv", "dist/node_modules", "new/node_modules", "node_modules", "packages/a/node_modules", "packages/b/node_modules"},
+			"of the last prep",
+		},
+		{
+			"never prepped",
+			nil,
+			[]string{"dist/node_modules", "new/node_modules", "node_modules", "packages/a/node_modules"},
+			"no prep record",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			plan, err := Fallback(project(t, files), c.last, cause)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := dirs(plan)
+			slices.Sort(got)
+			if !slices.Equal(got, c.want) {
+				t.Errorf("dirs = %q, want %q", got, c.want)
+			}
+			if len(plan.Steps) != 0 || plan.Script() != "" {
+				t.Errorf("fallback has install steps: %q", steps(plan))
+			}
+			for _, want := range []string{"parse package.json: bad", c.note, "localllm prep"} {
+				if !strings.Contains(plan.Fallback, want) {
+					t.Errorf("Fallback = %q, want %q", plan.Fallback, want)
+				}
+			}
+		})
+	}
+}
+
+func TestFallbackRefusesSymlinks(t *testing.T) {
+	dir := project(t, map[string]string{"pkg/package.json": "{}"})
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "pkg/node_modules")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fallback(dir, nil, errors.New("x")); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("err = %v, want symlink refusal", err)
+	}
+	if _, err := Fallback(t.TempDir(), []Dir{{Path: "../x"}}, errors.New("x")); err == nil {
+		t.Error("escaping recorded dir accepted")
 	}
 }
 

@@ -47,10 +47,10 @@ type Step struct {
 // Dir is a dependency directory, relative to the project with forward
 // slashes, kept in a per-project volume mounted over it.
 type Dir struct {
-	Path string
+	Path string `json:"path"`
 	// Manifest is the file whose dependencies end up in Path, for the hint
 	// shown when Path is empty.
-	Manifest string
+	Manifest string `json:"manifest"`
 }
 
 // Plan is how prep installs a project's dependencies.
@@ -60,6 +60,9 @@ type Plan struct {
 	// Hooks describe the project code the install runs: lifecycle scripts,
 	// pnpmfiles, a yarnPath, ConfigFile's command. One line each.
 	Hooks []string
+	// Fallback is set on a plan from Fallback, and says why and what it
+	// mounts.
+	Fallback string
 }
 
 // Options are the settings Detect needs from the sandbox.
@@ -116,6 +119,48 @@ func Detect(project string, opts Options) (Plan, error) {
 		if !slices.ContainsFunc(plan.Dirs, func(o Dir) bool { return o.Path == clean }) {
 			plan.Dirs = append(plan.Dirs, Dir{Path: clean, Manifest: ConfigFile})
 		}
+	}
+	for _, d := range plan.Dirs {
+		if err := noSymlinks(project, d.Path); err != nil {
+			return Plan{}, err
+		}
+	}
+	return plan, nil
+}
+
+// Fallback is the plan for a session when Detect failed with cause, e.g.
+// on a manifest left broken: it has no install steps, and volumes over last,
+// the directories of the last successful prep, or the root node_modules if
+// there is none. Every other node_modules found on the host gets a volume
+// too, so none of them is visible or writable in the sandbox.
+func Fallback(project string, last []Dir, cause error) (Plan, error) {
+	plan := Plan{Fallback: fmt.Sprintf("can't work out the dependencies (%v); using the dependency directories of the last prep", cause)}
+	if len(last) == 0 {
+		last = []Dir{{Path: "node_modules", Manifest: "package.json"}}
+		plan.Fallback = fmt.Sprintf("can't work out the dependencies (%v); the project has no prep record, so only node_modules directories get volumes", cause)
+	}
+	plan.Fallback += ". Fix the file on the host or in the session, then run 'localllm prep'"
+	add := func(d Dir) {
+		if !slices.ContainsFunc(plan.Dirs, func(o Dir) bool { return o.Path == d.Path }) {
+			plan.Dirs = append(plan.Dirs, d)
+		}
+	}
+	for _, d := range last {
+		clean, err := cleanDir(d.Path)
+		if err != nil {
+			return Plan{}, fmt.Errorf("prep record: %w", err)
+		}
+		add(Dir{Path: clean, Manifest: d.Manifest})
+	}
+	// Only .git and node_modules are skipped: a node_modules missed here
+	// would be the host's, in the sandbox.
+	err := walkSkipping(project, []string{".git", "node_modules"}, func(rel string, names []string) {
+		if slices.Contains(names, "node_modules") {
+			add(Dir{Path: path.Join(rel, "node_modules"), Manifest: path.Join(rel, "package.json")})
+		}
+	})
+	if err != nil {
+		return Plan{}, err
 	}
 	for _, d := range plan.Dirs {
 		if err := noSymlinks(project, d.Path); err != nil {
@@ -467,6 +512,11 @@ func (p *Plan) golang(project string) error {
 // walk calls fn for each directory of the project (rel is "" for the root)
 // with the names of its entries, skipping skipDirs and symlinks.
 func walk(project string, fn func(rel string, names []string)) error {
+	return walkSkipping(project, skipDirs, fn)
+}
+
+// walkSkipping is walk with its own list of directories to skip.
+func walkSkipping(project string, skip []string, fn func(rel string, names []string)) error {
 	var visit func(rel string) error
 	visit = func(rel string) error {
 		entries, err := os.ReadDir(filepath.Join(project, filepath.FromSlash(rel)))
@@ -479,7 +529,7 @@ func walk(project string, fn func(rel string, names []string)) error {
 		}
 		fn(rel, names)
 		for _, e := range entries {
-			if !e.IsDir() || slices.Contains(skipDirs, e.Name()) {
+			if !e.IsDir() || slices.Contains(skip, e.Name()) {
 				continue
 			}
 			if err := visit(strings.TrimPrefix(rel+"/"+e.Name(), "/")); err != nil {

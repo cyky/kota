@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 
 	"localllm/internal/changereport"
+	"localllm/internal/deps"
 )
 
 // Inputs are the files that decide what prep runs, in the syntax of
@@ -50,6 +51,9 @@ type Record struct {
 	// All are the digests of every file outside dependency and build
 	// directories, which install scripts may run.
 	All map[string]string `json:"all"`
+	// Dirs are the dependency directories prep installed into. Sessions
+	// reuse them when the project's dependencies can't be worked out.
+	Dirs []deps.Dir `json:"dirs,omitempty"`
 }
 
 // Snapshot records project as it is now.

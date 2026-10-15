@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"localllm/internal/changereport"
+	"localllm/internal/deps"
 )
 
 func write(t *testing.T, dir, rel, content string) {
@@ -122,6 +123,7 @@ func TestSaveLoad(t *testing.T) {
 	}
 	dir := project(t)
 	want := snap(t, dir)
+	want.Dirs = []deps.Dir{{Path: "pkgs/a/node_modules", Manifest: "pkgs/a/package.json"}}
 	if err := want.Save(file); err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +133,9 @@ func TestSaveLoad(t *testing.T) {
 	}
 	if d := Decide(got, want, true); d.Ask() {
 		t.Errorf("loaded record differs: %+v", d)
+	}
+	if !slices.Equal(got.Dirs, want.Dirs) {
+		t.Errorf("loaded dirs = %+v, want %+v", got.Dirs, want.Dirs)
 	}
 	if info, _ := os.Stat(file); info.Mode().Perm() != 0o600 {
 		t.Errorf("record mode = %v", info.Mode())

@@ -328,6 +328,9 @@ func (s *session) printWarnings(w io.Writer) {
 	if s.image.Warning != "" {
 		fmt.Fprintln(w, "WARNING:", s.image.Warning)
 	}
+	if s.deps.Fallback != "" {
+		fmt.Fprintln(w, "WARNING:", s.deps.Fallback)
+	}
 }
 
 // cleanup removes what the session left on the host. Call it after the
@@ -414,6 +417,26 @@ func resolveSessionPaths(sa sessionArgs) (pathpolicy.Paths, error) {
 // project, so it can run before the user is asked anything.
 func detectDeps(project string) (deps.Plan, error) {
 	return deps.Detect(project, deps.Options{PnpmStore: sandbox.PnpmStore})
+}
+
+// sessionDeps is detectDeps for run, shell and check. When detection fails,
+// e.g. on a manifest an agent left broken, the session still starts so the
+// file can be fixed, with the fallback volumes of deps.Fallback. Only prep
+// refuses.
+func sessionDeps(project string) (deps.Plan, error) {
+	plan, err := detectDeps(project)
+	if err == nil {
+		return plan, nil
+	}
+	last, lerr := prepgate.Load(prepRecordFile(project))
+	if lerr != nil {
+		return deps.Plan{}, fmt.Errorf("%w; read prep record: %v", err, lerr)
+	}
+	var dirs []deps.Dir
+	if last != nil {
+		dirs = last.Dirs
+	}
+	return deps.Fallback(project, dirs, err)
 }
 
 // prepareSession builds the compose spec from the paths covered by the lease
@@ -674,7 +697,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	if _, err := models.ParseFile(assets.Models); err != nil {
 		return err
 	}
-	depPlan, err := detectDeps(lease.paths.Project)
+	depPlan, err := sessionDeps(lease.paths.Project)
 	if err != nil {
 		return err
 	}
@@ -793,7 +816,7 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	defer releaseProject(lease)
-	depPlan, err := detectDeps(lease.paths.Project)
+	depPlan, err := sessionDeps(lease.paths.Project)
 	if err != nil {
 		return err
 	}
@@ -881,6 +904,7 @@ func cmdPrep(args []string) error {
 	}
 	// The next prep asks about changes made after this point.
 	record, err := prepgate.Snapshot(sess.project)
+	record.Dirs = sess.deps.Dirs
 	if err == nil {
 		err = record.Save(prepRecordFile(sess.project))
 	}
