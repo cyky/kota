@@ -117,3 +117,45 @@ func lanGateway() string {
 	}
 	return ""
 }
+
+// EngineQEMUAddrs are QEMU's user-mode addresses for the host and its DNS
+// relay, as the Engine VM sees them.
+var EngineQEMUAddrs = []string{"10.0.2.2", "10.0.2.3"}
+
+// EngineHostAddrs are the addresses that lead to the host from inside the
+// Engine VM: QEMU's aliases, the host's own IPv4 addresses and the LAN
+// gateway.
+func EngineHostAddrs() []string {
+	addrs := slices.Clone(EngineQEMUAddrs)
+	if ifaces, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range ifaces {
+			if p, err := netip.ParsePrefix(a.String()); err == nil && p.Addr().Is4() && !p.Addr().IsLoopback() && !p.Addr().IsLinkLocalUnicast() {
+				addrs = append(addrs, p.Addr().String())
+			}
+		}
+	}
+	if lan := lanGateway(); lan != "" {
+		addrs = append(addrs, lan)
+	}
+	return addrs
+}
+
+// EnginePorts are the host ports the Engine VM probes try on every host
+// address: the gateway's, the usual service ports and hostPorts, the host
+// side of the VM's own forwards.
+func EnginePorts(gw sandbox.Gateway, hostPorts []int) []int {
+	ports := append(append([]int{gw.Port}, extraHostPorts...), hostPorts...)
+	slices.Sort(ports)
+	return slices.Compact(ports)
+}
+
+// RunEngine runs the Engine VM probes from a fresh agent container, which
+// has the session's Docker environment, and returns every result.
+func RunEngine(s *docker.Session, t probe.EngineTargets) ([]probe.Result, error) {
+	probes := probe.EngineSuite(t)
+	out, err := s.Capture("bash", "-c", probe.EngineScript(probes, t.Image))
+	if err != nil {
+		return nil, err
+	}
+	return probe.Parse(probes, out), nil
+}

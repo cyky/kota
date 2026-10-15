@@ -78,6 +78,15 @@ func InspectImage(tag string) (id string, labels map[string]string, exists bool,
 	return images[0].ID, images[0].Config.Labels, true, nil
 }
 
+// SaveImage writes image to file as an archive for docker load.
+func SaveImage(image, file string) error {
+	out, err := command("docker", "save", "-o", file, image).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("save image %s: %w: %s", image, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // ListVolumes lists existing volume names. Callers select exact names before
 // removal; the list includes old dependency volumes no longer in the manifest.
 func ListVolumes() ([]string, error) {

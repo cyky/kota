@@ -24,6 +24,8 @@ type Probe struct {
 	Cmd []string
 	// MustSucceed is true when Cmd has to exit 0, false when it has to fail.
 	MustSucceed bool
+	// InEngine runs Cmd in a probe container inside the Engine VM instead.
+	InEngine bool
 }
 
 // Result is the outcome of one probe.
@@ -34,9 +36,14 @@ type Result struct {
 	Missing bool
 }
 
-// Passed reports whether the probe's outcome matches its expectation.
+// Passed reports whether the probe's outcome matches its expectation. A
+// must-fail probe whose command couldn't run (exit 126 or 127) fails: a
+// missing tool proves nothing is blocked.
 func (r Result) Passed() bool {
 	if r.Missing {
+		return false
+	}
+	if !r.MustSucceed && (r.ExitCode == 126 || r.ExitCode == 127) {
 		return false
 	}
 	return (r.ExitCode == 0) == r.MustSucceed
@@ -172,14 +179,28 @@ const resultPrefix = "LOCALLLM-PROBE"
 // Script renders probes as a bash script that runs them in parallel and prints
 // one result line per probe: LOCALLLM-PROBE <index> <exit code>.
 func Script(probes []Probe) string {
+	var all []int
+	for i := range probes {
+		all = append(all, i)
+	}
+	return script(probes, all, true)
+}
+
+// script renders the probes at indices, numbered by their index, in
+// parallel or one after the other. It is POSIX sh, so it also runs in
+// busybox.
+func script(probes []Probe, indices []int, parallel bool) string {
 	var b strings.Builder
 	b.WriteString("probe() { i=$1; shift; timeout " + strconv.Itoa(Timeout) + " \"$@\" </dev/null >/dev/null 2>&1; echo \"" + resultPrefix + " $i $?\"; }\n")
-	for i, p := range probes {
+	for _, i := range indices {
 		fmt.Fprintf(&b, "probe %d", i)
-		for _, arg := range p.Cmd {
+		for _, arg := range probes[i].Cmd {
 			b.WriteString(" " + shellQuote(arg))
 		}
-		b.WriteString(" &\n")
+		if parallel {
+			b.WriteString(" &")
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("wait\n")
 	return b.String()

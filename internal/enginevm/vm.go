@@ -192,15 +192,23 @@ func (v *VM) ping(ctx context.Context) error {
 // reference it was declared as.
 func (v *VM) Load(dir string, archives []engine.Archive) error {
 	for _, a := range archives {
-		id, err := v.load(filepath.Join(dir, a.File))
-		if err != nil {
-			return fmt.Errorf("load engine image %s: %w", a.Ref, err)
+		if err := v.LoadTar(filepath.Join(dir, a.File), a.Ref); err != nil {
+			return err
 		}
-		repo, tag := engine.SplitRef(a.Ref)
-		q := url.Values{"repo": {repo}, "tag": {tag}}
-		if err := v.post("/images/"+url.PathEscape(id)+"/tag?"+q.Encode(), "", nil, nil); err != nil {
-			return fmt.Errorf("tag engine image %s: %w", a.Ref, err)
-		}
+	}
+	return nil
+}
+
+// LoadTar loads one image archive into the VM's Docker and tags it ref.
+func (v *VM) LoadTar(file, ref string) error {
+	id, err := v.load(file)
+	if err != nil {
+		return fmt.Errorf("load engine image %s: %w", ref, err)
+	}
+	repo, tag := engine.SplitRef(ref)
+	q := url.Values{"repo": {repo}, "tag": {tag}}
+	if err := v.post("/images/"+url.PathEscape(id)+"/tag?"+q.Encode(), "", nil, nil); err != nil {
+		return fmt.Errorf("tag engine image %s: %w", ref, err)
 	}
 	return nil
 }

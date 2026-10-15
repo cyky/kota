@@ -85,6 +85,9 @@ func TestResultPassed(t *testing.T) {
 		{"must succeed, failed", Result{Probe: Probe{MustSucceed: true}, ExitCode: 7}, false},
 		{"missing must fail", Result{Probe: Probe{}, Missing: true}, false},
 		{"missing must succeed", Result{Probe: Probe{MustSucceed: true}, Missing: true}, false},
+		{"must fail, command not found", Result{ExitCode: 127}, false},
+		{"must fail, not executable", Result{ExitCode: 126}, false},
+		{"must fail, timed out", Result{ExitCode: 124}, true},
 	}
 	for _, tt := range tests {
 		if got := tt.r.Passed(); got != tt.want {

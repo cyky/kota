@@ -21,9 +21,12 @@ import (
 	"time"
 
 	"localllm/assets"
+	"localllm/internal/check"
+	"localllm/internal/docker"
 	"localllm/internal/engine"
 	"localllm/internal/enginevm"
 	"localllm/internal/models"
+	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
 
@@ -212,11 +215,11 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 	}
 }
 
-// shellSession starts the project's shell session up to where Bash would
-// run, with the Engine VM, the containment probes and test-only caches,
-// runs script in a fresh agent container of it, and returns the output.
-// The session and VM are gone when it returns.
-func shellSession(t *testing.T, project, gateway string, caches func(*sandbox.Compose), script string) string {
+// withShellSession starts the project's shell session up to where Bash
+// would run, with the Engine VM, the containment probes and test-only
+// caches, and calls fn with it. The session and VM are gone when it
+// returns.
+func withShellSession(t *testing.T, project, gateway string, caches func(*sandbox.Compose), fn func(*session, *docker.Session)) {
 	t.Helper()
 	sa := sessionArgs{agent: defaultAgent, gatewayURL: gateway, dir: project, shell: true, engine: true}
 	lease, err := lockProject(sa, "shell")
@@ -241,15 +244,27 @@ func shellSession(t *testing.T, project, gateway string, caches func(*sandbox.Co
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := ds.Capture("bash", "-c", "exec 2>&1\n"+script)
-	pid := sess.engine.running
-	stop()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if qemuRunning(pid) {
+	vm := sess.engine.running
+	func() {
+		defer stop()
+		fn(sess, ds)
+	}()
+	if qemuRunning(vm) {
 		t.Error("the Engine VM still runs after the session")
 	}
+}
+
+// shellSession runs script in a fresh agent container of a shell session
+// (withShellSession) and returns the output.
+func shellSession(t *testing.T, project, gateway string, caches func(*sandbox.Compose), script string) string {
+	t.Helper()
+	var out string
+	withShellSession(t, project, gateway, caches, func(_ *session, ds *docker.Session) {
+		var err error
+		if out, err = ds.Capture("bash", "-c", "exec 2>&1\n"+script); err != nil {
+			t.Fatal(err)
+		}
+	})
 	return out
 }
 
@@ -339,6 +354,68 @@ for i in $(seq 1 50); do getent hosts engine >/dev/null || break; sleep 0.2; don
 getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 		if !strings.Contains(out, "API UP") || !strings.Contains(out, "ROUTE-CLOSED") {
 			t.Errorf("engine route after the VM powered off:\n%s", out)
+		}
+	})
+
+	t.Run("engine probes pass and detect an open route", func(t *testing.T) {
+		withShellSession(t, project, gateway, caches, func(sess *session, ds *docker.Session) {
+			// startSession ran the probes and removed their image.
+			if err := sess.engine.running.LoadTar(sess.engine.probeTar, engineProbeImage); err != nil {
+				t.Fatal(err)
+			}
+			results, err := sess.engine.probes(ds, sess.gateway)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range results {
+				if !r.Passed() {
+					t.Errorf("engine probe %q failed: exit %d (missing %v)", r.Name, r.ExitCode, r.Missing)
+				}
+			}
+			if len(results) < 15 {
+				t.Errorf("only %d engine probes", len(results))
+			}
+			// The VM's own address is open to itself, so a must-fail probe
+			// aimed at it has to report the route.
+			if err := sess.engine.running.LoadTar(sess.engine.probeTar, engineProbeImage); err != nil {
+				t.Fatal(err)
+			}
+			results, err = check.RunEngine(ds, probe.EngineTargets{
+				Image: engineProbeImage, GuestAPIPort: engine.GuestAPIPort,
+				HostAddrs: []string{"10.0.2.15"}, HostPorts: []int{engine.GuestAPIPort},
+				EngineHost: sandbox.EngineHost, APIPort: engine.GuestAPIPort, CertDir: sandbox.EngineCertDir,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range results {
+				if r.Name == "engine host 10.0.2.15:2376" && (r.Passed() || r.Missing) {
+					t.Errorf("open route not detected: %+v", r)
+				}
+			}
+		})
+	})
+
+	t.Run("check shows the engine", func(t *testing.T) {
+		t.Setenv("LOCALLLM_GATEWAY", gateway)
+		cmd, output := startLocalllm(t, "check", project)
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("check failed: %v\n%s", err, output)
+			}
+		case <-time.After(3 * time.Minute):
+			t.Fatalf("check didn't finish:\n%s", output)
+		}
+		for _, want := range []string{"image postgres:16-alpine (sha256:", "Engine VM ready", "Engine VM probes:", "engine internet 1.1.1.1:443", "engine published port"} {
+			if !strings.Contains(output.String(), want) {
+				t.Errorf("check output lacks %q:\n%s", want, output)
+			}
+		}
+		if strings.Contains(output.String(), "FAIL ") {
+			t.Errorf("a probe failed:\n%s", output)
 		}
 	})
 

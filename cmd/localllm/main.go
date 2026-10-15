@@ -52,6 +52,9 @@ const (
 	engineHostAlias = "host.docker.internal"
 	// engineBootTimeout bounds the Engine VM's boot to a ready Docker API.
 	engineBootTimeout = 60 * time.Second
+	// engineProbeImage is the forwarder image, loaded into the Engine VM
+	// under this name for the probes only.
+	engineProbeImage = "localllm-engine-probe:latest"
 
 	opencodeConfigPath = "/etc/localllm/opencode.json"
 	// piAgentDir is pi's config directory. It is writable, because pi
@@ -76,7 +79,8 @@ commands:
                         dir (default: current dir)
   shell [flags] [dir]   verify containment, then open an interactive Bash
                         shell in the same sandbox as run
-  check [flags] [dir]   show mounts and run the containment probes
+  check [flags] [dir]   show mounts and the Engine VM, and run the containment
+                        probes
   clean [flags] [dir]   remove project state and dependency volumes after
                         confirmation
 
@@ -344,6 +348,9 @@ type session struct {
 	image projectimage.Choice
 	// engine is the session's Engine VM, nil when it has none.
 	engine *engineSession
+	// engineErr is why the Engine VM can't start, with
+	// sessionArgs.engineOptional.
+	engineErr error
 }
 
 // engineSession is a session's Engine VM: worked out by prepareEngine,
@@ -356,8 +363,10 @@ type engineSession struct {
 	archives   []engine.Archive
 	// warning says the Engine base disk should be rebuilt.
 	warning string
-	running *enginevm.VM
-	started time.Time
+	// probeTar is where the probe image is saved for loading.
+	probeTar string
+	running  *enginevm.VM
+	started  time.Time
 }
 
 // prepareEngine works out project's Engine VM for a session: the Engine
@@ -428,7 +437,8 @@ func prepareEngine(project, sessionDir string) (*engineSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &engineSession{vm: vm, cmd: cmd, certs: certs, archiveDir: layout.ArchiveDir(project), archives: archives, warning: warning}, nil
+	return &engineSession{vm: vm, cmd: cmd, certs: certs, archiveDir: layout.ArchiveDir(project), archives: archives, warning: warning,
+		probeTar: filepath.Join(sessionDir, "engine-probe.tar")}, nil
 }
 
 // route writes the client certificate into dir and returns the sandbox's
@@ -461,17 +471,40 @@ func (e *engineSession) start() error {
 
 // ready waits for the VM's Docker API and loads the archives.
 func (e *engineSession) ready(w io.Writer) error {
+	// The VM can't download anything, so the probes' image comes from the
+	// host's Docker, saved while the VM boots.
+	if err := docker.SaveImage(forwarderImage, e.probeTar); err != nil {
+		return fmt.Errorf("the Engine VM probes: %w; run 'localllm build'", err)
+	}
 	if err := e.running.WaitReady(engineBootTimeout); err != nil {
-		return err
+		return fmt.Errorf("%w\nIf this keeps happening, remove %s and run 'localllm build' to rebuild the Engine base disk", err, filepath.Dir(e.vm.Base.Disk))
 	}
 	booted := time.Since(e.started)
 	loadStart := time.Now()
 	if err := e.running.Load(e.archiveDir, e.archives); err != nil {
+		return fmt.Errorf("%w; run 'localllm prep' to download the archives again", err)
+	}
+	if err := e.running.LoadTar(e.probeTar, engineProbeImage); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Engine VM ready: booted in %s, loaded %d image(s) in %s\n",
 		booted.Round(100*time.Millisecond), len(e.archives), time.Since(loadStart).Round(100*time.Millisecond))
 	return nil
+}
+
+// probes runs the Engine VM probes through the started sandbox ds.
+func (e *engineSession) probes(ds *docker.Session, gw sandbox.Gateway) ([]probe.Result, error) {
+	return check.RunEngine(ds, probe.EngineTargets{
+		Image:        engineProbeImage,
+		GuestAPIPort: engine.GuestAPIPort,
+		HostAddrs:    check.EngineHostAddrs(),
+		// The host side of the VM's own forwards, so the VM can't loop
+		// back through the host.
+		HostPorts:  check.EnginePorts(gw, []int{e.vm.Ports.API, e.vm.Ports.Published[0]}),
+		EngineHost: sandbox.EngineHost,
+		APIPort:    engine.GuestAPIPort,
+		CertDir:    sandbox.EngineCertDir,
+	})
 }
 
 func (e *engineSession) stop() {
@@ -519,13 +552,16 @@ type sessionArgs struct {
 	exclusiveCaches bool
 	shell           bool
 	// engine starts the project's Engine VM, if it declares one.
-	engine     bool
-	agent      string
-	gatewayURL string
-	model      string
-	dir        string
-	ro         []string
-	command    []string
+	engine bool
+	// engineOptional keeps the session going when the Engine VM can't be
+	// set up, recording why in session.engineErr, so check can report it.
+	engineOptional bool
+	agent          string
+	gatewayURL     string
+	model          string
+	dir            string
+	ro             []string
+	command        []string
 }
 
 // stringList is a repeatable string flag.
@@ -685,6 +721,9 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 		sess.engine, err = prepareEngine(project, sessionDir)
 		if err == nil && sess.engine != nil {
 			engineRoute, err = sess.engine.route(filepath.Join(sessionDir, "engine-client"))
+		}
+		if err != nil && sa.engineOptional {
+			sess.engine, sess.engineErr, engineRoute, err = nil, err, nil, nil
 		}
 		if err != nil {
 			os.RemoveAll(sessionDir)
@@ -1010,6 +1049,17 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 			return nil, nil, fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'localllm check' for details)", len(failed), len(results))
 		}
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
+		if sess.engine != nil {
+			results, err := sess.engine.probes(ds, sess.gateway)
+			if err != nil {
+				return nil, nil, fmt.Errorf("Engine VM probes: %w", err)
+			}
+			if failed := probe.Failed(results); len(failed) > 0 {
+				printResults(os.Stderr, failed)
+				return nil, nil, fmt.Errorf("refusing to start: %d of %d Engine VM probes failed (run 'localllm check' for details)", len(failed), len(results))
+			}
+			fmt.Fprintf(os.Stderr, "Engine VM containment verified: %d probes passed\n", len(results))
+		}
 	}
 	// A probe cut short by a signal may still have produced output.
 	if err := interrupt.Err(); err != nil {
@@ -1065,6 +1115,7 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	sa.command = nil
+	sa.engine, sa.engineOptional = true, true
 	lease, err := lockProject(sa, "check")
 	if err != nil {
 		return err
@@ -1083,7 +1134,14 @@ func cmdCheck(args []string) error {
 	printMounts(os.Stdout, sess.spec)
 	printMasks(os.Stdout, sess.layout)
 	sess.printWarnings(os.Stdout)
+	engineErr := printEngine(os.Stdout, sess)
 
+	if sess.engine != nil {
+		if err := sess.engine.start(); err != nil {
+			return err
+		}
+		defer sess.engine.stop()
+	}
 	ds, err := docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
 	if err != nil {
 		return err
@@ -1095,6 +1153,12 @@ func cmdCheck(args []string) error {
 	// other probes still run.
 	catalog, modelErr := sess.configure(ds, sa.model, false)
 	printModels(os.Stdout, catalog, modelErr)
+	if sess.engine != nil {
+		if err := sess.engine.ready(os.Stdout); err != nil {
+			fmt.Printf("engine status: can't start: %v\n\n", err)
+			engineErr = errors.New("the Engine VM can't start")
+		}
+	}
 
 	start := time.Now()
 	results, err := check.Run(ds, sess.gateway, sess.mounts)
@@ -1103,13 +1167,61 @@ func cmdCheck(args []string) error {
 	}
 	fmt.Println("\nprobes:")
 	printResults(os.Stdout, results)
-
 	failed := probe.Failed(results)
 	fmt.Printf("\n%d passed, %d failed (%s)\n", len(results)-len(failed), len(failed), time.Since(start).Round(10*time.Millisecond))
-	if len(failed) > 0 {
+
+	var engineFailed []probe.Result
+	if sess.engine != nil && engineErr == nil {
+		start := time.Now()
+		engineResults, err := sess.engine.probes(ds, sess.gateway)
+		if err != nil {
+			return fmt.Errorf("Engine VM probes: %w", err)
+		}
+		fmt.Println("\nEngine VM probes:")
+		printResults(os.Stdout, engineResults)
+		engineFailed = probe.Failed(engineResults)
+		fmt.Printf("\n%d passed, %d failed (%s)\n", len(engineResults)-len(engineFailed), len(engineFailed), time.Since(start).Round(10*time.Millisecond))
+	}
+	switch {
+	case len(failed) > 0:
 		return errors.New("sandbox is not contained")
+	case len(engineFailed) > 0:
+		return errors.New("the Engine VM is not contained")
+	case engineErr != nil:
+		return engineErr
 	}
 	return modelErr
+}
+
+// printEngine shows the project's Engine VM: none, or its declared images
+// with the digests prep recorded, and why it can't start if it can't. It
+// returns that reason.
+func printEngine(w io.Writer, sess *session) error {
+	cfg, cfgErr := engine.Read(sess.project)
+	if cfg == nil && sess.engineErr == nil {
+		if cfgErr != nil {
+			fmt.Fprintf(w, "engine: none (%v)\n\n", cfgErr)
+		} else {
+			fmt.Fprintf(w, "engine: none (no engine section in %s)\n\n", engine.ConfigFile)
+		}
+		return nil
+	}
+	fmt.Fprintln(w, "engine:")
+	if sess.engine != nil {
+		for _, a := range sess.engine.archives {
+			fmt.Fprintf(w, "  image %s (%s)\n", a.Ref, a.Digest)
+		}
+	} else if cfg != nil {
+		for _, ref := range cfg.Images {
+			fmt.Fprintf(w, "  image %s\n", ref)
+		}
+	}
+	if sess.engineErr != nil {
+		fmt.Fprintf(w, "  status: can't start: %v\n\n", sess.engineErr)
+		return fmt.Errorf("the Engine VM can't start: %w", sess.engineErr)
+	}
+	fmt.Fprintln(w)
+	return nil
 }
 
 func cmdPrep(args []string) error {

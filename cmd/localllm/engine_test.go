@@ -189,3 +189,46 @@ func TestEngineSessionRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckShowsEngine(t *testing.T) {
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	check := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, engine: true, engineOptional: true}
+	cases := []struct {
+		name, yaml string
+		missing    []string
+		want       []string
+		wantErr    bool
+	}{
+		{name: "no engine", yaml: "prep:\n  dirs: [.venv]\n", want: []string{"engine: none (no engine section"}},
+		{name: "ready to start", yaml: engineYAML, want: []string{"image postgres:16-alpine (sha256:aaaa"}},
+		{name: "no base disk", yaml: engineYAML, missing: []string{"base"}, want: []string{"image postgres:16-alpine\n", "status: can't start", "localllm build"}, wantErr: true},
+		{name: "not prepped", yaml: engineYAML, missing: []string{"archives"}, want: []string{"status: can't start", "localllm prep"}, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			project := fakeHome(t, map[string]string{engine.ConfigFile: c.yaml})
+			fakeEngine(t, project, []string{"postgres:16-alpine"}, c.missing...)
+			sa := check
+			sa.dir = project
+			sess, err := prepareShellSession(sa)
+			if err != nil {
+				t.Fatalf("check refused to prepare: %v", err)
+			}
+			t.Cleanup(sess.cleanup)
+			var out strings.Builder
+			err = printEngine(&out, sess)
+			for _, want := range c.want {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("output lacks %q:\n%s", want, out.String())
+				}
+			}
+			if (err != nil) != c.wantErr {
+				t.Errorf("err = %v, want error %v", err, c.wantErr)
+			}
+			if c.wantErr && sess.spec.Services[sandbox.EngineService].Image != "" {
+				t.Error("engine forwarder without an Engine VM")
+			}
+		})
+	}
+}
