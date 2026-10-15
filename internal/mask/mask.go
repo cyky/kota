@@ -54,6 +54,10 @@ type Layout struct {
 	// Warnings call for the user's attention, e.g. a masked file tracked in
 	// git.
 	Warnings []string
+	// Watch are project files, relative with forward slashes, that git
+	// config runs on the host but that stay writable. Changes to them
+	// belong in the change report.
+	Watch []string
 }
 
 // IgnoreFile is the per-project mask rules file, in gitignore syntax.
@@ -139,6 +143,7 @@ func Plan(project string, defaults []string) (Layout, error) {
 	}
 	p.dropInsideMasks()
 	slices.SortStableFunc(p.plan.Mounts, func(a, b Mount) int { return strings.Compare(a.Path, b.Path) })
+	p.warnExecRefs()
 	if err := p.warnTracked(); err != nil {
 		return Layout{}, err
 	}
@@ -265,6 +270,16 @@ func (p *planner) warnTracked() error {
 type planner struct {
 	project string
 	plan    Layout
+	// gitDirs are the project's git dirs, relative: .git and each
+	// submodule's.
+	gitDirs []string
+	// execRefs are config values that run a project file.
+	execRefs []execRef
+}
+
+// execRef is a config value that names a file in the project.
+type execRef struct {
+	key, config, file string
 }
 
 func (p *planner) git() error {
@@ -293,11 +308,15 @@ func (p *planner) git() error {
 	if err := p.hooksPath(); err != nil {
 		return err
 	}
-	return p.modules()
+	if err := p.modules(); err != nil {
+		return err
+	}
+	return p.configs()
 }
 
 // gitDir protects the files of the git dir at rel that decide what git runs.
 func (p *planner) gitDir(rel string) error {
+	p.gitDirs = append(p.gitDirs, rel)
 	if err := p.dir(rel + "/hooks"); err != nil {
 		return err
 	}

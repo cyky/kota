@@ -76,6 +76,26 @@ func Snapshot(dir string) (Files, error) {
 	return snapshot(dir, Watched)
 }
 
+// SnapshotWith is Snapshot plus the files extra, relative to dir with
+// forward slashes, wherever they are. A missing one is left out, so
+// creating it counts as added.
+func SnapshotWith(dir string, extra []string) (Files, error) {
+	s, err := Snapshot(dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range extra {
+		info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if err := s.record(dir, rel); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
 // SnapshotMatching records the files in dir that match patterns, in the
 // syntax of Watched.
 func SnapshotMatching(dir string, patterns []string) (Files, error) {

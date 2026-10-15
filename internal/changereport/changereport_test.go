@@ -67,6 +67,31 @@ func TestSnapshotRecordsOnlyWatched(t *testing.T) {
 	}
 }
 
+// TestSnapshotWith checks extra files are recorded anywhere, even in
+// skipped directories, and that creating a missing one counts as added.
+func TestSnapshotWith(t *testing.T) {
+	root := project(t)
+	write(t, root, "scripts/fsmonitor.sh", "original")
+	write(t, root, "build/tools/crypt", "original")
+	extra := []string{"scripts/fsmonitor.sh", "build/tools/crypt", "bin/fix"}
+	before, err := SnapshotWith(root, extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, "scripts/fsmonitor.sh", "changed")
+	write(t, root, "build/tools/crypt", "changed")
+	write(t, root, "bin/fix", "new")
+	write(t, root, "scripts/other.sh", "not watched")
+	after, err := SnapshotWith(root, extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Change{{"bin/fix", Added}, {"build/tools/crypt", Modified}, {"scripts/fsmonitor.sh", Modified}}
+	if got := Diff(before, after); !slices.Equal(got, want) {
+		t.Errorf("changes = %v, want %v", got, want)
+	}
+}
+
 func TestDiff(t *testing.T) {
 	cases := []struct {
 		name   string

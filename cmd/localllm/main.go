@@ -712,14 +712,14 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	}
 	// Snapshot before Docker creates any mount points, and compare after
 	// cleanup has removed them, so placeholders aren't reported.
-	before, err := changereport.Snapshot(sess.project)
+	before, err := changereport.SnapshotWith(sess.project, sess.layout.Watch)
 	if err != nil {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
 	err = runSession(sess, lease.Lease, sa.model, auto, skipCheck)
 	sess.cleanup()
-	reportChanges(os.Stderr, sess.project, before)
+	reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
 	return err
 }
 
@@ -787,10 +787,10 @@ func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Sess
 	}
 }
 
-// reportChanges warns about watched files the session added, modified or
-// deleted.
-func reportChanges(w io.Writer, project string, before changereport.Files) {
-	after, err := changereport.Snapshot(project)
+// reportChanges warns about watched files, and the files in watch, that the
+// session added, modified or deleted.
+func reportChanges(w io.Writer, project string, watch []string, before changereport.Files) {
+	after, err := changereport.SnapshotWith(project, watch)
 	if err != nil {
 		fmt.Fprintf(w, "WARNING: could not check for changed files that run things: %v\n", err)
 		return
@@ -891,14 +891,14 @@ func cmdPrep(args []string) error {
 	if err != nil {
 		return err
 	}
-	before, err := changereport.Snapshot(sess.project)
+	before, err := changereport.SnapshotWith(sess.project, sess.layout.Watch)
 	if err != nil {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
 	err = runPrep(sess)
 	sess.cleanup()
-	reportChanges(os.Stderr, sess.project, before)
+	reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
 	if err != nil {
 		return err
 	}

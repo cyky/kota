@@ -287,8 +287,15 @@ func TestGitProtection(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(project, ".husky/_"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A committed config the repo includes, and a conditional include
+	// whose target is missing.
+	if err := os.WriteFile(filepath.Join(project, ".gitconfig"), []byte("[core]\n\tautocrlf = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for _, args := range [][]string{
 		{"config", "core.hooksPath", ".husky/_"},
+		{"config", "include.path", "../.gitconfig"},
+		{"config", "includeIf.onbranch:release.path", "../ci/git.cfg"},
 		{"worktree", "add", "-q", filepath.Join(t.TempDir(), "wt")},
 	} {
 		if out, err := exec.Command("git", append([]string{"-C", project}, args...)...).CombinedOutput(); err != nil {
@@ -302,7 +309,7 @@ func TestGitProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	requirePass(t, results)
-	for _, want := range []string{"read-only /workspace/.git/hooks", "read-only /workspace/.git/config", "read-only /workspace/.envrc", "pinned /workspace/.git"} {
+	for _, want := range []string{"read-only /workspace/.git/hooks", "read-only /workspace/.git/config", "read-only /workspace/.envrc", "pinned /workspace/.git", "read-only /workspace/.gitconfig", "read-only /workspace/ci"} {
 		if !slices.ContainsFunc(results, func(r probe.Result) bool { return r.Name == want }) {
 			t.Errorf("no probe %q", want)
 		}
@@ -325,6 +332,10 @@ try husky-rename mv .husky .husky-old
 try husky-hook touch .husky/_/pre-commit
 try worktree-rename mv .git/worktrees/wt .git/worktrees/x
 try worktree-commondir sh -c 'echo ../../../evil > .git/worktrees/wt/commondir'
+try include-edit sh -c 'printf "[core]\n\tfsmonitor = ./x\n" >> .gitconfig'
+try include-rename mv .gitconfig .gitconfig-old
+try include-create sh -c 'echo x > ci/git.cfg'
+try include-dir-rename mv ci ci-old
 echo DONE`)
 	if err != nil {
 		t.Fatal(err)
