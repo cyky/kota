@@ -2,15 +2,15 @@
 
 Hands-on test of localllm on a real project, against the real llama-swap. Expect 30-45 minutes. Tick each box as you go and write what you saw under **Notes** for each section, especially anything that differs from **Expect**, felt slow, was confusing, or needed a tool the image doesn't have.
 
-Throughout, `$P` is the trial project:
+Host commands are written for fish. Throughout, `$P` is the trial project:
 
-```sh
-P=~/Projects/trial
+```fish
+set P ~/Projects/trial
 ```
 
 ## 0. Setup
 
-```sh
+```fish
 cd ~/Projects/personal/localllm
 go install ./cmd/localllm
 localllm build
@@ -20,13 +20,13 @@ localllm build
 - [ ] llama-swap is running, and `curl -s http://localhost:8080/v1/models` lists `qwen3.6-coder`.
 - [ ] A fresh clone of a real TypeScript or Go project is in place, so nothing important is at risk:
 
-  ```sh
+  ```fish
   git clone <repo> ~/Projects/trial
   ```
 
 - [ ] A fake secret is in place, to test masking:
 
-  ```sh
+  ```fish
   echo 'API_KEY=supersecret' > $P/.env
   ```
 
@@ -34,7 +34,7 @@ Notes:
 
 ## 1. Containment check
 
-```sh
+```fish
 localllm check $P
 ```
 
@@ -47,7 +47,7 @@ Notes:
 
 ## 2. Dependencies
 
-```sh
+```fish
 localllm prep $P
 ```
 
@@ -61,7 +61,7 @@ Notes:
 
 ## 3. opencode in ask mode: one real task
 
-```sh
+```fish
 localllm run $P
 ```
 
@@ -79,7 +79,7 @@ Notes:
 
 Leave the edits from step 3 uncommitted, then run:
 
-```sh
+```fish
 localllm run --auto $P
 ```
 
@@ -91,7 +91,7 @@ Notes:
 
 ## 5. pi: one real task
 
-```sh
+```fish
 localllm run --agent pi $P
 ```
 
@@ -103,11 +103,11 @@ Notes:
 
 ## 6. Shell and protections
 
-```sh
+```fish
 localllm shell $P
 ```
 
-Inside the shell, check each of these:
+Inside the shell (the container's shell, not fish), check each of these:
 
 ```sh
 cat .env                                                # empty
@@ -127,7 +127,7 @@ Notes:
 
 ## 7. Interrupts and cleanup
 
-- [ ] Ctrl-C during the probes of `localllm run $P` prints `localllm: interrupted` and exits with code 130 (`echo $?`).
+- [ ] Ctrl-C during the probes of `localllm run $P` prints `localllm: interrupted` and exits with code 130 (`echo $status`).
 - [ ] Nothing is left behind afterwards:
   - [ ] `git -C $P status` shows no new placeholder files.
   - [ ] `docker ps -a | grep localllm` shows no containers.
@@ -145,7 +145,7 @@ Notes:
 
 ## 9. Clean up
 
-```sh
+```fish
 localllm clean $P
 ```
 
