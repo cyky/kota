@@ -26,6 +26,7 @@ import (
 	"localllm/internal/deps"
 	"localllm/internal/docker"
 	"localllm/internal/gatewaykey"
+	"localllm/internal/interrupt"
 	"localllm/internal/mask"
 	"localllm/internal/models"
 	"localllm/internal/opencode"
@@ -93,6 +94,9 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+	// A signal stops localllm at the next step, after which it tears down as
+	// on an error.
+	interrupt.Catch()
 	var err error
 	switch os.Args[1] {
 	case "build":
@@ -113,6 +117,11 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
+	}
+	if interrupt.Err() != nil {
+		// Whatever failed, it failed because of the signal.
+		fmt.Fprintln(os.Stderr, "localllm: interrupted")
+		os.Exit(130)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "localllm:", err)
@@ -401,10 +410,19 @@ func resolveSessionPaths(sa sessionArgs) (pathpolicy.Paths, error) {
 	return pathpolicy.Validate(sa.dir, sa.ro, pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT")))
 }
 
-// prepareSession builds the compose spec from the paths covered by the lease.
-// The agent config is written later by configure. The caller removes sessionDir
-// when done. Prep has no agent, gateway or key and runs the dependency install.
-func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths) (*session, error) {
+// detectDeps works out the project's dependency plan. It only reads the
+// project, so it can run before the user is asked anything.
+func detectDeps(project string) (deps.Plan, error) {
+	return deps.Detect(project, deps.Options{PnpmStore: sandbox.PnpmStore})
+}
+
+// prepareSession builds the compose spec from the paths covered by the lease
+// and depPlan from detectDeps, which the user may have confirmed. It writes
+// to the host (the session dir, seeded protections), so confirmations come
+// first. The agent config is written later by configure. The caller removes
+// sessionDir when done. Prep has no agent, gateway or key and runs the
+// dependency install.
+func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, depPlan deps.Plan) (*session, error) {
 	prep := mode == sandbox.ModePrep
 	var agent agentSetup
 	var err error
@@ -425,10 +443,6 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths) (
 		}
 	}
 	layout, err := mask.Plan(project, mask.DefaultRules)
-	if err != nil {
-		return nil, err
-	}
-	depPlan, err := deps.Detect(project, deps.Options{PnpmStore: sandbox.PnpmStore})
 	if err != nil {
 		return nil, err
 	}
@@ -652,20 +666,26 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		return err
 	}
 	defer releaseProject(lease)
-	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths)
+	// Fail on an unknown agent or a broken models.yaml before asking.
+	agent, err := agentFor(sa.agent)
 	if err != nil {
 		return err
 	}
-	// Fail on a broken models.yaml before starting anything.
 	if _, err := models.ParseFile(assets.Models); err != nil {
-		sess.cleanup()
+		return err
+	}
+	depPlan, err := detectDeps(lease.paths.Project)
+	if err != nil {
 		return err
 	}
 	if !sa.shell {
-		if err := confirmFullAuto(sess.project, sess.agent.name, auto); err != nil {
-			sess.cleanup()
+		if err := confirmFullAuto(lease.paths.Project, agent.name, auto); err != nil {
 			return err
 		}
+	}
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, depPlan)
+	if err != nil {
+		return err
 	}
 	// Snapshot before Docker creates any mount points, and compare after
 	// cleanup has removed them, so placeholders aren't reported.
@@ -730,6 +750,10 @@ func runSession(sess *session, lease *sessionregistry.Lease, model string, auto,
 		}
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
 	}
+	// A probe cut short by a signal may still have produced output.
+	if err := interrupt.Err(); err != nil {
+		return err
+	}
 	return ds.Interactive()
 }
 
@@ -769,7 +793,11 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	defer releaseProject(lease)
-	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths)
+	depPlan, err := detectDeps(lease.paths.Project)
+	if err != nil {
+		return err
+	}
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, depPlan)
 	if err != nil {
 		return err
 	}
@@ -825,16 +853,19 @@ func cmdPrep(args []string) error {
 		return err
 	}
 	defer releaseProject(lease)
-	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths)
+	project := lease.paths.Project
+	depPlan, err := detectDeps(project)
 	if err != nil {
 		return err
 	}
-	if len(sess.deps.Steps) == 0 {
-		sess.cleanup()
-		return fmt.Errorf("nothing to install in %s: no package.json or go.mod; set prep.command in %s", sess.project, deps.ConfigFile)
+	if len(depPlan.Steps) == 0 {
+		return fmt.Errorf("nothing to install in %s: no package.json or go.mod; set prep.command in %s", project, deps.ConfigFile)
 	}
-	if err := confirmPrep(sess); err != nil {
-		sess.cleanup()
+	if err := confirmPrep(project, depPlan); err != nil {
+		return err
+	}
+	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, depPlan)
+	if err != nil {
 		return err
 	}
 	before, err := changereport.Snapshot(sess.project)
@@ -926,7 +957,7 @@ func cleanProject(project string, shared bool, in io.Reader, out io.Writer) erro
 		fmt.Fprintln(out, "The project's prep confirmation record will also be reset.")
 	}
 	fmt.Fprint(out, "Type y to clean: ")
-	if !readYes(in) {
+	if !interrupt.Ask(func() bool { return readYes(in) }) {
 		return errors.New("clean not run")
 	}
 	if err := docker.RemoveVolumes(volumes...); err != nil {
@@ -952,31 +983,31 @@ func prepRecordFile(project string) string {
 // confirmPrep asks the user to type y before a prep whose inputs changed
 // since the last prep, or before the first one: an agent session may have
 // written what prep is about to run with network access.
-func confirmPrep(sess *session) error {
-	last, err := prepgate.Load(prepRecordFile(sess.project))
+func confirmPrep(project string, plan deps.Plan) error {
+	last, err := prepgate.Load(prepRecordFile(project))
 	if err != nil {
 		return fmt.Errorf("read the last prep's record: %w", err)
 	}
-	now, err := prepgate.Snapshot(sess.project)
+	now, err := prepgate.Snapshot(project)
 	if err != nil {
 		return err
 	}
-	d := prepgate.Decide(last, now, len(sess.deps.Hooks) > 0)
+	d := prepgate.Decide(last, now, len(plan.Hooks) > 0)
 	if !d.Ask() {
 		return nil
 	}
-	printPrepGate(os.Stderr, sess, d)
+	printPrepGate(os.Stderr, project, plan, d)
 	fmt.Fprint(os.Stderr, "Type y to run prep: ")
-	if !readYes(os.Stdin) {
+	if !interrupt.Ask(func() bool { return readYes(os.Stdin) }) {
 		return errors.New("prep not run")
 	}
 	return nil
 }
 
-func printPrepGate(w io.Writer, sess *session, d prepgate.Decision) {
+func printPrepGate(w io.Writer, project string, plan deps.Plan, d prepgate.Decision) {
 	if d.First {
-		fmt.Fprintf(w, "First prep of %s. These run with network access:\n", sess.project)
-		for _, s := range sess.deps.Steps {
+		fmt.Fprintf(w, "First prep of %s. These run with network access:\n", project)
+		for _, s := range plan.Steps {
 			for _, c := range []string{s.Fetch, s.Script} {
 				if c != "" {
 					fmt.Fprintf(w, "  %s: %s\n", s.Name, c)
@@ -984,7 +1015,7 @@ func printPrepGate(w io.Writer, sess *session, d prepgate.Decision) {
 			}
 		}
 	} else {
-		fmt.Fprintf(w, "%s changed since its last prep, and prep runs with network access.\n", sess.project)
+		fmt.Fprintf(w, "%s changed since its last prep, and prep runs with network access.\n", project)
 		if len(d.Inputs) > 0 {
 			fmt.Fprintln(w, "Files that decide what prep runs:")
 			for _, line := range changereport.Warnings(d.Inputs) {
@@ -992,9 +1023,9 @@ func printPrepGate(w io.Writer, sess *session, d prepgate.Decision) {
 			}
 		}
 	}
-	if len(sess.deps.Hooks) > 0 {
+	if len(plan.Hooks) > 0 {
 		fmt.Fprintln(w, "The install runs project code:")
-		for _, h := range sess.deps.Hooks {
+		for _, h := range plan.Hooks {
 			fmt.Fprintln(w, "  "+h)
 		}
 	}
@@ -1010,7 +1041,7 @@ func printPrepGate(w io.Writer, sess *session, d prepgate.Decision) {
 		}
 	}
 	if !d.First {
-		fmt.Fprintf(w, "Review them first, e.g. git -C %s diff\n", sess.project)
+		fmt.Fprintf(w, "Review them first, e.g. git -C %s diff\n", project)
 	}
 }
 
@@ -1044,6 +1075,9 @@ func runPrep(sess *session) error {
 		if err := runAttached(sess.fetchSpec, sess.sessionDir); err != nil {
 			return fmt.Errorf("prep fetch failed: %w", err)
 		}
+	}
+	if err := interrupt.Err(); err != nil {
+		return err
 	}
 	if sess.deps.Script() != "" {
 		fmt.Fprintln(os.Stderr, "installing (shared caches read-only)")
@@ -1130,7 +1164,7 @@ func confirmFullAuto(project, agent string, auto bool) error {
 	if !approval.NeedsConfirmation(true, status) {
 		return nil
 	}
-	if !approval.Confirm(os.Stdin, os.Stderr, agent, status) {
+	if !interrupt.Ask(func() bool { return approval.Confirm(os.Stdin, os.Stderr, agent, status) }) {
 		msg := "not started; commit or stash your changes first (git stash -u)"
 		if !approval.FullAuto(agent, false) {
 			msg += ", or run without --auto"

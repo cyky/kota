@@ -16,7 +16,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
+	"time"
 
+	"localllm/internal/interrupt"
 	"localllm/internal/sandbox"
 )
 
@@ -46,7 +49,7 @@ func BuildDockerfile(tag string, dockerfile []byte, labels map[string]string) er
 	for _, k := range slices.Sorted(maps.Keys(labels)) {
 		args = append(args, "--label", k+"="+labels[k])
 	}
-	cmd := exec.Command("docker", append(args, dir)...)
+	cmd := command("docker", append(args, dir)...)
 	cmd.Stdin = bytes.NewReader(dockerfile)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
@@ -55,7 +58,7 @@ func BuildDockerfile(tag string, dockerfile []byte, labels map[string]string) er
 // InspectImage returns an image's ID and labels. A missing image is not an
 // error; exists is false.
 func InspectImage(tag string) (id string, labels map[string]string, exists bool, err error) {
-	out, err := exec.Command("docker", "image", "inspect", tag).Output()
+	out, err := command("docker", "image", "inspect", tag).Output()
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && strings.Contains(strings.ToLower(string(exit.Stderr)), "no such image") {
@@ -78,7 +81,7 @@ func InspectImage(tag string) (id string, labels map[string]string, exists bool,
 // ListVolumes lists existing volume names. Callers select exact names before
 // removal; the list includes old dependency volumes no longer in the manifest.
 func ListVolumes() ([]string, error) {
-	out, err := exec.Command("docker", "volume", "ls", "--format", "{{.Name}}").CombinedOutput()
+	out, err := command("docker", "volume", "ls", "--format", "{{.Name}}").CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("list volumes: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -91,7 +94,7 @@ func RemoveVolumes(names ...string) error {
 	if len(names) == 0 {
 		return nil
 	}
-	out, err := exec.Command("docker", append([]string{"volume", "rm", "-f"}, names...)...).CombinedOutput()
+	out, err := command("docker", append([]string{"volume", "rm", "-f"}, names...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("remove volumes: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -133,7 +136,7 @@ func RunOffline(image string, uid, gid int, mounts []string, dir string, cmd ...
 		}
 		args = append(args, "--mount", arg)
 	}
-	c := exec.Command("docker", append(append(args, "--", image), cmd...)...)
+	c := command("docker", append(append(args, "--", image), cmd...)...)
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {
@@ -194,7 +197,7 @@ func Start(spec sandbox.Compose, sessionDir, gatewayKey string) (*Session, error
 		if !v.External {
 			continue
 		}
-		if out, err := exec.Command("docker", "volume", "create", v.Name).CombinedOutput(); err != nil {
+		if out, err := command("docker", "volume", "create", v.Name).CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("create volume %s: %w: %s", v.Name, err, strings.TrimSpace(string(out)))
 		}
 	}
@@ -233,7 +236,7 @@ func (s *Session) NetworkGateways() ([]string, error) {
 		return nil, nil
 	}
 	args := append([]string{"network", "inspect", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"}, names...)
-	out, err := exec.Command("docker", args...).Output()
+	out, err := command("docker", args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("inspect networks: %w", err)
 	}
@@ -250,7 +253,7 @@ func (s *Session) NetworkGateways() ([]string, error) {
 // read from a throwaway container on the host network.
 func (s *Session) VMInterfaces() ([]netip.Prefix, error) {
 	image := s.spec.Services[sandbox.ForwarderService].Image
-	out, err := exec.Command("docker", "run", "--rm", "--network", "host", "--entrypoint", "ip", image, "-4", "-o", "addr").Output()
+	out, err := command("docker", "run", "--rm", "--network", "host", "--entrypoint", "ip", image, "-4", "-o", "addr").Output()
 	if err != nil {
 		return nil, fmt.Errorf("list VM interfaces: %w", err)
 	}
@@ -314,7 +317,7 @@ func (s *Session) GatewayGet(path string) ([]byte, error) {
 // stdout. A non-zero exit is not an error; the output is what matters.
 func (s *Session) Capture(cmd ...string) (string, error) {
 	args := append(append(slices.Clone(s.compose), "run", "--rm", "-T", sandbox.AgentService), cmd...)
-	c := exec.Command("docker", args...)
+	c := command("docker", args...)
 	c.Env = s.env
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
@@ -331,19 +334,22 @@ func (s *Session) Capture(cmd ...string) (string, error) {
 
 // Interactive runs the agent service attached to the terminal.
 func (s *Session) Interactive() error {
-	cmd := exec.Command("docker", append(slices.Clone(s.compose), "run", "--rm", sandbox.AgentService)...)
+	cmd := command("docker", append(slices.Clone(s.compose), "run", "--rm", sandbox.AgentService)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = s.env
 	return cmd.Run()
 }
 
-// Close removes the session's containers and networks.
+// Close removes the session's containers and networks. It runs even after
+// an interrupt.
 func (s *Session) Close() {
-	s.output("down", "--remove-orphans", "--timeout", "1")
+	c := exec.Command("docker", append(slices.Clone(s.compose), "down", "--remove-orphans", "--timeout", "1")...)
+	c.Env = s.env
+	c.Run()
 }
 
 func (s *Session) output(args ...string) (string, error) {
-	c := exec.Command("docker", append(slices.Clone(s.compose), args...)...)
+	c := command("docker", append(slices.Clone(s.compose), args...)...)
 	c.Env = s.env
 	var stdout, stderr bytes.Buffer
 	c.Stdout, c.Stderr = &stdout, &stderr
@@ -353,8 +359,20 @@ func (s *Session) output(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// command is exec.Command for a step that an interrupt cuts short: once
+// interrupt.Context is cancelled, a running command gets SIGTERM, which the
+// docker CLI passes on to its container, and is abandoned after a grace
+// period; a new one fails to start. Teardown (Close, RecoverProject) uses
+// exec.Command, so it still runs.
+func command(name string, args ...string) *exec.Cmd {
+	c := exec.CommandContext(interrupt.Context(), name, args...)
+	c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
+	c.WaitDelay = 10 * time.Second
+	return c
+}
+
 func run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	cmd := command(name, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }

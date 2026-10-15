@@ -193,7 +193,11 @@ func prepareTestSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return prepareSession(sa, mode, paths)
+	depPlan, err := detectDeps(paths.Project)
+	if err != nil {
+		return nil, err
+	}
+	return prepareSession(sa, mode, paths, depPlan)
 }
 
 // TestPrepSession checks prep gets the same protections as run, the
@@ -309,12 +313,12 @@ func TestPrepRefusesVolumeOverProtectedPath(t *testing.T) {
 }
 
 func TestPrepGateOutput(t *testing.T) {
-	sess := &session{project: "/p", deps: deps.Plan{
+	plan := deps.Plan{
 		Steps: []deps.Step{{Name: "pnpm", Fetch: "pnpm fetch", Script: "pnpm install"}},
 		Hooks: []string{"package.json: postinstall: node setup.js"},
-	}}
+	}
 	var first strings.Builder
-	printPrepGate(&first, sess, prepgate.Decision{First: true})
+	printPrepGate(&first, "/p", plan, prepgate.Decision{First: true})
 	for _, want := range []string{"First prep of /p", "pnpm: pnpm fetch", "pnpm: pnpm install", "postinstall: node setup.js"} {
 		if !strings.Contains(first.String(), want) {
 			t.Errorf("first prep output lacks %q:\n%s", want, first.String())
@@ -326,7 +330,7 @@ func TestPrepGateOutput(t *testing.T) {
 		others = append(others, changereport.Change{Path: fmt.Sprintf("src/f%02d.js", i), Kind: changereport.Modified})
 	}
 	var changed strings.Builder
-	printPrepGate(&changed, sess, prepgate.Decision{
+	printPrepGate(&changed, "/p", plan, prepgate.Decision{
 		Inputs: []changereport.Change{{Path: "package.json", Kind: changereport.Modified}},
 		Others: others,
 	})
@@ -717,7 +721,7 @@ func TestLockedSessionKeepsResolvedPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer releaseProject(otherLease)
-	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths)
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, deps.Plan{})
 	if err != nil {
 		t.Fatal(err)
 	}
