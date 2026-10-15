@@ -25,3 +25,11 @@ A hands-on trial by the user, not code. Use opencode (ask mode, then `--auto`) a
 - `10-pi-agent.md`
 - `12-prep-dependencies.md`
 - `14-shell-command.md`
+- `18-dirty-tree-check-in-container.md`
+- `19-interrupt-cleanup.md`
+- `20-tracked-masks-readable-from-git.md`
+- `21-broken-manifest-blocks-run.md`
+- `22-prep-gate-local-dependencies.md`
+- `23-git-config-project-references.md`
+- `24-watch-more-files-that-run-things.md`
+- `25-probe-and-build-polish.md`
