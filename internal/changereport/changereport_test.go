@@ -92,6 +92,25 @@ func TestSnapshotWith(t *testing.T) {
 	}
 }
 
+func TestHostToolFilesModifiedAndDeleted(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"crates/core/build.rs", ".idea/runConfigurations/x.xml", ".cargo/config.toml", "Justfile"} {
+		write(t, root, rel, "original")
+	}
+	before := snap(t, root)
+	write(t, root, "crates/core/build.rs", "changed")
+	write(t, root, ".idea/runConfigurations/x.xml", "changed")
+	os.Remove(filepath.Join(root, ".cargo/config.toml"))
+	os.Remove(filepath.Join(root, "Justfile"))
+	want := []Change{
+		{".cargo/config.toml", Deleted}, {".idea/runConfigurations/x.xml", Modified},
+		{"Justfile", Deleted}, {"crates/core/build.rs", Modified},
+	}
+	if got := Diff(before, snap(t, root)); !slices.Equal(got, want) {
+		t.Errorf("changes = %v, want %v", got, want)
+	}
+}
+
 func TestDiff(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -117,6 +136,22 @@ func TestDiff(t *testing.T) {
 			write(t, root, "lib/default.nix", "{}")
 			write(t, root, "deep/er/.envrc", "x")
 		}, []Change{{".vscode/settings.json", Added}, {"deep/er/.envrc", Added}, {"lib/default.nix", Added}}},
+		{"added host tool files", func(t *testing.T, root string) {
+			for _, rel := range []string{
+				"mise.toml", "web/.mise.toml", ".tool-versions", "sub/.gitattributes", ".gitmodules",
+				"crates/core/build.rs", "crates/core/.cargo/config.toml", "justfile", "tools/Justfile",
+				"Taskfile.yml", "svc/Taskfile.yaml", ".idea/workspace.xml", ".idea/runConfigurations/x.xml",
+				"target/debug/build.rs", "src/build.rs.md",
+			} {
+				write(t, root, rel, "x")
+			}
+		}, []Change{
+			{".gitmodules", Added}, {".idea/runConfigurations/x.xml", Added}, {".idea/workspace.xml", Added},
+			{".tool-versions", Added}, {"Taskfile.yml", Added}, {"crates/core/.cargo/config.toml", Added},
+			{"crates/core/build.rs", Added}, {"justfile", Added}, {"mise.toml", Added},
+			{"sub/.gitattributes", Added}, {"svc/Taskfile.yaml", Added}, {"tools/Justfile", Added},
+			{"web/.mise.toml", Added},
+		}},
 		{"deleted", func(t *testing.T, root string) {
 			os.Remove(filepath.Join(root, "Makefile"))
 			os.RemoveAll(filepath.Join(root, ".husky"))

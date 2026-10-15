@@ -27,9 +27,28 @@ var Watched = []string{
 	"*.nix",
 	"flake.lock",
 	".envrc",
+	// mise runs hooks and sets the environment on cd, like direnv.
+	"mise.toml",
+	".mise.toml",
+	"mise.local.toml",
+	".mise.local.toml",
+	".tool-versions",
+	// Select filter and diff drivers, and submodule URLs.
+	".gitattributes",
+	".gitmodules",
+	// cargo reads .cargo/config.toml in every directory up from where it
+	// runs, and runs build.rs.
+	".cargo/",
+	"build.rs",
+	"justfile",
+	"Justfile",
+	".justfile",
+	"Taskfile.yml",
+	"Taskfile.yaml",
 	".pre-commit-config.yaml",
 	".github/workflows/",
 	".vscode/",
+	".idea/",
 	".devcontainer/",
 	".husky/",
 	".githooks/",
