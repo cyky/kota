@@ -75,7 +75,9 @@ func Suite(t Targets) []Probe {
 	probes := []Probe{
 		tcp("internet 1.1.1.1:443", "1.1.1.1", 443),
 		tcp("internet 8.8.8.8:53", "8.8.8.8", 53),
+		tcp("internet [2606:4700:4700::1111]:443", "2606:4700:4700::1111", 443),
 		{Name: "internet dns example.com", Cmd: []string{"getent", "hosts", "example.com"}},
+		{Name: "internet dns ipv6 example.com", Cmd: []string{"getent", "ahostsv6", "example.com"}},
 		{Name: "dns host.docker.internal", Cmd: []string{"getent", "hosts", "host.docker.internal"}},
 		tcp(fmt.Sprintf("gateway other port %s:22", t.GatewayHost), t.GatewayHost, 22),
 	}
@@ -127,13 +129,31 @@ if [ -d "$1" ]; then f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"; else :
 		})
 	}
 	for _, path := range t.Pinned {
+		// The path goes through the environment: awk -v would interpret
+		// backslashes in it.
 		probes = append(probes, Probe{
 			Name:        "pinned " + path,
-			Cmd:         []string{"awk", "-v", "p=" + path, `$5 == p { found = 1 } END { exit !found }`, "/proc/self/mountinfo"},
+			Cmd:         []string{"env", "LOCALLLM_PIN=" + MountinfoEscape(path), "awk", `$5 == ENVIRON["LOCALLLM_PIN"] { found = 1 } END { exit !found }`, "/proc/self/mountinfo"},
 			MustSucceed: true,
 		})
 	}
 	return probes
+}
+
+// MountinfoEscape escapes path as the kernel writes it in the mount point
+// field of /proc/self/mountinfo: space, tab, newline and backslash become
+// octal escapes.
+func MountinfoEscape(path string) string {
+	var b strings.Builder
+	for _, c := range []byte(path) {
+		switch c {
+		case ' ', '\t', '\n', '\\':
+			fmt.Fprintf(&b, `\%03o`, c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 func tcp(name, host string, port int) Probe {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -32,7 +33,9 @@ func TestSuiteCoversEscapeRoutes(t *testing.T) {
 
 	mustFail := []string{
 		"internet 1.1.1.1:443",
+		"internet [2606:4700:4700::1111]:443",
 		"internet dns example.com",
+		"internet dns ipv6 example.com",
 		"dns host.docker.internal",
 		"gateway other port gateway:22",
 		"host 192.168.5.2:8080",
@@ -200,6 +203,46 @@ func TestSuitePinnedProbes(t *testing.T) {
 	p, ok := byName(Suite(tt))["pinned /workspace/.git"]
 	if !ok || !p.MustSucceed {
 		t.Fatalf("pinned probe missing or not must-succeed: %+v", p)
+	}
+}
+
+func TestMountinfoEscape(t *testing.T) {
+	for in, want := range map[string]string{
+		"/workspace/.git":        "/workspace/.git",
+		"/workspace/my dir/.git": `/workspace/my\040dir/.git`,
+		"/w/a\tb\nc\\d":          `/w/a\011b\012c\134d`,
+		"/workspace/ünïcode":     "/workspace/ünïcode",
+	} {
+		if got := MountinfoEscape(in); got != want {
+			t.Errorf("MountinfoEscape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestPinnedProbeRuns runs the pinned probe locally against a mountinfo
+// file in the kernel's format.
+func TestPinnedProbeRuns(t *testing.T) {
+	mountinfo := filepath.Join(t.TempDir(), "mountinfo")
+	lines := "36 35 98:0 / / rw - ext4 /dev/root rw\n" +
+		`812 36 0:52 /p /workspace/my\040dir rw,relatime - virtiofs m rw` + "\n" +
+		`813 36 0:52 /p /workspace/back\134slash rw,relatime - virtiofs m rw` + "\n"
+	if err := os.WriteFile(mountinfo, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tt := testTargets()
+	tt.Pinned = []string{"/workspace/my dir", `/workspace/back\slash`, "/workspace/missing", "/workspace/my"}
+	want := map[string]bool{"/workspace/my dir": true, `/workspace/back\slash`: true, "/workspace/missing": false, "/workspace/my": false}
+	for _, p := range Suite(tt) {
+		path, ok := strings.CutPrefix(p.Name, "pinned ")
+		if !ok {
+			continue
+		}
+		cmd := slices.Clone(p.Cmd)
+		cmd[len(cmd)-1] = mountinfo
+		err := exec.Command(cmd[0], cmd[1:]...).Run()
+		if passed := (Result{Probe: p, ExitCode: exitCode(err)}).Passed(); passed != want[path] {
+			t.Errorf("probe %q passed = %v, want %v", p.Name, passed, want[path])
+		}
 	}
 }
 

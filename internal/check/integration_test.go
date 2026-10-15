@@ -366,6 +366,33 @@ echo GIT-OK`)
 	}
 }
 
+// TestPinnedPathWithSpace checks the pinned probe matches a mount point
+// that mountinfo escapes, and that the IPv6 probes run and fail.
+func TestPinnedPathWithSpace(t *testing.T) {
+	requireDocker(t)
+	project := gitRepo(t)
+	if err := os.MkdirAll(filepath.Join(project, "git hooks/_"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", project, "config", "core.hooksPath", "git hooks/_").CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	s, gw, mounts := startProtected(t, project)
+	results, err := Run(s, gw, mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePass(t, results)
+	for _, want := range []string{"pinned /workspace/git hooks", "internet [2606:4700:4700::1111]:443", "internet dns ipv6 example.com"} {
+		i := slices.IndexFunc(results, func(r probe.Result) bool { return r.Name == want })
+		if i < 0 {
+			t.Errorf("no probe %q", want)
+		} else if r := results[i]; r.Missing || r.MustSucceed != (r.ExitCode == 0) {
+			t.Errorf("probe %q: %+v", want, r)
+		}
+	}
+}
+
 func TestEnvrcContentUnchanged(t *testing.T) {
 	requireDocker(t)
 	project := gitRepo(t)

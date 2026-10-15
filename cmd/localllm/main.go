@@ -68,7 +68,7 @@ commands:
   shell [flags] [dir]   verify containment, then open an interactive Bash
                         shell in the same sandbox as run
   check [flags] [dir]   show mounts and run the containment probes
-  clean [flags] [dir]  remove project state and dependency volumes after
+  clean [flags] [dir]   remove project state and dependency volumes after
                         confirmation
 
 flags:

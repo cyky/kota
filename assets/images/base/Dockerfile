@@ -1,7 +1,9 @@
 # Base image for localllm sandboxes: agent + Node + Go toolchains.
 # Versions are pinned so builds are reproducible; bump them deliberately.
-ARG NODE_IMAGE=node:24-trixie-slim
-ARG GO_IMAGE=golang:1.27-trixie
+# Base images are pinned by digest (the multi-arch index); the tag says
+# what it is. To bump: docker buildx imagetools inspect <tag>.
+ARG NODE_IMAGE=node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315
+ARG GO_IMAGE=golang:1.27-trixie@sha256:47667934874913a449b96faa7ef4777fa285d9ec29126ee80ed61c45b7cccf0e
 
 FROM ${GO_IMAGE} AS go
 
