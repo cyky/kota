@@ -247,9 +247,12 @@ func noSymlinks(project, rel string) error {
 
 // packageJSON is the part of package.json detection reads.
 type packageJSON struct {
-	PackageManager string            `json:"packageManager"`
-	Workspaces     json.RawMessage   `json:"workspaces"`
-	Scripts        map[string]string `json:"scripts"`
+	PackageManager       string            `json:"packageManager"`
+	Workspaces           json.RawMessage   `json:"workspaces"`
+	Scripts              map[string]string `json:"scripts"`
+	Dependencies         map[string]string `json:"dependencies"`
+	DevDependencies      map[string]string `json:"devDependencies"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
 }
 
 // lifecycleScripts are the package.json scripts a package manager runs for
@@ -325,18 +328,22 @@ func (p *Plan) node(project string, opts Options) error {
 
 	p.Dirs = append(p.Dirs, Dir{Path: "node_modules", Manifest: "package.json"})
 	p.scriptHooks("", pkg)
+	// The packages whose scripts are already listed, by directory.
+	seen := map[string]packageJSON{"": pkg}
 	patterns, err := workspacePatterns(project, manager, pkg.Workspaces)
-	if err != nil || len(patterns) == 0 {
+	if err != nil {
 		return err
 	}
 	var dirs []string
-	err = walk(project, func(rel string, names []string) {
-		if rel != "" && slices.Contains(names, "package.json") && matchWorkspace(patterns, rel) {
-			dirs = append(dirs, rel)
+	if len(patterns) > 0 {
+		err = walk(project, func(rel string, names []string) {
+			if rel != "" && slices.Contains(names, "package.json") && matchWorkspace(patterns, rel) {
+				dirs = append(dirs, rel)
+			}
+		})
+		if err != nil {
+			return err
 		}
-	})
-	if err != nil {
-		return err
 	}
 	for _, rel := range dirs {
 		p.Dirs = append(p.Dirs, Dir{Path: rel + "/node_modules", Manifest: rel + "/package.json"})
@@ -345,8 +352,102 @@ func (p *Plan) node(project string, opts Options) error {
 			return err
 		}
 		p.scriptHooks(rel, ws)
+		seen[rel] = ws
+	}
+	queue := append([]string{""}, dirs...)
+	for len(queue) > 0 {
+		rel := queue[0]
+		queue = queue[1:]
+		more, err := p.dependencyHooks(project, rel, seen[rel], seen)
+		if err != nil {
+			return err
+		}
+		queue = append(queue, more...)
 	}
 	return nil
+}
+
+// localPrefixes mark dependencies installed from a directory or tarball in
+// the project, whose lifecycle scripts the install runs.
+var localPrefixes = []string{"file:", "link:", "portal:", "./", "../"}
+
+// gitPrefixes mark dependencies built from a git repository, whose prepare
+// script the install runs.
+var gitPrefixes = []string{"git+", "git:", "github:", "gitlab:", "bitbucket:", "gist:"}
+
+// githubShorthand is npm's "user/repo" form of a GitHub dependency.
+var githubShorthand = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(#.*)?$`)
+
+// dependencyHooks adds the project code that the dependencies of the
+// package in rel run during install: each git dependency, and the lifecycle
+// scripts of each local one. It returns the local package directories not
+// in seen, whose own dependencies are installed too.
+func (p *Plan) dependencyHooks(project, rel string, pkg packageJSON, seen map[string]packageJSON) ([]string, error) {
+	manifest := path.Join(rel, "package.json")
+	var more []string
+	for _, field := range []map[string]string{pkg.Dependencies, pkg.DevDependencies, pkg.OptionalDependencies} {
+		names := make([]string, 0, len(field))
+		for name := range field {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			spec := field[name]
+			if isGitSpec(spec) {
+				p.Hooks = append(p.Hooks, fmt.Sprintf("%s: git dependency %s: %s (its prepare script runs)", manifest, name, spec))
+				continue
+			}
+			i := slices.IndexFunc(localPrefixes, func(pre string) bool { return strings.HasPrefix(spec, pre) })
+			if i < 0 {
+				continue
+			}
+			local := spec
+			if strings.HasSuffix(localPrefixes[i], ":") {
+				local = strings.TrimPrefix(spec, localPrefixes[i])
+			}
+			target := path.Join(rel, local)
+			if path.IsAbs(local) || target == ".." || strings.HasPrefix(target, "../") {
+				// Outside the project, so not in the sandbox.
+				continue
+			}
+			if target == "." {
+				target = ""
+			}
+			if _, ok := seen[target]; ok {
+				continue
+			}
+			info, err := os.Stat(filepath.Join(project, filepath.FromSlash(target)))
+			if err != nil {
+				continue
+			}
+			if !info.IsDir() {
+				p.Hooks = append(p.Hooks, fmt.Sprintf("%s: local dependency %s: %s (a tarball; its install scripts run)", manifest, name, spec))
+				continue
+			}
+			dep, ok, err := readPackage(project, target)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			p.scriptHooks(target, dep)
+			seen[target] = dep
+			more = append(more, target)
+		}
+	}
+	return more, nil
+}
+
+// isGitSpec reports whether a dependency spec is a git repository.
+func isGitSpec(spec string) bool {
+	if slices.ContainsFunc(gitPrefixes, func(pre string) bool { return strings.HasPrefix(spec, pre) }) {
+		return true
+	}
+	if base, _, _ := strings.Cut(spec, "#"); strings.Contains(spec, "://") && strings.HasSuffix(base, ".git") {
+		return true
+	}
+	return githubShorthand.MatchString(spec)
 }
 
 // readPackage reads the package.json in the directory rel.

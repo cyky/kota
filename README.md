@@ -118,7 +118,7 @@ pnpm without a lockfile has nothing to fetch ahead, so its install uses a store 
 The agent can write the files that decide what `prep` runs, and `prep` runs them with network access. So `prep` asks you to type `y` first when:
 - it is the project's first `prep` (it lists the commands and the project code the install runs);
 - a file that decides what prep runs changed since the last successful `prep`: `package.json` files, lockfiles, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc.yml`, `.yarn/releases/`, `.yarn/plugins/`, patches, `go.mod`, `go.sum`, `go.work` or `localllm.yaml`;
-- the install runs project code (lifecycle scripts like `postinstall` or `prepare`, a pnpmfile, a `yarnPath`, the `localllm.yaml` command) and any other project file changed, since that code may run it.
+- the install runs project code (lifecycle scripts like `postinstall` or `prepare`, a pnpmfile, a `yarnPath`, the `localllm.yaml` command) and any other project file changed, since that code may run it. Lifecycle scripts count in the root and workspace packages, and in local dependencies (`file:`, `link:`, `portal:` or a relative path inside the project, and theirs in turn) listed in `dependencies`, `devDependencies` or `optionalDependencies`. A local tarball dependency and any git dependency (`github:user/repo`, `user/repo`, `git+https://...`) count too.
 
 It lists what changed; review it (`git diff`) before you answer. Anything else, or no terminal, aborts. The state after each `prep` is recorded in `~/Library/Caches/localllm/prep/` (the user cache dir), outside the sandbox.
 

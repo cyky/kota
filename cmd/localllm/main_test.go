@@ -397,6 +397,44 @@ func TestPrepGateOutput(t *testing.T) {
 	}
 }
 
+// TestPrepGateLocalDependency checks a local dependency's postinstall makes
+// prep show other changed files, which that script may run.
+func TestPrepGateLocalDependency(t *testing.T) {
+	project := fakeHome(t, map[string]string{
+		"package.json":            `{"devDependencies":{"tool":"file:tools/tool"}}`,
+		"tools/tool/package.json": `{"scripts":{"postinstall":"node build.js"}}`,
+		"tools/tool/build.js":     "// build\n",
+	})
+	plan, err := detectDeps(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := prepgate.Snapshot(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := record.Save(prepRecordFile(project)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "tools/tool/build.js"), []byte("// changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := prepDecision(project, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Ask() {
+		t.Fatal("prep would run without asking")
+	}
+	var out strings.Builder
+	printPrepGate(&out, project, plan, d)
+	for _, want := range []string{"tools/tool/package.json: postinstall: node build.js", "tools/tool/build.js"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("prompt lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestReadYes(t *testing.T) {
 	for in, want := range map[string]bool{"y\n": true, "Yes\n": true, " y ": true, "n\n": false, "": false, "yy\n": false} {
 		if got := readYes(strings.NewReader(in)); got != want {

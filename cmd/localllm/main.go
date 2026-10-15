@@ -1008,15 +1008,10 @@ func prepRecordFile(project string) string {
 // since the last prep, or before the first one: an agent session may have
 // written what prep is about to run with network access.
 func confirmPrep(project string, plan deps.Plan) error {
-	last, err := prepgate.Load(prepRecordFile(project))
-	if err != nil {
-		return fmt.Errorf("read the last prep's record: %w", err)
-	}
-	now, err := prepgate.Snapshot(project)
+	d, err := prepDecision(project, plan)
 	if err != nil {
 		return err
 	}
-	d := prepgate.Decide(last, now, len(plan.Hooks) > 0)
 	if !d.Ask() {
 		return nil
 	}
@@ -1026,6 +1021,20 @@ func confirmPrep(project string, plan deps.Plan) error {
 		return errors.New("prep not run")
 	}
 	return nil
+}
+
+// prepDecision compares project with its last prep's record. Other changed
+// files count when plan runs project code.
+func prepDecision(project string, plan deps.Plan) (prepgate.Decision, error) {
+	last, err := prepgate.Load(prepRecordFile(project))
+	if err != nil {
+		return prepgate.Decision{}, fmt.Errorf("read the last prep's record: %w", err)
+	}
+	now, err := prepgate.Snapshot(project)
+	if err != nil {
+		return prepgate.Decision{}, err
+	}
+	return prepgate.Decide(last, now, len(plan.Hooks) > 0), nil
 }
 
 func printPrepGate(w io.Writer, project string, plan deps.Plan, d prepgate.Decision) {

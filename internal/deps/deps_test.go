@@ -132,6 +132,47 @@ func TestHooks(t *testing.T) {
 	}
 }
 
+func TestDependencyHooks(t *testing.T) {
+	plan := detect(t, map[string]string{
+		"package.json": `{
+			"dependencies": {"left-pad": "^1.3.0", "alias": "npm:other@1", "scoped": "@scope/x", "tool": "file:tools/tool", "plain": "file:tools/plain"},
+			"devDependencies": {"gh": "github:user/repo", "short": "user/repo#v1", "url": "git+https://example.com/r.git", "https": "https://example.com/r.git#main", "tarball": "https://example.com/x.tgz", "rel": "./tools/rel"},
+			"optionalDependencies": {"outside": "file:../sibling", "abs": "file:/opt/x", "missing": "file:tools/missing", "self": "file:.", "packed": "file:vendor/x.tgz"},
+			"workspaces": ["pkgs/*"]
+		}`,
+		"tools/tool/package.json":   `{"scripts":{"postinstall":"node build.js","test":"x"},"dependencies":{"nested":"file:../nested"}}`,
+		"tools/nested/package.json": `{"scripts":{"prepare":"tsc"}}`,
+		"tools/plain/package.json":  `{"scripts":{"build":"tsc"}}`,
+		"tools/rel/package.json":    `{"scripts":{"install":"make"}}`,
+		"vendor/x.tgz":              "",
+		"pkgs/a/package.json":       `{"scripts":{"preinstall":"sh a.sh"},"dependencies":{"tool":"link:../../tools/tool","b":"workspace:*"}}`,
+		"pkgs/b/package.json":       `{"dependencies":{"a":"file:../a"}}`,
+	})
+	want := []string{
+		"pkgs/a/package.json: preinstall: sh a.sh",
+		"tools/tool/package.json: postinstall: node build.js",
+		"package.json: git dependency gh: github:user/repo (its prepare script runs)",
+		"package.json: git dependency https: https://example.com/r.git#main (its prepare script runs)",
+		"tools/rel/package.json: install: make",
+		"package.json: git dependency short: user/repo#v1 (its prepare script runs)",
+		"package.json: git dependency url: git+https://example.com/r.git (its prepare script runs)",
+		"package.json: local dependency packed: file:vendor/x.tgz (a tarball; its install scripts run)",
+		"tools/nested/package.json: prepare: tsc",
+	}
+	if !slices.Equal(plan.Hooks, want) {
+		t.Errorf("hooks =\n%q\nwant\n%q", plan.Hooks, want)
+	}
+
+	// Registry and script-free local dependencies run no project code.
+	quiet := detect(t, map[string]string{
+		"package.json":             `{"dependencies":{"left-pad":"^1.3.0","scoped":"@scope/x@2","plain":"file:tools/plain","range":"1.x || >=2.5.0"}}`,
+		"tools/plain/package.json": `{"scripts":{"build":"tsc"}}`,
+	})
+	if len(quiet.Hooks) > 0 {
+		t.Errorf("hooks = %q, want none", quiet.Hooks)
+	}
+}
+
 func TestDependencyDirs(t *testing.T) {
 	cases := []struct {
 		name  string
