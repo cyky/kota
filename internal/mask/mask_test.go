@@ -542,7 +542,10 @@ func TestPlanWarnsAboutTrackedMasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(l.Warnings, "\n")
-	for _, want := range []string{"masked .env.production is tracked", "masked deploy/.aws is tracked"} {
+	for _, want := range []string{
+		"masked .env.production is tracked", "masked deploy/.aws is tracked",
+		"git log -p -- .env.production", "record it emptied", "git rm --cached", "rotate the secret",
+	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("warnings %q lack %q", l.Warnings, want)
 		}

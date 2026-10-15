@@ -228,8 +228,10 @@ func (p *planner) dropInsideMasks() {
 	})
 }
 
-// warnTracked warns about masked paths tracked in git: inside the sandbox
-// they read as empty, so a commit there would record them emptied.
+// warnTracked warns about masked paths tracked in git: their content is in
+// .git/objects, which the sandbox can read, and they read as empty, so a
+// commit there would record them emptied. Paths committed only in the past
+// aren't detected.
 func (p *planner) warnTracked() error {
 	if info, err := p.lstat(".git"); err != nil || !info.IsDir() {
 		return nil
@@ -254,7 +256,7 @@ func (p *planner) warnTracked() error {
 		})
 		if hit {
 			p.plan.Warnings = append(p.plan.Warnings, fmt.Sprintf(
-				"masked %s is tracked in git: it reads as empty inside the sandbox, so a commit made there would record it emptied", m.Path))
+				"masked %s is tracked in git: the mask doesn't hide it from git, so its content can be read inside the sandbox (git log -p -- %s), and a commit made there would record it emptied. Remove it from the index (git rm --cached) and from history, and rotate the secret", m.Path, m.Path))
 		}
 	}
 	return nil

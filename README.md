@@ -78,7 +78,7 @@ Secrets are masked: inside the sandbox they read as an empty file or directory a
 
 - Masks are computed at launch. A secret created on the host during a session isn't masked until the next one.
 - Dependency and build directories (`node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`, ...) aren't searched, to keep launch fast.
-- A masked file tracked in git reads as empty inside the sandbox, so a commit made there would record it emptied. `run` and `check` warn about these.
+- Masks don't reach git. A secret that is tracked, or was ever committed, can be read from `.git` inside the sandbox (`git log -p -- .env`), and a commit made there would record a tracked one emptied. `run`, `shell`, `check` and `prep` warn about masked files that are tracked now, but history isn't checked. To fix it, remove the file from the index (`git rm --cached`) and from history (for example with `git filter-repo`), and rotate the secret, since earlier clones and pushes still have it.
 - `--ro` paths aren't masked.
 
 Other files that run things can't be locked without breaking normal work, so `run` reports them instead. It records them before the session and, when it ends, lists any that were added, modified or deleted. The list covers `package.json`, `Makefile`, `*.nix`, `flake.lock` and `.envrc` at any depth, `.pre-commit-config.yaml`, and the `.github/workflows/`, `.vscode/`, `.devcontainer/`, `.husky/` and `.githooks/` directories (`changereport.Watched`). Content is compared by hash, so restoring a timestamp doesn't hide an edit. Permission changes and symlink targets count too. Review the listed files before you build, install or open the project in an editor. Limits:
