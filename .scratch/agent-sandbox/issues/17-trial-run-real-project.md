@@ -14,6 +14,8 @@ A hands-on trial by the user, not code. Use opencode (ask mode, then `--auto`) a
 - Confirm probes pass, masks hold, the approval flow and dirty-tree confirmation behave as intended.
 - Note friction (prep loops, missing tools in the image, startup time) as new issues.
 
+Step-by-step checklist: `.scratch/agent-sandbox/trial-run-checklist.md`.
+
 ## Acceptance criteria
 
 - [ ] One real task completed with opencode (ask mode) and one with pi
