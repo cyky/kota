@@ -28,6 +28,7 @@ import (
 	"localllm/internal/deps"
 	"localllm/internal/docker"
 	"localllm/internal/engine"
+	"localllm/internal/enginesession"
 	"localllm/internal/enginevm"
 	"localllm/internal/gatewaykey"
 	"localllm/internal/interrupt"
@@ -53,9 +54,6 @@ const (
 	engineHostAlias = "host.docker.internal"
 	// engineBootTimeout bounds the Engine VM's boot to a ready Docker API.
 	engineBootTimeout = 60 * time.Second
-	// engineProbeImage is the forwarder image, loaded into the Engine VM
-	// under this name for the probes only.
-	engineProbeImage = "localllm-engine-probe:latest"
 
 	opencodeConfigPath = "/etc/localllm/opencode.json"
 	// opencodeConfigDir is opencode's global config directory. opencode
@@ -365,7 +363,7 @@ type session struct {
 	// project's own.
 	image projectimage.Choice
 	// engine is the session's Engine VM, nil when it has none.
-	engine *engineSession
+	engine *enginesession.Engine
 	// engineErr is why the Engine VM can't start, with
 	// sessionArgs.engineOptional.
 	engineErr error
@@ -379,194 +377,21 @@ type session struct {
 func (s *session) engineNote() string {
 	switch {
 	case s.engine != nil:
-		var images []string
-		for _, a := range s.engine.archives {
-			images = append(images, a.Ref)
-		}
-		return sandbox.EngineNote(true, images)
+		return sandbox.EngineNote(true, s.engine.Images())
 	case s.engineOff:
 		return sandbox.EngineNote(false, nil)
 	}
 	return ""
 }
 
-// engineSession is a session's Engine VM: worked out by prepareEngine,
-// started by start and stopped by stop.
-type engineSession struct {
-	vm         engine.VM
-	cmd        engine.Command
-	certs      engine.Certs
-	archiveDir string
-	archives   []engine.Archive
-	// warning says the Engine base disk should be rebuilt.
-	warning string
-	// probeTar is where the probe image is saved for loading.
-	probeTar string
-	running  *enginevm.VM
-	started  time.Time
-}
-
-// prepareEngine works out project's Engine VM for a session: the Engine
-// base disk, the prepped archives, host ports, and TLS certificates made
-// for this session in sessionDir. It returns nil when the project has no
-// engine section, and an error with the fix when the VM can't start.
-func prepareEngine(project, sessionDir string) (*engineSession, error) {
+// engineOptions are what this localllm's Engine VMs share.
+func engineOptions() (enginesession.Options, error) {
 	layout, err := engineLayout()
 	if err != nil {
-		return nil, err
+		return enginesession.Options{}, err
 	}
-	cfg, err := engineConfig(layout, project)
-	if cfg == nil || err != nil {
-		return nil, err
-	}
-	host := engineHost()
-	m, err := engine.MachineFor(host)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := enginevm.FindQEMU(m); err != nil {
-		return nil, fmt.Errorf("%s declares engine images, but %w", engine.ConfigFile, err)
-	}
-	base, warning, err := layout.LoadBase(host.Arch)
-	if err != nil {
-		return nil, err
-	}
-	rec, err := engine.LoadRecord(layout.ArchiveDir(project))
-	if err != nil {
-		return nil, err
-	}
-	archives, err := rec.Select(cfg.Images)
-	if err != nil {
-		return nil, fmt.Errorf("%w; run 'localllm prep %s'", err, project)
-	}
-	ports, err := enginevm.FreePorts(1 + len(engine.PublishedPorts()))
-	if err != nil {
-		return nil, err
-	}
-	certs, err := engine.NewCerts(time.Now(), []string{sandbox.EngineHost, "127.0.0.1"})
-	if err != nil {
-		return nil, err
-	}
-	server, err := certs.WriteServer(filepath.Join(sessionDir, "engine-server"))
-	if err != nil {
-		return nil, err
-	}
-	vm := engine.VM{
-		Project:   project,
-		Host:      host,
-		CPUs:      cfg.CPUs,
-		MemoryMiB: cfg.MemoryMiB,
-		Base:      base,
-		Certs:     server,
-		Ports:     engine.Ports{API: ports[0], Published: ports[1:]},
-		Serial:    filepath.Join(sessionDir, "engine-console.log"),
-		Pidfile:   layout.Pidfile(project),
-	}
-	cmd, err := engine.Build(vm)
-	if err != nil {
-		return nil, err
-	}
-	return &engineSession{vm: vm, cmd: cmd, certs: certs, archiveDir: layout.ArchiveDir(project), archives: archives, warning: warning,
-		probeTar: filepath.Join(sessionDir, "engine-probe.tar")}, nil
-}
-
-// engineConfig reads project's engine section: nil for a project without
-// an Engine VM.
-func engineConfig(layout engine.Layout, project string) (*engine.Config, error) {
-	cfg, err := engine.Read(project)
-	if err != nil {
-		// A broken localllm.yaml shouldn't block a project that never used
-		// an engine, but an engine project can't tell which images to load.
-		if rec, rerr := engine.LoadRecord(layout.ArchiveDir(project)); rerr == nil && rec == nil {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("%w; the Engine VM can't start without knowing its images", err)
-	}
-	return cfg, nil
-}
-
-// hasEngine reports whether project has an Engine VM, which a session
-// without it tells the agent about. A broken localllm.yaml of a project
-// that was prepped with an engine counts.
-func hasEngine(project string) (bool, error) {
-	layout, err := engineLayout()
-	if err != nil {
-		return false, err
-	}
-	cfg, err := engineConfig(layout, project)
-	return cfg != nil || err != nil, nil
-}
-
-// route writes the client certificate into dir and returns the sandbox's
-// route to the VM. The agent sees the VM's own port numbers.
-func (e *engineSession) route(dir string) (*sandbox.EngineRoute, error) {
-	if err := e.certs.WriteClient(dir); err != nil {
-		return nil, err
-	}
-	fwds, err := e.vm.Ports.Forwards()
-	if err != nil {
-		return nil, err
-	}
-	r := &sandbox.EngineRoute{Host: engineHostAlias, APIPort: engine.GuestAPIPort, CertDir: dir}
-	for _, f := range fwds {
-		r.Forwards = append(r.Forwards, sandbox.PortForward{Listen: f.Guest, Target: f.Host})
-	}
-	return r, nil
-}
-
-// start boots the VM without waiting for it, so it boots while the
-// sandbox starts.
-func (e *engineSession) start() error {
-	vm, err := enginevm.Start(e.cmd, e.vm, e.certs.CA, e.certs.ClientCert, e.certs.ClientKey)
-	if err != nil {
-		return err
-	}
-	e.running, e.started = vm, time.Now()
-	return nil
-}
-
-// ready waits for the VM's Docker API and loads the archives.
-func (e *engineSession) ready(w io.Writer) error {
-	// The VM can't download anything, so the probes' image comes from the
-	// host's Docker, saved while the VM boots.
-	if err := docker.SaveImage(forwarderImage, e.probeTar); err != nil {
-		return fmt.Errorf("the Engine VM probes: %w; run 'localllm build'", err)
-	}
-	if err := e.running.WaitReady(engineBootTimeout); err != nil {
-		return fmt.Errorf("%w\nIf this keeps happening, remove %s and run 'localllm build' to rebuild the Engine base disk", err, filepath.Dir(e.vm.Base.Disk))
-	}
-	booted := time.Since(e.started)
-	loadStart := time.Now()
-	if err := e.running.Load(e.archiveDir, e.archives); err != nil {
-		return fmt.Errorf("%w; run 'localllm prep' to download the archives again", err)
-	}
-	if err := e.running.LoadTar(e.probeTar, engineProbeImage); err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "Engine VM ready: booted in %s, loaded %d image(s) in %s\n",
-		booted.Round(100*time.Millisecond), len(e.archives), time.Since(loadStart).Round(100*time.Millisecond))
-	return nil
-}
-
-// probes runs the Engine VM probes through the started sandbox ds.
-func (e *engineSession) probes(ds *docker.Session, gw sandbox.Gateway) ([]probe.Result, error) {
-	return check.RunEngine(ds, probe.EngineTargets{
-		Image:        engineProbeImage,
-		GuestAPIPort: engine.GuestAPIPort,
-		HostAddrs:    check.EngineHostAddrs(),
-		// The host side of the VM's own forwards, so the VM can't loop
-		// back through the host.
-		HostPorts:  check.EnginePorts(gw, []int{e.vm.Ports.API, e.vm.Ports.Published[0]}),
-		EngineHost: sandbox.EngineHost,
-		APIPort:    engine.GuestAPIPort,
-		CertDir:    sandbox.EngineCertDir,
-	})
-}
-
-func (e *engineSession) stop() {
-	if e.running != nil {
-		e.running.Stop()
-	}
+	return enginesession.Options{Layout: layout, Host: engineHost(), ProbeSource: forwarderImage,
+		HostAlias: engineHostAlias, BootTimeout: engineBootTimeout}, nil
 }
 
 // printWarnings prints the layout's notes and warnings, and which image
@@ -587,8 +412,8 @@ func (s *session) printWarnings(w io.Writer) {
 	if s.deps.Fallback != "" {
 		fmt.Fprintln(w, "WARNING:", s.deps.Fallback)
 	}
-	if s.engine != nil && s.engine.warning != "" {
-		fmt.Fprintln(w, "WARNING:", s.engine.warning)
+	if s.engine != nil && s.engine.Warning() != "" {
+		fmt.Fprintln(w, "WARNING:", s.engine.Warning())
 	}
 	if s.engineOff {
 		told := "the agent is told to report them as not run"
@@ -781,22 +606,22 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 
 	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan, image: image}
 	var engineRoute *sandbox.EngineRoute
-	if sa.engine && !prep {
-		sess.engine, err = prepareEngine(project, sessionDir)
-		if err == nil && sess.engine != nil {
-			engineRoute, err = sess.engine.route(filepath.Join(sessionDir, "engine-client"))
-		}
-		if err != nil && sa.engineOptional {
-			sess.engine, sess.engineErr, engineRoute, err = nil, err, nil, nil
+	if !prep {
+		opts, err := engineOptions()
+		if err == nil && sa.engine {
+			sess.engine, err = enginesession.Prepare(opts, project, sessionDir)
+			if err != nil && sa.engineOptional {
+				sess.engine, sess.engineErr, err = nil, err, nil
+			}
+		} else if err == nil {
+			sess.engineOff = enginesession.Declared(opts.Layout, project)
 		}
 		if err != nil {
 			os.RemoveAll(sessionDir)
 			return nil, err
 		}
-	} else if !prep {
-		if sess.engineOff, err = hasEngine(project); err != nil {
-			os.RemoveAll(sessionDir)
-			return nil, err
+		if sess.engine != nil {
+			engineRoute = sess.engine.Route()
 		}
 	}
 	// The note is mounted only when there is one, so a project without an
@@ -1088,10 +913,10 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 	// The Engine VM boots while the sandbox starts, and stops after the
 	// sandbox's containers are gone.
 	if sess.engine != nil {
-		if err := sess.engine.start(); err != nil {
+		if err := sess.engine.Start(); err != nil {
 			return nil, nil, err
 		}
-		stops = append(stops, sess.engine.stop)
+		stops = append(stops, sess.engine.Stop)
 	}
 	ds, err = docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
 	if err != nil {
@@ -1103,7 +928,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 		// before the sandbox and the VM go.
 		closing := make(chan struct{})
 		stops = append(stops, func() { close(closing) })
-		go watchEngine(sess.engine.running.Done(), closing, ds)
+		go watchEngine(sess.engine.Done(), closing, ds)
 	}
 	printEmptyDeps(os.Stderr, sess, ds.EmptyDeps())
 
@@ -1112,7 +937,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 		return nil, nil, err
 	}
 	if sess.engine != nil {
-		if err := sess.engine.ready(os.Stderr); err != nil {
+		if err := sess.engine.Ready(os.Stderr); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1147,7 +972,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 		}
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
 		if sess.engine != nil {
-			results, err := sess.engine.probes(ds, sess.gateway)
+			results, err := sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
 			if err != nil {
 				return nil, nil, fmt.Errorf("Engine VM probes: %w", err)
 			}
@@ -1234,10 +1059,10 @@ func cmdCheck(args []string) error {
 	engineErr := printEngine(os.Stdout, sess)
 
 	if sess.engine != nil {
-		if err := sess.engine.start(); err != nil {
+		if err := sess.engine.Start(); err != nil {
 			return err
 		}
-		defer sess.engine.stop()
+		defer sess.engine.Stop()
 	}
 	ds, err := docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
 	if err != nil {
@@ -1251,7 +1076,7 @@ func cmdCheck(args []string) error {
 	catalog, modelErr := sess.configure(ds, sa.model, false)
 	printModels(os.Stdout, catalog, modelErr)
 	if sess.engine != nil {
-		if err := sess.engine.ready(os.Stdout); err != nil {
+		if err := sess.engine.Ready(os.Stdout); err != nil {
 			fmt.Printf("engine status: can't start: %v\n\n", err)
 			engineErr = errors.New("the Engine VM can't start")
 		}
@@ -1270,7 +1095,7 @@ func cmdCheck(args []string) error {
 	var engineFailed []probe.Result
 	if sess.engine != nil && engineErr == nil {
 		start := time.Now()
-		engineResults, err := sess.engine.probes(ds, sess.gateway)
+		engineResults, err := sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
 		if err != nil {
 			return fmt.Errorf("Engine VM probes: %w", err)
 		}
@@ -1305,7 +1130,7 @@ func printEngine(w io.Writer, sess *session) error {
 	}
 	fmt.Fprintln(w, "engine:")
 	if sess.engine != nil {
-		for _, a := range sess.engine.archives {
+		for _, a := range sess.engine.Archives() {
 			fmt.Fprintf(w, "  image %s (%s)\n", a.Ref, a.Digest)
 		}
 	} else if cfg != nil {

@@ -21,14 +21,12 @@ import (
 	"time"
 
 	"localllm/assets"
-	"localllm/internal/check"
 	"localllm/internal/docker"
 	"localllm/internal/engine"
 	"localllm/internal/enginevm"
 	"localllm/internal/models"
 	"localllm/internal/opencode"
 	"localllm/internal/pi"
-	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
 
@@ -278,15 +276,11 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 	if err != nil {
 		t.Fatal(err)
 	}
-	var vm *enginevm.VM
-	if sess.engine != nil {
-		vm = sess.engine.running
-	}
 	func() {
 		defer stop()
 		fn(sess, ds)
 	}()
-	if vm != nil && qemuRunning(vm) {
+	if sess.engine != nil && qemuRunning(sess.engine.PID()) {
 		t.Error("the Engine VM still runs after the session")
 	}
 }
@@ -305,9 +299,8 @@ func shellSession(t *testing.T, project, gateway string, caches func(*sandbox.Co
 	return out
 }
 
-// qemuRunning reports whether vm's QEMU process still exists.
-func qemuRunning(vm *enginevm.VM) bool {
-	pid := vm.PID()
+// qemuRunning reports whether the QEMU process pid still exists.
+func qemuRunning(pid int) bool {
 	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
 
@@ -504,11 +497,9 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 
 	t.Run("engine probes pass and detect an open route", func(t *testing.T) {
 		withShellSession(t, project, gateway, caches, func(sess *session, ds *docker.Session) {
-			// startSession ran the probes and removed their image.
-			if err := sess.engine.running.LoadTar(sess.engine.probeTar, engineProbeImage); err != nil {
-				t.Fatal(err)
-			}
-			results, err := sess.engine.probes(ds, sess.gateway)
+			// startSession ran the probes once; each run loads the probe
+			// image again and removes it afterwards.
+			results, err := sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -522,14 +513,9 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 			}
 			// The VM's own address is open to itself, so a must-fail probe
 			// aimed at it has to report the route.
-			if err := sess.engine.running.LoadTar(sess.engine.probeTar, engineProbeImage); err != nil {
-				t.Fatal(err)
-			}
-			results, err = check.RunEngine(ds, probe.EngineTargets{
-				Image: engineProbeImage, GuestAPIPort: engine.GuestAPIPort,
-				HostAddrs: []string{"10.0.2.15"}, HostPorts: []int{engine.GuestAPIPort},
-				EngineHost: sandbox.EngineHost, APIPort: engine.GuestAPIPort, CertDir: sandbox.EngineCertDir,
-			})
+			targets := sess.engine.ProbeTargets(sess.gateway)
+			targets.HostAddrs, targets.HostPorts = []string{"10.0.2.15"}, []int{engine.GuestAPIPort}
+			results, err = sess.engine.Probes(ds, targets)
 			if err != nil {
 				t.Fatal(err)
 			}

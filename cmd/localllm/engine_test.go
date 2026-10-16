@@ -119,8 +119,8 @@ func TestShellEngineSession(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	if !strings.HasPrefix(sess.engine.vm.Certs.Key, filepath.Join(sess.sessionDir, "engine-server")+"/") {
-		t.Errorf("server key at %s", sess.engine.vm.Certs.Key)
+	if !strings.HasPrefix(sess.engine.VM().Certs.Key, filepath.Join(sess.sessionDir, "engine-server")+"/") {
+		t.Errorf("server key at %s", sess.engine.VM().Certs.Key)
 	}
 }
 

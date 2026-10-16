@@ -144,6 +144,7 @@ flowchart TD
     end
 
     subgraph eng["Engine VM"]
+        enginesession["enginesession<br/>a session's Engine VM:<br/>prepare, start, ready, probes, stop"]
         engine["engine<br/>config, QEMU command, certs,<br/>image plan, base disk"]
         enginevm["enginevm<br/>QEMU adapter"]
     end
@@ -163,6 +164,7 @@ flowchart TD
     prepgate --> changereport & deps
     docker --> sandbox & interrupt
     enginevm --> engine & interrupt
+    enginesession --> engine & enginevm & check & docker
 ```
 
 ## Where data lives
