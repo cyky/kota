@@ -79,7 +79,7 @@ type Gateway struct {
 	Port int
 }
 
-// ParseGateway parses a gateway URL such as http://host.docker.internal:8080.
+// ParseGateway parses a gateway URL such as http://host.docker.internal:8686.
 // Only plain http is supported: the forwarder is a TCP relay, and the gateway
 // lives on the host's loopback.
 func ParseGateway(raw string) (Gateway, error) {

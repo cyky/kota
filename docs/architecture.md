@@ -10,7 +10,7 @@ What runs where during a `run` or `shell` **Session** of a project with an **Eng
 flowchart LR
     subgraph host["Host (macOS)"]
         cli["kota CLI"]
-        gw["Gateway<br/>llama-swap :8080"]
+        gw["Gateway<br/>llama-swap :8686"]
         project[("Project dir<br/>~/Projects/app")]
         cache[("User cache dir<br/>kota/")]
         subgraph vm["Engine VM (QEMU)"]

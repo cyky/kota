@@ -49,7 +49,7 @@ import (
 const (
 	baseImage      = "kota-base:latest"
 	forwarderImage = "kota-forwarder:latest"
-	defaultGateway = "http://host.docker.internal:8080"
+	defaultGateway = "http://host.docker.internal:8686"
 	defaultAgent   = opencode.Agent
 	// engineHostAlias is the host as the engine forwarder reaches it, where
 	// QEMU's port forwards listen on 127.0.0.1.
