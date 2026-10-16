@@ -1346,7 +1346,11 @@ func cmdPrep(args []string) error {
 	if len(depPlan.Steps) == 0 && engineCfg == nil {
 		return fmt.Errorf("nothing to install in %s: no package.json or go.mod; set prep.command in %s", project, deps.ConfigFile)
 	}
-	if err := confirmPrep(project, depPlan, engineCfg); err != nil {
+	images, err := planEngineImages(project, engineCfg)
+	if err != nil {
+		return err
+	}
+	if err := confirmPrep(project, depPlan, images); err != nil {
 		return err
 	}
 	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, depPlan)
@@ -1358,7 +1362,7 @@ func cmdPrep(args []string) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
-	err = runPrep(sess, engineCfg)
+	err = runPrep(sess, images)
 	sess.cleanup()
 	reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
 	if err != nil {
@@ -1466,20 +1470,17 @@ func prepRecordFile(project string) string {
 	return filepath.Join(cache, "localllm", "prep", sandbox.ProjectName(project)+".json")
 }
 
-// confirmPrep asks the user to type y before a prep whose inputs changed
-// since the last prep, or before the first one: an agent session may have
-// written what prep is about to run with network access.
-func confirmPrep(project string, plan deps.Plan, engineCfg *engine.Config) error {
+// confirmPrep asks the user to type y before a prep whose inputs or Engine
+// images changed since the last prep, or before the first one: an agent
+// session may have written what prep is about to run with network access.
+// images is nil for a project without Engine images.
+func confirmPrep(project string, plan deps.Plan, images *engine.ImagePlan) error {
 	d, err := prepDecision(project, plan)
 	if err != nil {
 		return err
 	}
-	if !d.Ask() {
+	if !d.Ask() && (images == nil || !images.Changed()) {
 		return nil
-	}
-	var images []string
-	if engineCfg != nil {
-		images = engineCfg.Images
 	}
 	printPrepGate(os.Stderr, project, plan, images, d)
 	fmt.Fprint(os.Stderr, "Type y to run prep: ")
@@ -1503,8 +1504,9 @@ func prepDecision(project string, plan deps.Plan) (prepgate.Decision, error) {
 	return prepgate.Decide(last, now, len(plan.Hooks) > 0), nil
 }
 
-func printPrepGate(w io.Writer, project string, plan deps.Plan, images []string, d prepgate.Decision) {
-	if d.First {
+func printPrepGate(w io.Writer, project string, plan deps.Plan, images *engine.ImagePlan, d prepgate.Decision) {
+	switch {
+	case d.First:
 		fmt.Fprintf(w, "First prep of %s. These run with network access:\n", project)
 		for _, s := range plan.Steps {
 			for _, c := range []string{s.Fetch, s.Script} {
@@ -1513,16 +1515,27 @@ func printPrepGate(w io.Writer, project string, plan deps.Plan, images []string,
 				}
 			}
 		}
-		if len(images) > 0 {
-			fmt.Fprintf(w, "  engine images, downloaded with crane: %s\n", strings.Join(images, ", "))
-		}
-	} else {
+	case d.Ask():
 		fmt.Fprintf(w, "%s changed since its last prep, and prep runs with network access.\n", project)
 		if len(d.Inputs) > 0 {
 			fmt.Fprintln(w, "Files that decide what prep runs:")
 			for _, line := range changereport.Warnings(d.Inputs) {
 				fmt.Fprintln(w, "  "+line)
 			}
+		}
+	default:
+		fmt.Fprintf(w, "The engine images of %s changed since its last prep.\n", project)
+	}
+	if images != nil && images.Changed() {
+		fmt.Fprintln(w, "Engine images, downloaded with crane (no project code runs):")
+		for _, ref := range images.Added {
+			fmt.Fprintf(w, "  new      %s\n", ref)
+		}
+		for _, m := range images.Moved {
+			fmt.Fprintf(w, "  moved    %s: %s -> %s\n", m.Ref, shortDigest(m.From), shortDigest(m.To))
+		}
+		for _, ref := range images.Removed {
+			fmt.Fprintf(w, "  removed  %s\n", ref)
 		}
 	}
 	if len(plan.Hooks) > 0 {
@@ -1542,9 +1555,18 @@ func printPrepGate(w io.Writer, project string, plan deps.Plan, images []string,
 			fmt.Fprintln(w, "  "+line)
 		}
 	}
-	if !d.First {
+	if !d.First && d.Ask() {
 		fmt.Fprintf(w, "Review them first, e.g. git -C %s diff\n", project)
 	}
+}
+
+// shortDigest is a digest's algorithm and first 12 hex digits, as docker
+// shows image IDs.
+func shortDigest(d string) string {
+	if alg, hex, ok := strings.Cut(d, ":"); ok && len(hex) > 12 {
+		return alg + ":" + hex[:12]
+	}
+	return d
 }
 
 // readYes reads one line and reports whether it is y or yes.
@@ -1555,9 +1577,9 @@ func readYes(r io.Reader) bool {
 }
 
 // runPrep runs the install steps with network access, without an agent,
-// the gateway or its key, and downloads engineCfg's images if set. The
-// containers are gone when it returns.
-func runPrep(sess *session, engineCfg *engine.Config) error {
+// the gateway or its key, and carries out the Engine images' plan if set.
+// The containers are gone when it returns.
+func runPrep(sess *session, images *engine.ImagePlan) error {
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); install scripts can't read them\n", n)
@@ -1582,8 +1604,8 @@ func runPrep(sess *session, engineCfg *engine.Config) error {
 	if err := interrupt.Err(); err != nil {
 		return err
 	}
-	if engineCfg != nil {
-		if err := fetchEngineImages(sess.project, engineCfg); err != nil {
+	if images != nil {
+		if err := fetchEngineImages(sess.project, images); err != nil {
 			return err
 		}
 	}
@@ -1600,12 +1622,102 @@ func runPrep(sess *session, engineCfg *engine.Config) error {
 	return nil
 }
 
-// fetchEngineImages downloads the project's Engine images into its archive
-// cache. crane runs in a throwaway container of the base image that has
-// only the new archive directory mounted: no project files, so no project
-// code. Each image is pulled by the digest its tag resolves to. The
-// previous archives are replaced only after every download succeeded.
-func fetchEngineImages(project string, cfg *engine.Config) error {
+// planEngineImages works out what prep does with the project's Engine
+// images: nil for a project that declares none and has none prepped.
+// Before the user confirms, only the images in the last prep's record are
+// looked up, so a reference an agent wrote into localllm.yaml reaches the
+// network only after the user approved it.
+func planEngineImages(project string, cfg *engine.Config) (*engine.ImagePlan, error) {
+	layout, err := engineLayout()
+	if err != nil {
+		return nil, err
+	}
+	dir := layout.ArchiveDir(project)
+	last, err := engine.LoadRecord(dir)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil && last == nil {
+		return nil, nil
+	}
+	var declared []string
+	if cfg != nil {
+		declared = cfg.Images
+	}
+	var resolved map[string]string
+	if last != nil && len(last.Archives) > 0 {
+		var recorded []string
+		for _, a := range last.Archives {
+			recorded = append(recorded, a.Ref)
+		}
+		fmt.Fprintf(os.Stderr, "looking up the %d engine image tag(s) of the last prep\n", len(recorded))
+		if resolved, err = resolveEngineImages(dir, recorded); err != nil {
+			return nil, err
+		}
+	}
+	have := func(a engine.Archive) bool { return regularFile(filepath.Join(dir, a.File)) == nil }
+	p := engine.Plan(declared, last, resolved, have)
+	return &p, nil
+}
+
+// resolveEngineImages looks up the digests images' tags point to now, with
+// crane in a throwaway container of the base image that has only an empty
+// work directory next to dir mounted.
+func resolveEngineImages(dir string, images []string) (map[string]string, error) {
+	work := dir + ".resolve"
+	if err := os.RemoveAll(work); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(work)
+	if err := docker.RunOnline(baseImage, os.Getuid(), os.Getgid(), work, "sh", "-c", engine.ResolveScript(images)); err != nil {
+		return nil, engineScriptErr(work, "look up", images, err)
+	}
+	return readEngineDigests(work, images)
+}
+
+// readEngineDigests reads the digests a script wrote into dir for images.
+// The directory was written by a container: only regular files are taken,
+// so a symlink can't point the host at its own files.
+func readEngineDigests(dir string, images []string) (map[string]string, error) {
+	file := filepath.Join(dir, engine.DigestsFile)
+	if err := regularFile(file); err != nil {
+		return nil, fmt.Errorf("engine image digests: %w", err)
+	}
+	content, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	return engine.ParseDigests(images, string(content))
+}
+
+// engineScriptErr is err from a failed engine image script in dir, naming
+// the image it stopped on when that is one of images.
+func engineScriptErr(dir, what string, images []string, err error) error {
+	file := filepath.Join(dir, engine.FailedFile)
+	if regularFile(file) == nil {
+		if content, rerr := os.ReadFile(file); rerr == nil {
+			if ref := strings.TrimSpace(string(content)); slices.Contains(images, ref) {
+				return fmt.Errorf("%s engine image %s: crane failed (its output is above); check the reference in %s: %w", what, ref, engine.ConfigFile, err)
+			}
+		}
+	}
+	return fmt.Errorf("%s engine images: %w", what, err)
+}
+
+// fetchEngineImages carries out the plan p in the project's archive cache.
+// crane runs in a throwaway container of the base image that has only a
+// new archive directory mounted: no project files, so no project code.
+// Only p.Downloads are downloaded; the archives p keeps are linked into
+// the new directory, which replaces the previous one only after every
+// download succeeded.
+func fetchEngineImages(project string, p *engine.ImagePlan) error {
+	if len(p.Downloads) == 0 && !p.Changed() {
+		fmt.Fprintf(os.Stderr, "engine images up to date: %d, as at the last prep\n", len(p.Keep))
+		return nil
+	}
 	layout, err := engineLayout()
 	if err != nil {
 		return err
@@ -1623,30 +1735,39 @@ func fetchEngineImages(project string, cfg *engine.Config) error {
 		return err
 	}
 	defer os.RemoveAll(staging)
-	fmt.Fprintf(os.Stderr, "downloading %d engine image(s) for %s (no project code runs)\n", len(cfg.Images), m.Platform)
-	if err := docker.RunOnline(baseImage, os.Getuid(), os.Getgid(), staging, "sh", "-c", engine.FetchScript(cfg.Images, m.Platform)); err != nil {
-		return fmt.Errorf("download engine images: %w", err)
-	}
-	// The directory was written by a container: take only regular files,
-	// so a symlink can't point the host at its own files.
-	if err := regularFile(filepath.Join(staging, engine.DigestsFile)); err != nil {
-		return fmt.Errorf("download engine images: %w", err)
-	}
-	digests, err := os.ReadFile(filepath.Join(staging, engine.DigestsFile))
-	if err != nil {
-		return fmt.Errorf("download engine images: %w", err)
-	}
-	rec, err := engine.ParseDigests(cfg.Images, string(digests))
-	if err != nil {
-		return err
-	}
-	for _, a := range rec.Archives {
-		if err := regularFile(filepath.Join(staging, a.File)); err != nil {
-			return fmt.Errorf("download engine image %s: %w", a.Ref, err)
+	digests := map[string]string{}
+	if len(p.Downloads) > 0 {
+		var refs []string
+		for _, a := range p.Downloads {
+			refs = append(refs, a.Ref)
+		}
+		fmt.Fprintf(os.Stderr, "downloading %d engine image(s) for %s (no project code runs); %d unchanged\n", len(refs), m.Platform, len(p.Keep))
+		if err := docker.RunOnline(baseImage, os.Getuid(), os.Getgid(), staging, "sh", "-c", engine.FetchScript(p.Downloads, m.Platform)); err != nil {
+			return engineScriptErr(staging, "download", refs, err)
+		}
+		if digests, err = readEngineDigests(staging, refs); err != nil {
+			return err
+		}
+		for _, a := range p.Downloads {
+			if err := regularFile(filepath.Join(staging, a.File)); err != nil {
+				return fmt.Errorf("download engine image %s: %w", a.Ref, err)
+			}
+		}
+		if err := os.Remove(filepath.Join(staging, engine.DigestsFile)); err != nil {
+			return err
 		}
 	}
-	if err := os.Remove(filepath.Join(staging, engine.DigestsFile)); err != nil {
+	for _, a := range p.Keep {
+		if err := os.Link(filepath.Join(dir, a.File), filepath.Join(staging, a.File)); err != nil {
+			return fmt.Errorf("keep engine image %s: %w", a.Ref, err)
+		}
+	}
+	rec, err := p.Record(digests)
+	if err != nil {
 		return err
+	}
+	if len(rec.Archives) == 0 {
+		return os.RemoveAll(dir)
 	}
 	if err := rec.Save(staging); err != nil {
 		return err

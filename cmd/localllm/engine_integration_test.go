@@ -188,8 +188,9 @@ func stubModelGateway(t *testing.T) string {
 }
 
 // prepEngineProject runs prep as the CLI does after its confirmation:
-// dependencies and engine images, with test-only shared caches.
-func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compose)) {
+// dependencies and engine images, with test-only shared caches. It returns
+// the images' plan.
+func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compose)) *engine.ImagePlan {
 	t.Helper()
 	sa := sessionArgs{dir: project}
 	lease, err := lockProject(sa, "prep")
@@ -205,6 +206,10 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 	if err != nil || cfg == nil {
 		t.Fatalf("engine config = %+v, %v", cfg, err)
 	}
+	images, err := planEngineImages(project, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, depPlan)
 	if err != nil {
 		t.Fatal(err)
@@ -212,9 +217,10 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 	defer sess.cleanup()
 	caches(&sess.spec)
 	caches(&sess.fetchSpec)
-	if err := runPrep(sess, cfg); err != nil {
+	if err := runPrep(sess, images); err != nil {
 		t.Fatal(err)
 	}
+	return images
 }
 
 // withShellSession starts the project's shell session up to where Bash
@@ -307,6 +313,26 @@ func TestEngineInShell(t *testing.T) {
 	if err != nil || rec == nil || len(rec.Archives) != 1 || !strings.HasPrefix(rec.Archives[0].Digest, "sha256:") {
 		t.Fatalf("archive record = %+v, %v", rec, err)
 	}
+
+	t.Run("unchanged images aren't downloaded again", func(t *testing.T) {
+		archive := filepath.Join(layout.ArchiveDir(project), rec.Archives[0].File)
+		before, err := os.Stat(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := prepEngineProject(t, project, caches)
+		if p.Changed() || len(p.Downloads) != 0 || len(p.Keep) != 1 {
+			t.Errorf("second prep's plan = %+v", p)
+		}
+		after, err := os.Stat(archive)
+		if err != nil || !os.SameFile(before, after) {
+			t.Errorf("archive replaced or gone: %v", err)
+		}
+		again, err := engine.LoadRecord(layout.ArchiveDir(project))
+		if err != nil || again == nil || len(again.Archives) != 1 || again.Archives[0] != rec.Archives[0] {
+			t.Errorf("record after the second prep = %+v, %v", again, err)
+		}
+	})
 
 	t.Run("testcontainers postgres offline", func(t *testing.T) {
 		out := shellSession(t, project, gateway, caches, `
@@ -505,6 +531,37 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 		}
 		if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
 			t.Errorf("pidfile left: %v", err)
+		}
+	})
+
+	// Last: it changes localllm.yaml.
+	t.Run("a failed download names the image and keeps the archives", func(t *testing.T) {
+		const bad = "localhost:1/missing:1"
+		yaml := "engine:\n  images: [postgres:16-alpine, " + bad + "]\n"
+		if err := os.WriteFile(filepath.Join(project, engine.ConfigFile), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := engine.Read(project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := planEngineImages(project, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(p.Added) != 1 || p.Added[0] != bad || len(p.Downloads) != 1 || len(p.Keep) != 1 {
+			t.Fatalf("plan = %+v", p)
+		}
+		err = fetchEngineImages(project, p)
+		if err == nil || !strings.Contains(err.Error(), "download engine image "+bad) {
+			t.Fatalf("err = %v, want it to name %s", err, bad)
+		}
+		after, err := engine.LoadRecord(layout.ArchiveDir(project))
+		if err != nil || after == nil || len(after.Archives) != 1 || after.Archives[0] != rec.Archives[0] {
+			t.Errorf("record after a failed download = %+v, %v", after, err)
+		}
+		if err := regularFile(filepath.Join(layout.ArchiveDir(project), rec.Archives[0].File)); err != nil {
+			t.Errorf("previous archive: %v", err)
 		}
 	})
 }

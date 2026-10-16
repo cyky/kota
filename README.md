@@ -150,7 +150,18 @@ engine:
   images: [postgres:16-alpine]   # plain references with an optional tag
 ```
 
-`localllm prep` downloads the images with crane, after the dependency fetch and with no project code running: crane runs in a throwaway container of the base image that has only the project's new archive directory mounted, not the project. Each tag is resolved to its digest and the image pulled by that digest, so every manifest and layer is checked against it. The archives and their digests are kept in `localllm/engine/projects/<hash of the project path>/images/` under the user cache dir, outside the project and the sandbox. A failed download keeps the previous archives. The first `prep` lists the images in its confirmation, and a change to `localllm.yaml` asks again, as for any prep input.
+`localllm prep` downloads the images with crane, after the dependency fetch and with no project code running: crane runs in a throwaway container of the base image that has only the project's new archive directory mounted, not the project. Each tag is resolved to its digest and the image pulled by that digest, so every manifest and layer is checked against it. The archives and the digests they were pulled by are kept in `localllm/engine/projects/<hash of the project path>/images/` under the user cache dir, outside the project and the sandbox.
+
+Each later `prep` first looks up, with crane in the same kind of container, which digest each tag of the last prep points to now. It looks up only the images the last prep recorded: an image newly declared in `localllm.yaml`, which an agent may have written, isn't sent anywhere until you confirm. Then prep asks you to type `y` when the images changed, even if no file did, listing them:
+
+```
+Engine images, downloaded with crane (no project code runs):
+  new      redis:7
+  moved    postgres:16-alpine: sha256:3f5a9c1e2b7d -> sha256:9b04e8d2c6a1
+  removed  nginx:1.27
+```
+
+Only new images, images whose tag moved (pulled by the digest shown) and images whose archive is gone are downloaded; the others are kept as they are. A failed lookup or download names the image and keeps the previous archives.
 
 `localllm run` and `localllm shell` start the project's Engine VM, for opencode and pi alike, wait for its Docker API, load the archives, and point the sandbox at it:
 

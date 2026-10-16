@@ -9,9 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	"localllm/internal/changereport"
+	"localllm/internal/deps"
 	"localllm/internal/engine"
 	"localllm/internal/opencode"
 	"localllm/internal/pi"
+	"localllm/internal/prepgate"
 	"localllm/internal/sandbox"
 )
 
@@ -445,6 +448,124 @@ func TestCheckShowsEngine(t *testing.T) {
 			}
 			if c.wantErr && sess.spec.Services[sandbox.EngineService].Image != "" {
 				t.Error("engine forwarder without an Engine VM")
+			}
+		})
+	}
+}
+
+// TestPlanEngineImagesLooksUpOnlyRecordedImages runs planning with a fake
+// docker that runs the lookup script against a fake crane: only images the
+// last prep recorded may be looked up before the user confirms, so a
+// reference an agent added doesn't reach the network.
+func TestPlanEngineImagesLooksUpOnlyRecordedImages(t *testing.T) {
+	const added = "evil.example/leak:secret"
+	project := fakeHome(t, map[string]string{engine.ConfigFile: "engine:\n  images: [postgres:16-alpine, redis:7, " + added + "]\n"})
+	layout := fakeEngine(t, project, []string{"postgres:16-alpine", "redis:7"})
+	dir := layout.ArchiveDir(project)
+	for _, ref := range []string{"postgres:16-alpine", "redis:7"} {
+		if err := os.WriteFile(filepath.Join(dir, engine.ArchiveFile(ref)), []byte("tar"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := t.TempDir()
+	log := filepath.Join(bin, "crane.log")
+	moved := "sha256:" + strings.Repeat("b", 64)
+	scripts := map[string]string{
+		"docker": `#!/bin/sh
+for a; do case "$a" in type=bind,source=*) src=${a#type=bind,source=}; src=${src%%,target=*};; esac; last=$a; done
+cd "$src" && exec sh -c "$last"
+`,
+		"crane": `#!/bin/sh
+printf '%s\n' "$*" >> ` + log + `
+case "$2" in redis:7) echo ` + moved + `;; *) echo sha256:` + strings.Repeat("a", 64) + `;; esac
+`,
+	}
+	for name, s := range scripts {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(s), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg, err := engine.Read(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := planEngineImages(project, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, _ := os.ReadFile(log)
+	if string(calls) != "digest postgres:16-alpine\ndigest redis:7\n" {
+		t.Errorf("looked up before the confirmation:\n%s", calls)
+	}
+	if !slices.Equal(p.Added, []string{added}) || len(p.Moved) != 1 || p.Moved[0].Ref != "redis:7" || p.Moved[0].To != moved || len(p.Keep) != 1 {
+		t.Errorf("plan = %+v", p)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(dir)); len(entries) != 1 {
+		t.Errorf("left next to the archives: %v", entries)
+	}
+
+	t.Run("no record, no lookup", func(t *testing.T) {
+		project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
+		os.Remove(log)
+		cfg, _ := engine.Read(project)
+		p, err := planEngineImages(project, cfg)
+		if err != nil || !slices.Equal(p.Added, []string{"postgres:16-alpine"}) {
+			t.Errorf("plan = %+v, %v", p, err)
+		}
+		if _, err := os.Stat(log); err == nil {
+			t.Error("looked up an image of the first prep before the confirmation")
+		}
+	})
+}
+
+func TestPrepGateEngineImages(t *testing.T) {
+	digestA, digestB := "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64)
+	last := &engine.Record{Archives: []engine.Archive{
+		{Ref: "postgres:16", Digest: digestA, File: engine.ArchiveFile("postgres:16")},
+		{Ref: "redis:7", Digest: digestA, File: engine.ArchiveFile("redis:7")},
+	}}
+	all := func(engine.Archive) bool { return true }
+	plan := deps.Plan{Steps: []deps.Step{{Name: "go", Fetch: "go mod download"}}}
+	cases := []struct {
+		name     string
+		images   engine.ImagePlan
+		d        prepgate.Decision
+		want     []string
+		dontWant []string
+	}{
+		{
+			name:   "first prep",
+			images: engine.Plan([]string{"postgres:16"}, nil, nil, all),
+			d:      prepgate.Decision{First: true},
+			want:   []string{"First prep of /p", "go: go mod download", "new      postgres:16"},
+		},
+		{
+			name:     "tag moved, files unchanged",
+			images:   engine.Plan([]string{"postgres:16", "redis:7"}, last, map[string]string{"postgres:16": digestB, "redis:7": digestA}, all),
+			want:     []string{"engine images of /p changed", "moved    postgres:16: sha256:aaaaaaaaaaaa -> sha256:bbbbbbbbbbbb"},
+			dontWant: []string{"redis:7", "git -C /p diff"},
+		},
+		{
+			name:   "added and removed",
+			images: engine.Plan([]string{"postgres:16", "nginx"}, last, map[string]string{"postgres:16": digestA, "redis:7": digestA}, all),
+			d:      prepgate.Decision{Inputs: []changereport.Change{{Path: engine.ConfigFile, Kind: changereport.Modified}}},
+			want:   []string{"modified  localllm.yaml", "new      nginx", "removed  redis:7", "git -C /p diff"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out strings.Builder
+			printPrepGate(&out, "/p", plan, &c.images, c.d)
+			for _, want := range c.want {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("output lacks %q:\n%s", want, out.String())
+				}
+			}
+			for _, no := range c.dontWant {
+				if strings.Contains(out.String(), no) {
+					t.Errorf("output has %q:\n%s", no, out.String())
+				}
 			}
 		})
 	}
