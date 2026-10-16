@@ -43,6 +43,8 @@ The project must be inside the allowed root, `~/Projects` by default (set `LOCAL
 
 ## How it works
 
+Diagrams of the runtime, the command flows, the packages and where data lives are in [docs/architecture.md](docs/architecture.md).
+
 The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway. Inside the sandbox the gateway is `http://gateway:8080`. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
 
 By default opencode asks before it edits a file or runs a shell command. `--auto` approves both, so it works without interruption. In a non-interactive `opencode run`, a request that needs approval is rejected. Before a full-auto session in a git project with uncommitted changes (modified, staged or untracked files inside the project), `run` lists them and asks you to type `y`. Anything else aborts before a container starts, so you can commit or stash first. Non-git projects aren't asked. The check doesn't run git on the host, where a filter or fsmonitor that an agent configured (in a repository it created, or through `.gitattributes`) would run. localllm finds the repository by looking for `.git` in the project and the directories above it, then runs `git status` in a throwaway container of the base image, with no network, no capabilities and read-only mounts of only the project and its git directory at their host paths. For a linked worktree or submodule checkout, that includes the git dir its `.git` file points to, which must pass the same path rules as `--ro`.
