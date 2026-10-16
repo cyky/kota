@@ -119,7 +119,8 @@ func Plan(project string, defaults []string) (Layout, error) {
 	if err := p.file(IgnoreFile); err != nil {
 		return Layout{}, err
 	}
-	// The project config decides what prep runs with network access.
+	// The project config decides what prep runs with network access, and
+	// which images the Engine VM gets and its size.
 	if err := p.file(deps.ConfigFile); err != nil {
 		return Layout{}, err
 	}

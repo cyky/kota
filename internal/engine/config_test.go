@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"cmp"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,10 +10,13 @@ import (
 )
 
 func TestParse(t *testing.T) {
+	const img = "engine:\n  images: [redis]\n"
 	cases := []struct {
 		name    string
 		yaml    string
 		want    []string
+		cpus    int // 0: the default
+		mem     int // 0: the default
 		wantErr string
 	}{
 		{name: "empty file", yaml: ""},
@@ -22,7 +26,23 @@ func TestParse(t *testing.T) {
 		{name: "registry with port", yaml: "engine:\n  images: [localhost:5000/team/db:v1]\n", want: []string{"localhost:5000/team/db:v1"}},
 		{name: "empty section", yaml: "engine:\n", wantErr: "at least one image"},
 		{name: "no images", yaml: "engine:\n  images: []\n", wantErr: "at least one image"},
-		{name: "unknown key", yaml: "engine:\n  images: [redis]\n  imgaes: [x]\n", wantErr: "imgaes"},
+		{name: "unknown key", yaml: img + "  imgaes: [x]\n", wantErr: `unknown key "imgaes" (want images, cpus, memory)`},
+		{name: "unknown key before images", yaml: "engine:\n  disk: 10G\n  images: [redis]\n", wantErr: `unknown key "disk"`},
+		{name: "not a mapping", yaml: "engine: [redis]\n", wantErr: "engine: want keys images, cpus, memory"},
+		{name: "images not a list", yaml: "engine:\n  images: redis\n", wantErr: "engine.images: want a list"},
+		{name: "size", yaml: img + "  cpus: 4\n  memory: 6G\n", want: []string{"redis"}, cpus: 4, mem: 6144},
+		{name: "memory in MiB", yaml: img + "  memory: 3072M\n", want: []string{"redis"}, mem: 3072},
+		{name: "memory with long unit", yaml: img + "  memory: 1 GiB\n", want: []string{"redis"}, mem: 1024},
+		{name: "minimum size", yaml: img + "  cpus: 1\n  memory: 512MiB\n", want: []string{"redis"}, cpus: 1, mem: 512},
+		{name: "zero cpus", yaml: img + "  cpus: 0\n", wantErr: `engine.cpus: "0": want a whole number`},
+		{name: "fractional cpus", yaml: img + "  cpus: 1.5\n", wantErr: "engine.cpus"},
+		{name: "quoted cpus", yaml: img + "  cpus: \"4\"\n", wantErr: "engine.cpus"},
+		{name: "cpus list", yaml: img + "  cpus: [4]\n", wantErr: "engine.cpus"},
+		{name: "memory without unit", yaml: img + "  memory: 4096\n", wantErr: `engine.memory: "4096": want a size with a unit`},
+		{name: "memory in bytes", yaml: img + "  memory: 4GB\n", wantErr: "engine.memory"},
+		{name: "memory too small", yaml: img + "  memory: 256M\n", wantErr: "at least 512M"},
+		{name: "negative memory", yaml: img + "  memory: -1G\n", wantErr: "engine.memory"},
+		{name: "size without images", yaml: "engine:\n  cpus: 4\n", wantErr: "at least one image"},
 		{name: "digest", yaml: "engine:\n  images: [postgres@sha256:" + strings.Repeat("a", 64) + "]\n", wantErr: "not a digest"},
 		{name: "upper case", yaml: "engine:\n  images: [Postgres:16]\n", wantErr: "not a valid image reference"},
 		{name: "shell characters", yaml: "engine:\n  images: [\"redis;rm -rf /\"]\n", wantErr: "not a valid image reference"},
@@ -51,8 +71,9 @@ func TestParse(t *testing.T) {
 			if !slices.Equal(cfg.Images, c.want) {
 				t.Errorf("images = %q, want %q", cfg.Images, c.want)
 			}
-			if cfg.CPUs != DefaultCPUs || cfg.MemoryMiB != DefaultMemoryMiB {
-				t.Errorf("size = %d CPUs, %d MiB, want the defaults", cfg.CPUs, cfg.MemoryMiB)
+			wantCPUs, wantMem := cmp.Or(c.cpus, DefaultCPUs), cmp.Or(c.mem, DefaultMemoryMiB)
+			if cfg.CPUs != wantCPUs || cfg.MemoryMiB != wantMem {
+				t.Errorf("size = %d CPUs, %d MiB, want %d, %d", cfg.CPUs, cfg.MemoryMiB, wantCPUs, wantMem)
 			}
 		})
 	}

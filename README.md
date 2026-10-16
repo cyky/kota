@@ -148,7 +148,11 @@ Some projects' tests start containers, for example testcontainers with Postgres.
 ```yaml
 engine:
   images: [postgres:16-alpine]   # plain references with an optional tag
+  cpus: 2                        # optional, default 2
+  memory: 2G                     # optional, default 2G; M or G (MiB or GiB), at least 512M
 ```
+
+`images` is required and lists each image once. Each must be a valid Docker reference with a tag or none (`latest`), never a digest: prep records the digest the tag resolves to. `cpus` is a whole number of at least 1. The VM runs next to your model, so keep it small. An invalid reference, a size without its unit or out of range, or an unknown key in the section is rejected with a message naming it: `prep` refuses, and so do `run` and `shell` once the project has been prepped with an engine (see below). `localllm.yaml` is mounted read-only in the sandbox, so the agent can't declare images or resize the VM.
 
 `localllm prep` downloads the images with crane, after the dependency fetch and with no project code running: crane runs in a throwaway container of the base image that has only the project's new archive directory mounted, not the project. Each tag is resolved to its digest and the image pulled by that digest, so every manifest and layer is checked against it. The archives and the digests they were pulled by are kept in `localllm/engine/projects/<hash of the project path>/images/` under the user cache dir, outside the project and the sandbox.
 

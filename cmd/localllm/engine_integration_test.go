@@ -74,7 +74,8 @@ func engineProject(t *testing.T) string {
 	t.Setenv("LOCALLLM_ALLOWED_ROOT", root)
 	project := filepath.Join(root, "app")
 	files := map[string]string{
-		engine.ConfigFile: "engine:\n  images: [postgres:16-alpine]\n",
+		// Not the default size, so the test sees the configured one applied.
+		engine.ConfigFile: "engine:\n  images: [postgres:16-alpine]\n  cpus: 3\n  memory: 3G\n",
 		"go.mod":          "module example.com/app\n\ngo 1.27\n",
 		"db_test.go": `package app
 
@@ -343,6 +344,20 @@ go test -count=1 -v ./... && echo GO-TEST-PASSED`)
 			if !strings.Contains(out, want) {
 				t.Errorf("output lacks %q:\n%s", want, out)
 			}
+		}
+	})
+
+	t.Run("the configured size", func(t *testing.T) {
+		out := shellSession(t, project, gateway, caches, `docker info --format 'SIZE {{.NCPU}} {{.MemTotal}}'`)
+		var cpus, mem int64
+		if i := strings.Index(out, "SIZE "); i < 0 {
+			t.Fatalf("no size:\n%s", out)
+		} else if _, err := fmt.Sscanf(out[i:], "SIZE %d %d", &cpus, &mem); err != nil {
+			t.Fatalf("%v:\n%s", err, out)
+		}
+		// The kernel keeps some of the memory for itself.
+		if cpus != 3 || mem <= 2700<<20 || mem > 3<<30 {
+			t.Errorf("Engine VM has %d CPUs and %d MiB, want 3 and about 3072", cpus, mem>>20)
 		}
 	})
 
