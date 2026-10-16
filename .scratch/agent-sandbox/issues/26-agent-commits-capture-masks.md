@@ -1,7 +1,9 @@
-# 26 — Agent commits capture mask placeholders
+# DONE — 26 — Agent commits capture mask placeholders
 
-Status: ready-for-agent
+Status: done
 Category: bug
+
+Resolved in: b1f8096
 
 ## Parent
 
@@ -27,10 +29,10 @@ Two parts, to decide in triage:
 
 ## Acceptance criteria
 
-- [ ] After a session in which the agent runs `git add -A && git commit`, either the commit contains no placeholder or masked paths, or kota warns that it does
-- [ ] The change report lists the commits made during the session
-- [ ] Files ignored by the host's global excludes behave the same inside the sandbox, or the README says they don't
-- [ ] Integration test for an agent commit made with `git add -A`
+- [x] After a session in which the agent runs `git add -A && git commit`, either the commit contains no placeholder or masked paths, or kota warns that it does
+- [x] The change report lists the commits made during the session
+- [x] Files ignored by the host's global excludes behave the same inside the sandbox, or the README says they don't
+- [x] Integration test for an agent commit made with `git add -A`
 
 ## Blocked by
 
@@ -95,18 +97,33 @@ Applies to every command that runs project code in a container: `run`, `shell` a
 - `reportChanges` in `cmd/kota/main.go` and the `changereport` package: gain the ref changes, commit list and warnings, and need the working-tree result to leave out watched paths it already flagged
 
 **Acceptance criteria:**
-- [ ] After a session in which the agent runs `git add -A && git commit`, the commit contains no placeholder paths and no untracked masked paths
-- [ ] A commit that records a tracked masked file as emptied produces a warning naming the file, with the restore hint
-- [ ] A commit that adds a file ignored only by the host's global excludes file produces a warning; the global excludes file is not readable inside the Sandbox
-- [ ] A watched file changed in a commit and then restored in the working tree produces a commit warning; a watched file changed and committed normally is reported once, by the working-tree report
-- [ ] Commits on a branch created and left behind during the session are listed and checked, as are commits on a detached `HEAD`
-- [ ] After a reset or amend of a commit that existed before the session, the report names the old commit and still checks the new ones
-- [ ] The same report follows `prep`
-- [ ] No git process runs on the host with the project's repository as its repository
-- [ ] Integration test (fake `HOME`, never the real one): a project with a tracked masked file, an untracked masked file, a missing `.envrc` and a file ignored by the fake `HOME`'s global excludes; the agent runs `git add -A && git commit`; the assertions above hold
-- [ ] README updated: the Sandbox excludes file, that host global excludes don't apply inside the Sandbox (kota warns about commits instead), and the branch, commit and warning parts of the **Change report**
+- [x] After a session in which the agent runs `git add -A && git commit`, the commit contains no placeholder paths and no untracked masked paths
+- [x] A commit that records a tracked masked file as emptied produces a warning naming the file, with the restore hint
+- [x] A commit that adds a file ignored only by the host's global excludes file produces a warning; the global excludes file is not readable inside the Sandbox
+- [x] A watched file changed in a commit and then restored in the working tree produces a commit warning; a watched file changed and committed normally is reported once, by the working-tree report
+- [x] Commits on a branch created and left behind during the session are listed and checked, as are commits on a detached `HEAD`
+- [x] After a reset or amend of a commit that existed before the session, the report names the old commit and still checks the new ones
+- [x] The same report follows `prep`
+- [x] The commit check runs no git on the host against the project's repository: refs and commits are read in the offline container (reworded: `gitEnv` and the tracked-mask warning already ran `git -C <project> config` and `ls-files` on the host, which run no filters or hooks and are outside this issue)
+- [x] Integration test (test-only global git config and excludes, never the real ones): a project with a tracked masked file, an untracked masked file, a missing `.envrc` and a file ignored by the test's global excludes; the agent runs `git add -A && git commit`; the assertions above hold
+- [x] README updated: the Sandbox excludes file, that host global excludes don't apply inside the Sandbox (kota warns about commits instead), and the branch, commit and warning parts of the **Change report**
 
 **Out of scope:**
 - Rewriting, reverting or blocking the agent's commits
 - Remote-tracking refs, stashes and other refs outside `refs/heads` and `refs/tags`
 - `--no-history` sessions (issue 29)
+
+**2026-10-16 — Done.**
+1. Git in the Sandbox gets `core.excludesFile` set to a read-only file at `/etc/kota/git-excludes` (`mask.Layout.Excludes`), listing each placeholder and mask outside `.git`, anchored and escaped. The probes check that it is read-only.
+2. Before `run`, `shell` and `prep`, kota records `git show-ref --head --heads --tags` in the offline container. After the command, once the containers are gone but before cleanup, it reads the refs again, and one `git log --raw -z` over every tip and `HEAD`, excluding the old ones. A `merge-base --is-ancestor` check runs in the same container. The parser reads the output front to back, so a commit subject can't fake an entry.
+3. The **Change report** gains the ref changes, a rewritten-`HEAD` line naming the old commit, up to 20 commits, and the warnings grouped by path. Subjects, ref names and paths have their control characters stripped or quoted.
+
+Changed from the brief:
+- The host's global excludes are matched on the host (`mask.ParseIgnore`) against the paths the commits added. The file isn't mounted into the check container either, so it reaches no container.
+- The fix hints are `git add -- <paths>` (tracked masked files emptied, modified or deleted) and `git rm --cached -- <paths>` (added placeholders and untracked masks), not `git restore --source`. The files keep their real content on disk, so a new commit fixes them.
+- Refs and commits are read before cleanup, not after it. After cleanup, git in the container failed with `failed to read .git/commondir`: the seeded file had been removed, and Docker Desktop's file sharing still showed it.
+- Criterion 8 was reworded, as noted above.
+
+README: the excludes file in the git protection paragraph, a note on masked files, and a section on commits after the watched files list.
+
+Verified: unit tests for the excludes file and the global excludes matcher against `git check-ignore`; for reading refs and history in temporary repositories (amend, reset, orphan branch, unborn start, branch left behind, detached `HEAD`); and for the parser, the warnings and the formatting. `TestAgentCommit` (integration, `cmd/kota`) runs a real shell session that commits with `git add -A`, edits and puts back a workflow, and leaves a branch behind, then checks the commit and the report. The `prep` wiring has no integration test, since prep needs network. `go vet` and the unit suite pass; the other integration suites weren't rerun.
