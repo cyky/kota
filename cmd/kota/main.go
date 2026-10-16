@@ -107,8 +107,8 @@ flags:
   --no-engine           run and shell: start without the project's Engine VM;
                         the agent is told tests needing containers can't run
   --no-history          run and shell: run on a copy of the last commit, with
-                        no older git history, remotes or git config; the copy
-                        is kept, and its path printed, after the session
+                        no older git history, remotes or git config; its new
+                        commits come back as the branch kota/<agent>-<time>
   --shared-caches       clean only: also reset shared caches; all sessions
                         must be idle
 
@@ -884,7 +884,8 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	if _, err := models.ParseFile(assets.Models); err != nil {
 		return err
 	}
-	paths, key, err := offlinePaths(sa, lease, agent.name, auto)
+	start := time.Now()
+	paths, key, err := offlinePaths(sa, lease, agent.name, auto, start)
 	if err != nil {
 		return err
 	}
@@ -915,27 +916,152 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	commits := startCommitCheck(os.Stderr, sess.project)
 	err = runSession(sess, lease.Lease, sa.model, auto, skipCheck)
 	commits.finish()
-	sess.cleanup()
-	reported := reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
-	commits.report(os.Stderr, sess.layout, reported)
-	if sa.noHistory {
-		fmt.Fprintf(os.Stderr, "no-history: the copy is kept at %s; commits made in it are not brought back to %s yet.\n", sess.project, key)
-		fmt.Fprintln(os.Stderr, "  git in the copy reads config and hooks the agent could write: review its files before running git there.")
+	if !sa.noHistory {
+		sess.cleanup()
+		reported := reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
+		commits.report(os.Stderr, sess.layout, reported)
+		return err
 	}
+	if commits != nil {
+		commits.where = " in the copy"
+	}
+	// Before cleanup, as commits.finish: the copy's status and export read
+	// its .git, where cleanup removes seeded files.
+	ret := returnWork(sess, commits, returnName(sa, agent.name), start)
+	sess.cleanup()
+	// The copy's working tree is discarded, so watched files changed in
+	// its commits are always flagged, and its changes are listed in full
+	// when it is kept.
+	commits.report(os.Stderr, sess.layout, nil)
+	ret.report(os.Stderr)
 	return err
 }
+
+// returnName names a Session's Returned branch: the agent, or "shell".
+func returnName(sa sessionArgs, agent string) string {
+	if sa.shell {
+		return "shell"
+	}
+	return agent
+}
+
+// returned is what returnWork did with a No-history copy.
+type returned struct {
+	copy string
+	// branch is the Returned branch, when one was made.
+	branch nohistory.Returned
+	// none is why no branch was made, when none was.
+	none string
+	// unreturned are branches and tags in the copy that weren't brought
+	// back, uncommitted its uncommitted changes.
+	unreturned, uncommitted []string
+	// keep are the reasons the copy is kept; it is deleted when there are
+	// none.
+	keep []string
+}
+
+// returnWork brings the copy's HEAD back into the original as the
+// Returned branch, and deletes the copy unless something in it would be
+// lost. Call it once the containers are gone, before the session's
+// cleanup. git runs in offline containers only: in the copy only with its
+// bundle's directory writable, and in the original without the copy.
+func returnWork(sess *session, commits *commitCheck, name string, start time.Time) returned {
+	r := returned{copy: sess.project}
+	if commits == nil || commits.err != nil {
+		r.none = "could not read the copy's commits"
+		r.keep = append(r.keep, r.none)
+		return r
+	}
+	uncommitted, err := nohistory.Uncommitted(sess.project, filepath.Join(sess.sessionDir, "git-excludes"), offlineRunner)
+	if err != nil {
+		r.keep = append(r.keep, fmt.Sprintf("could not read its status: %v", err))
+	} else if r.uncommitted = uncommitted; len(uncommitted) > 0 {
+		r.keep = append(r.keep, "uncommitted changes")
+	}
+	if r.unreturned = nohistory.Unreturned(commits.before, commits.after); len(r.unreturned) > 0 {
+		r.keep = append(r.keep, "branches or tags not brought back")
+	}
+	base, head := commits.before.Head, commits.after.Head
+	switch {
+	case head == base:
+		r.none = "no commits to bring back"
+	case head == "":
+		r.none = "the copy's HEAD has no commit"
+		r.keep = append(r.keep, r.none)
+	default:
+		r.branch, err = bringBack(sess, base, nohistory.BranchName(name, start))
+		if errors.Is(err, nohistory.ErrRewritten) {
+			r.none = err.Error()
+		} else if err != nil {
+			r.none = fmt.Sprintf("could not bring back: %v", err)
+		}
+		if err != nil {
+			r.keep = append(r.keep, "its commits weren't brought back")
+		}
+	}
+	if len(r.keep) == 0 {
+		if err := os.RemoveAll(sess.project); err != nil {
+			r.keep = append(r.keep, fmt.Sprintf("could not remove it: %v", err))
+		}
+	}
+	return r
+}
+
+// bringBack exports the copy's new commits to a bundle in the session dir
+// and imports them into the original as branch.
+func bringBack(sess *session, base, branch string) (nohistory.Returned, error) {
+	dir, err := os.MkdirTemp(sess.sessionDir, "return-")
+	if err != nil {
+		return nohistory.Returned{}, err
+	}
+	bundle := filepath.Join(dir, "return.bundle")
+	if err := nohistory.Export(sess.project, base, bundle, writableRunner); err != nil {
+		return nohistory.Returned{}, err
+	}
+	return nohistory.Import(sess.key, bundle, base, branch, writableRunner)
+}
+
+// report prints the return part of the change report.
+func (r returned) report(w io.Writer) {
+	if r.branch.Branch != "" {
+		fmt.Fprintf(w, "returned branch %s (%d commit(s), at %s); review it, then merge it yourself\n",
+			strings.TrimPrefix(r.branch.Branch, "refs/heads/"), r.branch.Commits, r.branch.Commit[:min(12, len(r.branch.Commit))])
+	} else {
+		fmt.Fprintf(w, "no-history: no branch brought back: %s\n", r.none)
+	}
+	if len(r.unreturned) > 0 {
+		fmt.Fprintf(w, "not brought back: %s\n", strings.Join(r.unreturned, ", "))
+	}
+	if len(r.keep) == 0 {
+		fmt.Fprintln(w, "the copy was removed")
+		return
+	}
+	fmt.Fprintf(w, "copy kept at %s (%s)\n", r.copy, strings.Join(r.keep, "; "))
+	for i, line := range r.uncommitted {
+		if i == maxListedChanges {
+			fmt.Fprintf(w, "  ... and %d more\n", len(r.uncommitted)-maxListedChanges)
+			break
+		}
+		fmt.Fprintln(w, "  "+line)
+	}
+	fmt.Fprintln(w, "  git in the copy reads config and hooks the agent could write: review them before running git there; kota clean removes the copy")
+}
+
+// maxListedChanges is how many uncommitted changes in a kept copy the
+// report lists.
+const maxListedChanges = 20
 
 // offlinePaths returns the paths a run or shell session mounts and the
 // project it belongs to, after the full-auto prompt or, with --no-history,
 // after making the No-history copy.
-func offlinePaths(sa sessionArgs, lease *lockedProject, agent string, auto bool) (pathpolicy.Paths, string, error) {
+func offlinePaths(sa sessionArgs, lease *lockedProject, agent string, auto bool, start time.Time) (pathpolicy.Paths, string, error) {
 	paths, key := lease.paths, lease.paths.Project
 	if sa.noHistory {
 		// The agent works on the copy, so the original's uncommitted
 		// changes are out of its reach, and the full-auto prompt has
 		// nothing to protect.
 		var err error
-		paths.Project, err = makeNoHistoryCopy(key)
+		paths.Project, err = makeNoHistoryCopy(key, start)
 		return paths, key, err
 	}
 	if !sa.shell {
@@ -948,8 +1074,9 @@ func offlinePaths(sa sessionArgs, lease *lockedProject, agent string, auto bool)
 
 // makeNoHistoryCopy checks that project can be copied, asks about what
 // the copy leaves out, and makes the No-history copy. It returns the copy's
-// validated path. Call it under project's lease.
-func makeNoHistoryCopy(project string) (string, error) {
+// validated path. start names it, as it names the Returned branch. Call it
+// under project's lease.
+func makeNoHistoryCopy(project string, start time.Time) (string, error) {
 	missing, err := nohistory.Inspect(project, offlineRunner)
 	if err != nil {
 		return "", err
@@ -964,12 +1091,12 @@ func makeNoHistoryCopy(project string) (string, error) {
 	if err := os.MkdirAll(dirs.Copies(), 0o700); err != nil {
 		return "", err
 	}
-	dest := dirs.CopyDir(project, time.Now())
+	dest := dirs.CopyDir(project, start)
 	if _, err := os.Lstat(dest); err == nil {
 		return "", fmt.Errorf("%s already exists; start again in a second", dest)
 	}
 	copied, err := func() (string, error) {
-		if err := nohistory.Clone(project, dest, writableRunner(dirs.Copies())); err != nil {
+		if err := nohistory.Clone(project, dest, writableRunner); err != nil {
 			return "", err
 		}
 		if err := nohistory.TakeConfig(project, dest); err != nil {
@@ -1118,7 +1245,11 @@ func reportChanges(w io.Writer, project string, watch []string, before changerep
 // project code in a container, to report the commits made while it ran.
 type commitCheck struct {
 	project string
-	before  changereport.Refs
+	// where says which repository the report is about, after "git
+	// history changed": "" for the project, " in the copy" for a
+	// No-history copy.
+	where  string
+	before changereport.Refs
 	// after, history and err are set by finish.
 	after   changereport.Refs
 	history changereport.History
@@ -1170,7 +1301,7 @@ func (c *commitCheck) report(w io.Writer, layout mask.Layout, reported []changer
 	if len(lines) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "git history changed:")
+	fmt.Fprintf(w, "git history changed%s:\n", c.where)
 	for _, line := range lines {
 		fmt.Fprintln(w, "  "+line)
 	}
@@ -1867,25 +1998,22 @@ func offlineRunner(mounts []string, dir string, cmd ...string) (string, error) {
 	return docker.RunOffline(baseImage, os.Getuid(), os.Getgid(), mounts, dir, cmd...)
 }
 
-// writableRunner is offlineRunner with dir, kota's own, mounted writable
-// for the clone.
-func writableRunner(dir string) nohistory.WritableRunner {
-	return func(mounts []string, writable, wd string, cmd ...string) (string, error) {
-		if writable != dir {
-			return "", fmt.Errorf("refusing to mount %s writable", writable)
-		}
-		home, err := os.UserHomeDir()
-		if err != nil {
+// writableRunner is offlineRunner with one writable mount: the copies dir
+// for the clone, the bundle's directory for the export, the original's git
+// dir for the import. Every mount, the writable one too, must pass the
+// --ro path policy.
+func writableRunner(mounts []string, writable, dir string, cmd ...string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	policy := pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT"))
+	for _, m := range append(slices.Clip(mounts), writable) {
+		if err := policy.CheckReadOnly(m); err != nil {
 			return "", err
 		}
-		policy := pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT"))
-		for _, m := range mounts {
-			if err := policy.CheckReadOnly(m); err != nil {
-				return "", err
-			}
-		}
-		return docker.RunOfflineWritable(baseImage, os.Getuid(), os.Getgid(), mounts, writable, wd, cmd...)
 	}
+	return docker.RunOfflineWritable(baseImage, os.Getuid(), os.Getgid(), mounts, writable, dir, cmd...)
 }
 
 func printModels(w io.Writer, c models.Catalog, err error) {

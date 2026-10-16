@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"kota/internal/docker"
 	"kota/internal/hostdata"
@@ -65,75 +67,48 @@ func TestNoHistorySession(t *testing.T) {
 	// in the copy.
 	write(".kotaignore", "config/token.txt\n")
 
-	dirs, err := hostdata.Default()
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := dirs.CopyDirs(project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: stubModelGateway(t), dir: project, shell: true, noHistory: true}
-	var copy string
-	var stateVolumes []string
-	var inside string
-	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
-		copy = sess.project
-		t.Cleanup(func() { os.RemoveAll(copy) })
-		for _, v := range sess.spec.Volumes {
-			if strings.HasPrefix(v.Name, "kota-state-") {
-				stateVolumes = append(stateVolumes, v.Name)
-			}
+	gateway := stubModelGateway(t)
+	t.Cleanup(func() {
+		if available, err := docker.ListVolumes(); err == nil {
+			docker.RemoveVolumes(sandbox.ProjectVolumes(project, available)...)
 		}
-		inside, err = ds.Capture("bash", "-c", `exec 2>&1
-cd /workspace
+	})
+
+	// The agent commits; nothing else is left in the copy.
+	run := noHistorySession(t, project, gateway, `
 echo "COMMITS=$(git rev-list --all --count)"
 echo "REMOTES=$(git remote | wc -l)"
 git log -p --all | grep -v TRACKED-TOKEN
 echo "TOKEN=$(cat config/token.txt)"
 cat .kotaignore
 echo v3 > README.md
-git commit -q -m agent README.md && echo COMMITTED
-echo DONE`)
-		if err != nil {
-			t.Fatalf("%v\n%s", err, inside)
-		}
-	})
-	t.Cleanup(func() {
-		if available, err := docker.ListVolumes(); err == nil {
-			docker.RemoveVolumes(sandbox.ProjectVolumes(project, available)...)
-		}
-	})
-	t.Logf("inside:\n%s", inside)
-
-	if !strings.Contains(inside, "DONE") || !strings.Contains(inside, "COMMITTED") {
-		t.Fatalf("script failed:\n%s", inside)
+echo 'all:' > Makefile
+git add README.md Makefile
+git commit -q -m agent && echo COMMITTED`)
+	if !strings.Contains(run.inside, "COMMITTED") {
+		t.Fatalf("script failed:\n%s", run.inside)
 	}
 	// The tracked token is in HEAD, which git shows (kota warns about it),
 	// but the file reads as empty.
 	for _, want := range []string{"COMMITS=1\n", "REMOTES=0\n", "TOKEN=\n", "config/token.txt\n"} {
-		if !strings.Contains(inside, want) {
+		if !strings.Contains(run.inside, want) {
 			t.Errorf("inside lacks %q", want)
 		}
 	}
 	for _, leak := range []string{"HISTORY-SECRET", "TRACKED-TOKEN", "example.com/app.git", "password"} {
-		if strings.Contains(inside, leak) {
+		if strings.Contains(run.inside, leak) {
 			t.Errorf("the session saw %q", leak)
 		}
 	}
-
-	after, err := dirs.CopyDirs(project)
-	if err != nil {
-		t.Fatal(err)
+	if want := []string{sandbox.StateVolume(project, defaultAgent+sandbox.NoHistoryState)}; !slices.Equal(run.states, want) {
+		t.Errorf("state volumes = %q, want %q", run.states, want)
 	}
-	if !slices.Contains(after, copy) || slices.Contains(before, copy) {
-		t.Errorf("copy %s not kept as a new copy: %q", copy, after)
+	branch := "kota/shell-" + run.start.Format(hostdata.TimeFormat)
+	if got := hostGit(t, project, "rev-parse", branch+"~1"); got != head {
+		t.Errorf("the returned branch builds on %s, want %s", got, head)
 	}
-	if want := []string{sandbox.StateVolume(project, defaultAgent+sandbox.NoHistoryState)}; !slices.Equal(stateVolumes, want) {
-		t.Errorf("state volumes = %q, want %q", stateVolumes, want)
-	}
-	if got := hostGit(t, copy, "rev-parse", "HEAD~1"); got != head {
-		t.Errorf("the agent's commit builds on %s, want %s", got, head)
+	if got := hostGit(t, project, "show", branch+":README.md"); got != "v3" {
+		t.Errorf("README.md on the branch = %q", got)
 	}
 	if got := hostGit(t, project, "rev-parse", "HEAD"); got != head {
 		t.Errorf("the original's HEAD moved to %s", got)
@@ -141,9 +116,83 @@ echo DONE`)
 	if got, _ := os.ReadFile(filepath.Join(project, "README.md")); string(got) != "v2\n" {
 		t.Errorf("the original's README = %q", got)
 	}
-	// Placeholders and seeded files were cleaned up in the copy, and the
-	// project's untracked .kotaignore isn't staged there.
-	if status := hostGit(t, copy, "status", "--porcelain"); status != "" {
-		t.Errorf("copy status after the session:\n%s", status)
+	for _, want := range []string{
+		"returned branch " + branch + " (1 commit(s)",
+		"Makefile  can run code on the host",
+		"the copy was removed",
+	} {
+		if !strings.Contains(run.report, want) {
+			t.Errorf("report lacks %q", want)
+		}
 	}
+	if _, err := os.Stat(run.copy); !os.IsNotExist(err) {
+		t.Errorf("copy %s still there: %v", run.copy, err)
+	}
+
+	// Work left behind: an uncommitted file and another branch keep the copy.
+	run = noHistorySession(t, project, gateway, `
+git switch -q -c wip && git commit -q --allow-empty -m wip && git switch -q -
+echo note > NOTES.txt
+git commit -q --allow-empty -m 'second session' && echo COMMITTED`)
+	if !strings.Contains(run.inside, "COMMITTED") {
+		t.Fatalf("script failed:\n%s", run.inside)
+	}
+	for _, want := range []string{
+		"returned branch kota/shell-" + run.start.Format(hostdata.TimeFormat) + " (1 commit(s)",
+		"not brought back: branch wip",
+		"copy kept at " + run.copy + " (uncommitted changes; branches or tags not brought back)",
+		"?? NOTES.txt",
+	} {
+		if !strings.Contains(run.report, want) {
+			t.Errorf("report lacks %q", want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(run.copy, "NOTES.txt")); err != nil {
+		t.Errorf("kept copy lacks the uncommitted file: %v", err)
+	}
+}
+
+// noHistoryRun is what noHistorySession saw.
+type noHistoryRun struct {
+	inside, report, copy string
+	start                time.Time
+	states               []string
+}
+
+// noHistorySession runs script in /workspace of a shell --no-history
+// session of project, then the return, as cmdOffline does.
+func noHistorySession(t *testing.T, project, gateway, script string) noHistoryRun {
+	t.Helper()
+	var run noHistoryRun
+	var report bytes.Buffer
+	sa := sessionArgs{agent: defaultAgent, gatewayURL: gateway, dir: project, shell: true, noHistory: true}
+	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
+		run.copy = sess.project
+		t.Cleanup(func() { os.RemoveAll(run.copy) })
+		var err error
+		stamp := filepath.Base(run.copy)
+		if run.start, err = time.ParseInLocation(hostdata.TimeFormat, stamp[len(stamp)-len(hostdata.TimeFormat):], time.Local); err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range sess.spec.Volumes {
+			if strings.HasPrefix(v.Name, "kota-state-") {
+				run.states = append(run.states, v.Name)
+			}
+		}
+		commits := startCommitCheck(&report, run.copy)
+		if commits == nil {
+			t.Fatalf("no commit check: %s", report.String())
+		}
+		if run.inside, err = ds.Capture("bash", "-c", "exec 2>&1\ncd /workspace\n"+script); err != nil {
+			t.Fatalf("%v\n%s", err, run.inside)
+		}
+		commits.finish()
+		commits.where = " in the copy"
+		ret := returnWork(sess, commits, returnName(sa, defaultAgent), run.start)
+		commits.report(&report, sess.layout, nil)
+		ret.report(&report)
+	})
+	run.report = report.String()
+	t.Logf("inside:\n%s\nreport:\n%s", run.inside, run.report)
+	return run
 }

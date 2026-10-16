@@ -45,7 +45,7 @@ A throwaway clone of a project's current commit, with no older history, remotes 
 _Avoid_: shallow clone, workspace copy, mirror
 
 **Returned branch**:
-The branch `kota/<agent>-<YYYY-MM-DD-HHMMSS>` that brings the **No-history copy**'s `HEAD` back into the original project after the **Session**. It is never checked out.
+The branch `kota/<agent>-<YYYY-MM-DDTHHMMSS>` that brings the **No-history copy**'s `HEAD` back into the original project after the **Session**. It is never checked out.
 _Avoid_: agent branch, result branch
 
 ## Relationships

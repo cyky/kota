@@ -267,7 +267,7 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 	// full-auto question, which these sessions never answer.
 	paths, key := lease.paths, lease.paths.Project
 	if sa.noHistory {
-		if paths, key, err = offlinePaths(sa, lease, sa.agent, false); err != nil {
+		if paths, key, err = offlinePaths(sa, lease, sa.agent, false, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}

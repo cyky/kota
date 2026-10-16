@@ -117,7 +117,7 @@ None of this changes kota's exit status, and kota never amends, reverts or block
 
 Inside a normal session the agent can read the project's whole git history, including a secret that was committed once and is masked or deleted now. `kota run --no-history [dir]` (or `shell --no-history`) runs the session on a copy of the project's last commit instead: a working git repository with that one commit, and no older commits, remotes, git config, hooks or reflog of the original. The project must be the top of a git repository with at least one commit.
 
-The copy is made by `git clone --depth 1` in a throwaway container of the base image, offline, with the project mounted read-only, so git never runs on the host against the project. It lives in `copies/` in kota's data dir (`~/Library/Caches/kota/copies/<project>-<YYYY-MM-DD-HHMMSS>` on macOS) and must pass the same path rules as a project, with that directory as its allowed root. The session runs on the copy with the usual masks, protections, probes and Engine VM.
+The copy is made by `git clone --depth 1` in a throwaway container of the base image, offline, with the project mounted read-only, so git never runs on the host against the project. It lives in `copies/` in kota's data dir (`~/Library/Caches/kota/copies/<project>-<YYYY-MM-DDTHHMMSS>` on macOS) and must pass the same path rules as a project, with that directory as its allowed root. The session runs on the copy with the usual masks, protections, probes and Engine VM.
 
 The copy holds only what is committed. Before it is made, kota lists what won't be in it, and asks you to type `y`:
 - uncommitted changes (modified, staged, or untracked and not ignored), as the full-auto check lists them. With `--auto` this replaces the full-auto question: the agent works on the copy, so it can't overwrite your changes.
@@ -130,13 +130,11 @@ Everything else belongs to the original project: `.kotaignore`, `kota.yaml` and 
 
 What the copy doesn't hide: the last commit itself, so a secret that is tracked now is still readable through git (kota warns about tracked masked files as usual), and anything the agent learned in an earlier normal session and wrote into the project.
 
-After the session the change report runs on the copy, and the copy is kept: kota prints its path. Commits made there aren't brought back to the project yet. To fetch them by hand:
+After the session, the commits on the copy's `HEAD` are brought back into the project as a branch, `kota/<agent>-<YYYY-MM-DDTHHMMSS>` (`kota/shell-...` after `shell`), named after the session's start. It is never checked out or merged: your working tree and current branch stay as they were, and you review and merge the branch yourself. Only `HEAD` comes back. Other branches and tags made in the copy are listed as not brought back.
 
-```sh
-git -C ~/Projects/app fetch <copy> HEAD:agent-work
-```
+The agent controlled the copy, its git config and hooks included, so the return never runs git on the host, and never runs git in the copy with your repository writable. Two throwaway containers of the base image do it, offline. The first runs `git bundle create` in the copy, mounted read-only, and can write only an empty directory for the bundle. The second fetches the bundle into your repository, with only its git directory writable, without the copy, and with hooks, fsmonitor and automatic gc off. It checks the objects (`transfer.fsckObjects`), and makes the branch only if it descends from the commit the copy was made from, and doesn't exist yet. No branch is made when there are no new commits, or when the agent reset or replaced the history.
 
-That runs git against the copy, whose config the agent could change: look at `<copy>/.git/config` first. `kota clean [dir]` removes the project's kept copies, after listing them.
+The change report lists the copy's branches, tags and commits with the usual warnings. Since the copy's working tree is thrown away, a watched file changed in a commit is always flagged. Then it names the branch, or why there is none. The copy is deleted, unless it has uncommitted changes, branches or tags that weren't brought back, or commits that couldn't be. Then it is kept, and the report gives its path, the reason and the uncommitted changes. git in a kept copy reads config and hooks the agent could write, so look at them before you run git there. `kota clean [dir]` removes the project's kept copies, after listing them.
 
 ## Dependencies
 

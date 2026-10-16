@@ -64,14 +64,16 @@ func (d Dirs) NewSessionDir(project string) (string, error) {
 // Copies holds the No-history copies.
 func (d Dirs) Copies() string { return filepath.Join(d.Root, "copies") }
 
-// copyTime is the timestamp format of a No-history copy's name.
-const copyTime = "2006-01-02-150405"
+// TimeFormat is the timestamp in a No-history copy's name and its Returned
+// branch: the ISO date, then the time without colons, which ref names
+// can't hold.
+const TimeFormat = "2006-01-02T150405"
 
 // CopyDir is where the No-history copy of project for a Session started at
-// start goes, named <project name>-<YYYY-MM-DD-HHMMSS>, as CopyDirs
+// start goes, named <project name>-<YYYY-MM-DDTHHMMSS>, as CopyDirs
 // expects. It isn't created.
 func (d Dirs) CopyDir(project string, start time.Time) string {
-	return filepath.Join(d.Copies(), sandbox.ProjectName(project)+"-"+start.Format(copyTime))
+	return filepath.Join(d.Copies(), sandbox.ProjectName(project)+"-"+start.Format(TimeFormat))
 }
 
 // CopyDirs lists project's kept No-history copies. Under the project's
@@ -81,7 +83,7 @@ func (d Dirs) CopyDirs(project string) ([]string, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("list No-history copies: %w", err)
 	}
-	own := regexp.MustCompile(`^` + regexp.QuoteMeta(sandbox.ProjectName(project)) + `-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$`)
+	own := regexp.MustCompile(`^` + regexp.QuoteMeta(sandbox.ProjectName(project)) + `-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}$`)
 	var dirs []string
 	for _, e := range entries {
 		if own.MatchString(e.Name()) {

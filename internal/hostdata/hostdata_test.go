@@ -94,7 +94,7 @@ func TestProjectData(t *testing.T) {
 	}
 	start := time.Date(2026, 10, 16, 14, 32, 5, 0, time.Local)
 	copyDir := d.CopyDir(project, start)
-	if want := sandbox.ProjectName(project) + "-2026-10-16-143205"; filepath.Base(copyDir) != want {
+	if want := sandbox.ProjectName(project) + "-2026-10-16T143205"; filepath.Base(copyDir) != want {
 		t.Errorf("copy dir = %s, want %s", copyDir, want)
 	}
 	for _, dir := range []string{copyDir, d.CopyDir(project+"-other", start), copyDir + "-other"} {

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"kota/internal/docker"
 )
@@ -178,5 +179,134 @@ func TestInspectFindsWhatTheCopyLacks(t *testing.T) {
 	if !slices.Equal(m.Submodules, []string{"lib/sub"}) || !slices.Equal(m.LFS, []string{"big.bin"}) ||
 		!slices.Equal(m.Changes, []string{" M README"}) {
 		t.Errorf("missing = %+v", m)
+	}
+}
+
+// settle waits out Docker's file sharing cache. A file host git replaced
+// (by renaming a new one over it) shortly after a container read it can
+// read as missing or broken in the next container for a moment.
+func settle() { time.Sleep(2 * time.Second) }
+
+// returnSetup makes a project with one commit, its copy, and a bundle dir.
+func returnSetup(t *testing.T) (project, dest, base, bundle string) {
+	t.Helper()
+	project = filepath.Join(cacheDir(t), "app")
+	if err := os.Mkdir(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, project, "init", "-q", "-b", "main")
+	os.WriteFile(filepath.Join(project, "README"), []byte("v1\n"), 0o644)
+	git(t, project, "add", ".")
+	git(t, project, "commit", "-q", "-m", "start")
+	base = git(t, project, "rev-parse", "HEAD")
+	dest = filepath.Join(cacheDir(t), "copy")
+	if err := Clone(project, dest, dockerWritable); err != nil {
+		t.Fatal(err)
+	}
+	out := cacheDir(t)
+	return project, dest, base, filepath.Join(out, "return.bundle")
+}
+
+func TestReturnBringsHeadBack(t *testing.T) {
+	needDocker(t)
+	project, dest, base, bundle := returnSetup(t)
+	// Markers in the two writable mounts: the bundle's directory during the
+	// export, the original's git dir during the import.
+	markers := []string{filepath.Join(filepath.Dir(bundle), "ran"), filepath.Join(project, ".git", "ran")}
+	touch := "touch " + markers[0] + " " + markers[1] + " 2>/dev/null; true"
+	// The agent's work, plus config and hooks it planted in the copy.
+	os.WriteFile(filepath.Join(dest, "README"), []byte("v2\n"), 0o644)
+	git(t, dest, "commit", "-q", "-am", "agent one")
+	os.WriteFile(filepath.Join(dest, "NEW"), []byte("x\n"), 0o644)
+	git(t, dest, "add", "NEW")
+	git(t, dest, "commit", "-q", "-m", "agent two")
+	head := git(t, dest, "rev-parse", "HEAD")
+	hook := "#!/bin/sh\n" + touch + "\n"
+	os.MkdirAll(filepath.Join(dest, ".git", "hooks"), 0o755)
+	for _, name := range []string{"reference-transaction", "pre-push", "post-checkout"} {
+		os.WriteFile(filepath.Join(dest, ".git", "hooks", name), []byte(hook), 0o755)
+	}
+	git(t, dest, "config", "core.fsmonitor", touch)
+	git(t, dest, "config", "uploadpack.packObjectsHook", touch+";")
+	// A hook in the original runs on ref updates; the import turns hooks off.
+	os.WriteFile(filepath.Join(project, ".git", "hooks", "reference-transaction"), []byte(hook), 0o755)
+	userBranch := git(t, project, "symbolic-ref", "HEAD")
+
+	settle()
+	if err := Export(dest, base, bundle, dockerWritable); err != nil {
+		t.Fatal(err)
+	}
+	branch := BranchName("pi", time.Date(2026, 10, 16, 14, 32, 5, 0, time.Local))
+	got, err := Import(project, bundle, base, branch, dockerWritable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Commit != head || got.Commits != 2 || got.Branch != branch || git(t, project, "rev-parse", branch) != head {
+		t.Errorf("returned %+v, branch at %s; want %s with 2 commits", got, git(t, project, "rev-parse", branch), head)
+	}
+	if n := git(t, project, "rev-list", "--count", base+".."+branch); n != "2" {
+		t.Errorf("branch has %s new commits, want 2", n)
+	}
+	if refs := git(t, project, "for-each-ref", "--format=%(refname)", "refs/kota-incoming"); refs != "" {
+		t.Errorf("incoming ref left: %s", refs)
+	}
+	if git(t, project, "symbolic-ref", "HEAD") != userBranch || git(t, project, "rev-parse", "HEAD") != base {
+		t.Error("the original's current branch changed")
+	}
+	if b, _ := os.ReadFile(filepath.Join(project, "README")); string(b) != "v1\n" {
+		t.Errorf("the original's working tree changed: README = %q", b)
+	}
+	for _, m := range markers {
+		if _, err := os.Stat(m); err == nil {
+			t.Errorf("a planted hook or config command ran (%s)", m)
+		}
+	}
+
+	// The same name again: the branch isn't replaced.
+	if _, err := Import(project, bundle, base, branch, dockerWritable); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("second import: %v", err)
+	}
+
+	// Control: host git runs the original's hook on a ref update, so the
+	// hook above is a real one.
+	git(t, project, "update-ref", "refs/heads/control", "HEAD")
+	if _, err := os.Stat(markers[1]); err != nil {
+		t.Errorf("control: the planted hook didn't run under host git: %v", err)
+	}
+}
+
+func TestReturnRefusesRewrittenHistory(t *testing.T) {
+	needDocker(t)
+	project, dest, base, bundle := returnSetup(t)
+	// The agent replaced the history with a new root.
+	git(t, dest, "checkout", "-q", "--orphan", "fresh")
+	git(t, dest, "commit", "-q", "-m", "new root")
+	settle()
+	if err := Export(dest, base, bundle, dockerWritable); err != nil {
+		t.Fatal(err)
+	}
+	branch := BranchName("pi", time.Now())
+	if _, err := Import(project, bundle, base, branch, dockerWritable); err != ErrRewritten {
+		t.Errorf("import = %v, want ErrRewritten", err)
+	}
+	if refs := git(t, project, "for-each-ref", "--format=%(refname)", "refs/kota-incoming", "refs/heads/kota"); refs != "" {
+		t.Errorf("refs left: %s", refs)
+	}
+}
+
+func TestUncommittedInCopy(t *testing.T) {
+	needDocker(t)
+	_, dest, _, _ := returnSetup(t)
+	excludes := filepath.Join(cacheDir(t), "git-excludes")
+	os.WriteFile(excludes, []byte("/.envrc\n"), 0o444)
+	os.WriteFile(filepath.Join(dest, ".envrc"), nil, 0o644) // a placeholder
+	os.WriteFile(filepath.Join(dest, "kota.yaml"), []byte("{}\n"), 0o644)
+	os.WriteFile(filepath.Join(dest, "README"), []byte("changed\n"), 0o644)
+	got, err := Uncommitted(dest, excludes, dockerRunner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{" M README"}; !slices.Equal(got, want) {
+		t.Errorf("uncommitted = %q, want %q", got, want)
 	}
 }
