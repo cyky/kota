@@ -67,7 +67,7 @@ pi has no permission system: it always edits files and runs commands without ask
 Models come from the gateway. At launch, `run` reads `/v1/models` through the sandbox's forwarder, so a model added to llama-swap shows up in the agent without editing anything. `assets/models.yaml` adds what llama-swap doesn't report:
 - the context window, maximum output and tool-call support per model;
 - `agent: false` to hide a model (`zeta2.1`, a completion model);
-- the default model (`qwen3.8-27b`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`). pi has no small model.
+- the default model (`qwen3.6-coder`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`). pi has no small model.
 
 Models not listed there get conservative values from its `unknown` entry. `--model ID` picks another default for one session; an ID the gateway doesn't serve, or a hidden one, is refused with the list of available models. `kota check` shows the resolved list. The generated config is written per session and mounted read-only.
 

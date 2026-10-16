@@ -159,7 +159,7 @@ func TestInterruptDuringProbes(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	probing := filepath.Join(t.TempDir(), "probing")
 	calls := fakeDocker(t, `case "$*" in
-  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.8-27b"}]}' ;;
+  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
   *'run --rm -T agent'*) touch `+probing+`; exec sleep 30 ;;
 esac`)
 	cmd, output := startKota(t, "run", project)
@@ -190,7 +190,7 @@ func TestInterruptDuringCommand(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	t.Setenv("TEST_PROJECT", project)
 	calls := fakeDocker(t, `case "$*" in
-  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.8-27b"}]}' ;;
+  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
   *'run --rm agent'*) echo 'all:' > "$TEST_PROJECT/Makefile"; exec sleep 30 ;;
 esac`)
 	cmd, output := startKota(t, "run", "--unsafe-skip-check", project, "--", "make")

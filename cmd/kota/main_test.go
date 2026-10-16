@@ -642,7 +642,7 @@ func TestShellRefusesFailedProbes(t *testing.T) {
 	// Missing probes must prevent the interactive container from starting.
 	script := `#!/bin/sh
 case "$*" in
-  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.8-27b"},{"id":"qwen3.5-2b-instruct"}]}' ;;
+  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"},{"id":"qwen3.5-2b-instruct"}]}' ;;
   *'run --rm agent') touch "$TEST_SHELL_ENTERED" ;;
 esac
 `
@@ -854,7 +854,7 @@ func TestRunContinuesAfterModelWarningFailure(t *testing.T) {
 	t.Setenv("TEST_RUN_ENTERED", entered)
 	script := `#!/bin/sh
 case "$*" in
-  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.8-27b"}]}' ;;
+  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
   *'run --rm agent') touch "$TEST_RUN_ENTERED" ;;
 esac
 `

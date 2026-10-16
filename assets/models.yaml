@@ -8,7 +8,7 @@
 #   tools    whether the model handles tool calls
 #   agent    false hides the model from agents (completion-only models)
 
-default: qwen3.8-27b
+default: qwen3.6-coder
 small: qwen3.5-2b-instruct
 
 # Conservative values for models not listed below.

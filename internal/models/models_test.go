@@ -165,7 +165,7 @@ func TestShippedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Default != "qwen3.8-27b" || c.Small != "qwen3.5-2b-instruct" {
+	if c.Default != "qwen3.6-coder" || c.Small != "qwen3.5-2b-instruct" {
 		t.Errorf("default = %q, small = %q", c.Default, c.Small)
 	}
 	for _, m := range c.Models {
