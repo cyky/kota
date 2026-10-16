@@ -36,6 +36,10 @@ _Avoid_: engine image (that's an **Engine image**), template
 A container image a project declares in `kota.yaml` for its **Engine VM**, downloaded during **Prep** outside the **Engine VM** and loaded into it, because the **Engine VM** never has a route out.
 _Avoid_: test image, service image
 
+**Change report**:
+What kota prints after a command that ran project code in a container (`run`, `shell`, `prep`): watched files the command changed in the working tree, and branches, tags and commits it created or changed, with warnings for commits that touch masked, placeholder or globally ignored paths, or hide changes to watched files.
+_Avoid_: diff, summary, session report
+
 ## Relationships
 
 - A **Session** runs in exactly one **Sandbox**, for exactly one project
@@ -48,6 +52,7 @@ _Avoid_: test image, service image
 - A project has an **Engine VM** only if it declares **Engine images**; other projects' **Sessions** never start one
 - If a project's **Engine VM** can't start or fails a probe, its **Session** refuses to start, unless the user explicitly starts it without the engine. The agent is then told that container **Gates** can't run
 - A **Gate** can only use **Engine images** the project declares; an undeclared image fails in the **Session** instead of being downloaded
+- A **Change report** never runs git on the host. Commits are read in an offline container
 
 ## Example dialogue
 
