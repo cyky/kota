@@ -91,7 +91,7 @@ flowchart TD
     report --> release(["release the lease"])
 ```
 
-Without an `engine:` section the Engine VM steps are skipped. With `--no-engine` they're skipped too, and the agent is told its container **Gates** can't run. Ctrl-C at any step leads to the same teardown.
+The order from "Start the Engine VM" to the probes, and the teardown on any failure or signal, is in `internal/lifecycle`, shared by `run`, `shell` and `check`. Without an `engine:` section the Engine VM steps are skipped. With `--no-engine` they're skipped too, and the agent is told its container **Gates** can't run. Ctrl-C at any step leads to the same teardown.
 
 ## `prep`
 
@@ -150,6 +150,7 @@ flowchart TD
     end
 
     subgraph runtime["Runtime"]
+        lifecycle["lifecycle<br/>start and stop order,<br/>teardown on failure or signal"]
         docker["docker<br/>Docker CLI adapter"]
         sessionregistry["sessionregistry<br/>per-project lease"]
         interrupt["interrupt<br/>signals"]
@@ -165,6 +166,7 @@ flowchart TD
     docker --> sandbox & interrupt
     enginevm --> engine & interrupt
     enginesession --> engine & enginevm & check & docker
+    lifecycle --> interrupt
 ```
 
 ## Where data lives

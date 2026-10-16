@@ -32,6 +32,7 @@ import (
 	"localllm/internal/enginevm"
 	"localllm/internal/gatewaykey"
 	"localllm/internal/interrupt"
+	"localllm/internal/lifecycle"
 	"localllm/internal/mask"
 	"localllm/internal/models"
 	"localllm/internal/opencode"
@@ -891,119 +892,82 @@ func runSession(sess *session, lease *sessionregistry.Lease, model string, auto,
 }
 
 // startSession starts and verifies the sandbox and the Engine VM, if the
-// session has one, up to where the agent or shell runs. stop tears both
-// down; on an error, nothing is left running.
-func startSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) (ds *docker.Session, stop func(), err error) {
-	var stops []func()
-	teardown := func() {
-		for _, f := range slices.Backward(stops) {
-			f()
-		}
-	}
-	defer func() {
-		if err != nil {
-			teardown()
-		}
-	}()
+// session has one, up to where the agent or shell runs, in lifecycle's
+// order. stop tears both down; on an error, nothing is left running.
+func startSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) (*docker.Session, func(), error) {
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'localllm check' to list them\n", n)
 	}
-
-	// The Engine VM boots while the sandbox starts, and stops after the
-	// sandbox's containers are gone.
-	if sess.engine != nil {
-		if err := sess.engine.Start(); err != nil {
-			return nil, nil, err
+	var catalog models.Catalog
+	st := sess.startup(os.Stderr)
+	st.Configure = func(ds *docker.Session) error {
+		printEmptyDeps(os.Stderr, sess, ds.EmptyDeps())
+		var err error
+		catalog, err = sess.configure(ds, model, auto)
+		return err
+	}
+	st.Verify = func(ds *docker.Session) error {
+		if !sess.shell {
+			clashes, err := lease.SetModel(catalog.Default)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "WARNING: could not check for model clashes:", err)
+			} else {
+				printModelClashes(os.Stderr, catalog.Default, clashes)
+			}
 		}
-		stops = append(stops, sess.engine.Stop)
-	}
-	ds, err = docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	stops = append(stops, ds.Close)
-	if sess.engine != nil {
-		// Teardown runs stops last to first, so this disarms the watch
-		// before the sandbox and the VM go.
-		closing := make(chan struct{})
-		stops = append(stops, func() { close(closing) })
-		go watchEngine(sess.engine.Done(), closing, ds)
-	}
-	printEmptyDeps(os.Stderr, sess, ds.EmptyDeps())
-
-	catalog, err := sess.configure(ds, model, auto)
-	if err != nil {
-		return nil, nil, err
-	}
-	if sess.engine != nil {
-		if err := sess.engine.Ready(os.Stderr); err != nil {
-			return nil, nil, err
+		for _, n := range catalog.Notes {
+			fmt.Fprintln(os.Stderr, "note:", n)
 		}
-	}
-	if !sess.shell {
-		clashes, err := lease.SetModel(catalog.Default)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "WARNING: could not check for model clashes:", err)
+		fmt.Fprintf(os.Stderr, "model: %s (%d offered)\n", catalog.Default, len(catalog.Models))
+		if sess.shell {
+			fmt.Fprintln(os.Stderr, "starting an interactive Bash shell (no agent)")
 		} else {
-			printModelClashes(os.Stderr, catalog.Default, clashes)
+			fmt.Fprintln(os.Stderr, "approval:", sess.agent.approval(auto))
 		}
-	}
-	for _, n := range catalog.Notes {
-		fmt.Fprintln(os.Stderr, "note:", n)
-	}
-	fmt.Fprintf(os.Stderr, "model: %s (%d offered)\n", catalog.Default, len(catalog.Models))
-	if sess.shell {
-		fmt.Fprintln(os.Stderr, "starting an interactive Bash shell (no agent)")
-	} else {
-		fmt.Fprintln(os.Stderr, "approval:", sess.agent.approval(auto))
-	}
-
-	if skipCheck {
-		fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
-	} else {
+		if skipCheck {
+			fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
+			return nil
+		}
 		results, err := check.Run(ds, sess.gateway, sess.mounts)
 		if err != nil {
-			return nil, nil, fmt.Errorf("containment probes: %w", err)
+			return fmt.Errorf("containment probes: %w", err)
 		}
 		if failed := probe.Failed(results); len(failed) > 0 {
 			printResults(os.Stderr, failed)
-			return nil, nil, fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'localllm check' for details)", len(failed), len(results))
+			return fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'localllm check' for details)", len(failed), len(results))
 		}
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
-		if sess.engine != nil {
-			results, err := sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
-			if err != nil {
-				return nil, nil, fmt.Errorf("Engine VM probes: %w", err)
-			}
-			if failed := probe.Failed(results); len(failed) > 0 {
-				printResults(os.Stderr, failed)
-				return nil, nil, fmt.Errorf("refusing to start: %d of %d Engine VM probes failed (run 'localllm check' for details)", len(failed), len(results))
-			}
-			fmt.Fprintf(os.Stderr, "Engine VM containment verified: %d probes passed\n", len(results))
+		if sess.engine == nil {
+			return nil
 		}
+		results, err = sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
+		if err != nil {
+			return fmt.Errorf("Engine VM probes: %w", err)
+		}
+		if failed := probe.Failed(results); len(failed) > 0 {
+			printResults(os.Stderr, failed)
+			return fmt.Errorf("refusing to start: %d of %d Engine VM probes failed (run 'localllm check' for details)", len(failed), len(results))
+		}
+		fmt.Fprintf(os.Stderr, "Engine VM containment verified: %d probes passed\n", len(results))
+		return nil
 	}
-	// A probe cut short by a signal may still have produced output.
-	if err := interrupt.Err(); err != nil {
-		return nil, nil, err
-	}
-	return ds, teardown, nil
+	return st.Start()
 }
 
-// watchEngine kills the engine forwarder when the Engine VM exits during
-// the session, e.g. because the agent powered it off as root inside it.
-// QEMU's host ports are free then, and the forwarder would relay the agent
-// to whatever binds them next, such as another project's Engine VM.
-func watchEngine(vmDone, closing <-chan struct{}, ds *docker.Session) {
-	select {
-	case <-closing:
-		return
-	case <-vmDone:
+// startup is how sess starts: its Engine VM, if any, and its sandbox. The
+// caller adds the Configure and Verify steps.
+func (s *session) startup(out io.Writer) lifecycle.Startup[*docker.Session] {
+	st := lifecycle.Startup[*docker.Session]{
+		EngineService: sandbox.EngineService,
+		StartSandbox:  func() (*docker.Session, error) { return docker.Start(s.spec, s.sessionDir, s.gatewayKey) },
+		Out:           out,
 	}
-	fmt.Fprintln(os.Stderr, "\r\nWARNING: the Engine VM stopped; its route is closed for the rest of the session")
-	if err := ds.Kill(sandbox.EngineService); err != nil {
-		fmt.Fprintln(os.Stderr, "WARNING:", err)
+	// Only a non-nil Engine VM, so the interface isn't a typed nil.
+	if s.engine != nil {
+		st.Engine = s.engine
 	}
+	return st
 }
 
 func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Session) {
@@ -1058,43 +1022,36 @@ func cmdCheck(args []string) error {
 	sess.printWarnings(os.Stdout)
 	engineErr := printEngine(os.Stdout, sess)
 
+	// check reports what it finds instead of stopping at the first problem:
+	// a gateway problem is also reported by the gateway probe, and the
+	// sandbox probes run when the Engine VM can't start.
+	var modelErr error
+	var failed, engineFailed []probe.Result
+	st := sess.startup(os.Stdout)
 	if sess.engine != nil {
-		if err := sess.engine.Start(); err != nil {
-			return err
-		}
-		defer sess.engine.Stop()
+		st.Engine = &reportedEngine{Engine: sess.engine, failed: &engineErr}
 	}
-	ds, err := docker.Start(sess.spec, sess.sessionDir, sess.gatewayKey)
-	if err != nil {
-		return err
+	st.Configure = func(ds *docker.Session) error {
+		printEmptyDeps(os.Stdout, sess, ds.EmptyDeps())
+		var catalog models.Catalog
+		catalog, modelErr = sess.configure(ds, sa.model, false)
+		printModels(os.Stdout, catalog, modelErr)
+		return nil
 	}
-	defer ds.Close()
-	printEmptyDeps(os.Stdout, sess, ds.EmptyDeps())
-
-	// A gateway problem is reported here and by the gateway probe; the
-	// other probes still run.
-	catalog, modelErr := sess.configure(ds, sa.model, false)
-	printModels(os.Stdout, catalog, modelErr)
-	if sess.engine != nil {
-		if err := sess.engine.Ready(os.Stdout); err != nil {
-			fmt.Printf("engine status: can't start: %v\n\n", err)
-			engineErr = errors.New("the Engine VM can't start")
-		}
-	}
-
-	start := time.Now()
-	results, err := check.Run(ds, sess.gateway, sess.mounts)
-	if err != nil {
-		return fmt.Errorf("containment probes: %w", err)
-	}
-	fmt.Println("\nprobes:")
-	printResults(os.Stdout, results)
-	failed := probe.Failed(results)
-	fmt.Printf("\n%d passed, %d failed (%s)\n", len(results)-len(failed), len(failed), time.Since(start).Round(10*time.Millisecond))
-
-	var engineFailed []probe.Result
-	if sess.engine != nil && engineErr == nil {
+	st.Verify = func(ds *docker.Session) error {
 		start := time.Now()
+		results, err := check.Run(ds, sess.gateway, sess.mounts)
+		if err != nil {
+			return fmt.Errorf("containment probes: %w", err)
+		}
+		fmt.Println("\nprobes:")
+		printResults(os.Stdout, results)
+		failed = probe.Failed(results)
+		fmt.Printf("\n%d passed, %d failed (%s)\n", len(results)-len(failed), len(failed), time.Since(start).Round(10*time.Millisecond))
+		if sess.engine == nil || engineErr != nil {
+			return nil
+		}
+		start = time.Now()
 		engineResults, err := sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
 		if err != nil {
 			return fmt.Errorf("Engine VM probes: %w", err)
@@ -1103,7 +1060,13 @@ func cmdCheck(args []string) error {
 		printResults(os.Stdout, engineResults)
 		engineFailed = probe.Failed(engineResults)
 		fmt.Printf("\n%d passed, %d failed (%s)\n", len(engineResults)-len(engineFailed), len(engineFailed), time.Since(start).Round(10*time.Millisecond))
+		return nil
 	}
+	_, stop, err := st.Start()
+	if err != nil {
+		return err
+	}
+	stop()
 	switch {
 	case len(failed) > 0:
 		return errors.New("sandbox is not contained")
@@ -1113,6 +1076,21 @@ func cmdCheck(args []string) error {
 		return engineErr
 	}
 	return modelErr
+}
+
+// reportedEngine is check's Engine VM: one that doesn't get ready is
+// reported, and recorded in failed, instead of stopping the check.
+type reportedEngine struct {
+	*enginesession.Engine
+	failed *error
+}
+
+func (e *reportedEngine) Ready(w io.Writer) error {
+	if err := e.Engine.Ready(w); err != nil {
+		fmt.Fprintf(w, "engine status: can't start: %v\n\n", err)
+		*e.failed = errors.New("the Engine VM can't start")
+	}
+	return nil
 }
 
 // printEngine shows the project's Engine VM: none, or its declared images
