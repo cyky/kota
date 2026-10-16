@@ -1663,7 +1663,13 @@ func printMasks(w io.Writer, layout mask.Layout) {
 	fmt.Fprintln(w)
 }
 
+// printResults prints one row per probe. The name column is as wide as the
+// longest name, so the columns after it line up.
 func printResults(w io.Writer, results []probe.Result) {
+	width := 0
+	for _, r := range results {
+		width = max(width, len(r.Name))
+	}
 	for _, r := range results {
 		status := "PASS"
 		if !r.Passed() {
@@ -1677,7 +1683,7 @@ func printResults(w io.Writer, results []probe.Result) {
 		if r.Missing {
 			outcome = "no result"
 		}
-		fmt.Fprintf(w, "  %s  %-34s %-13s %s\n", status, r.Name, want, outcome)
+		fmt.Fprintf(w, "  %s  %-*s %-13s %s\n", status, width, r.Name, want, outcome)
 	}
 }
 

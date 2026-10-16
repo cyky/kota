@@ -221,7 +221,10 @@ func Start(spec sandbox.Compose, sessionDir, gatewayKey string) (*Session, error
 	if err := os.WriteFile(file, data, 0o600); err != nil {
 		return nil, err
 	}
-	s := &Session{spec: spec, compose: []string{"compose", "-f", file, "-p", spec.Name}, env: os.Environ()}
+	// Quiet progress: on a terminal, compose redraws its progress display
+	// without clearing lines, which leaves garbled lines such as
+	// "[+]  1/1t 1/1". Errors and container output still come through.
+	s := &Session{spec: spec, compose: []string{"compose", "--progress", "quiet", "-f", file, "-p", spec.Name}, env: os.Environ()}
 	if gatewayKey != "" {
 		s.env = append(s.env, sandbox.GatewayKeyEnv+"="+gatewayKey)
 		s.gatewayKey = true

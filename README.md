@@ -106,7 +106,7 @@ Other files that run things can't be locked without breaking normal work, so `ru
 
 ## Dependencies
 
-`run` is offline, so dependencies are installed beforehand with `kota prep [dir]`. It runs in the same image, with the same masks and read-only `.git/hooks`, `.git/config`, `.envrc` and `kota.yaml` as `run`, but on a normal network so registries are reachable, and without an agent, the forwarder or the gateway key. Run it again after changing a manifest. When the agent needs a new dependency, add it to the manifest on the host and re-run `prep`.
+`run` is offline, so dependencies are installed beforehand with `kota prep [dir]`. It runs in the same image, with the same masks and read-only `.git/hooks`, `.git/config`, `.envrc` and `kota.yaml` as `run`, but on a normal network so registries are reachable, and without an agent, the forwarder or the gateway key. Run it again after changing a manifest. When the agent needs a new dependency, add it to the manifest on the host and re-run `prep`. If a step fails, its output is followed by a line naming the step, its command and exit status, e.g. `kota: install step npm failed (exit 1): npm ci`.
 
 What it runs is detected from the project root:
 - `package.json`: pnpm, yarn or npm, chosen by the `packageManager` field, else by lockfile (`pnpm-lock.yaml`, `yarn.lock`, otherwise npm). pnpm and yarn come from corepack. `packageManager` must be a plain version (`pnpm@10.0.0`, optionally `+sha512.…`), not a URL. With a lockfile, the install is frozen (`pnpm install --offline --frozen-lockfile`, `yarn install --frozen-lockfile` or `--immutable`, `npm ci`).

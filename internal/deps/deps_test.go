@@ -3,6 +3,7 @@ package deps
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -370,10 +371,44 @@ func TestScripts(t *testing.T) {
 	if !strings.HasPrefix(s, "set -e\n") || !strings.Contains(s, "echo 'x'\n") || !strings.Contains(s, `'==> a: echo '\''x'\'''`) || strings.Contains(s, "\nf\n") {
 		t.Errorf("script = %q", s)
 	}
-	if f := plan.FetchScript(); f != "set -e\necho '==> b: f'\nf\n" {
+	if f := plan.FetchScript(); !strings.HasPrefix(f, "set -e\n") || !strings.Contains(f, "echo '==> b: f'\nf\n") || strings.Contains(f, "echo 'x'\n") {
 		t.Errorf("fetch script = %q", f)
 	}
 	if s := (Plan{Steps: []Step{{Name: "go", Fetch: "x"}}}).Script(); s != "" {
 		t.Errorf("empty install script = %q", s)
+	}
+}
+
+// TestScriptFailureSummary runs an install script whose second step fails
+// part way through, and checks that it stops there and ends with a line
+// naming the step, its command and the exit status.
+func TestScriptFailureSummary(t *testing.T) {
+	plan := Plan{Steps: []Step{
+		{Name: "a", Script: "echo a-ran"},
+		{Name: "b", Script: "echo b-ran\n(exit 3)\necho b-continued"},
+		{Name: "c", Script: "echo c-ran"},
+	}}
+	var stdout, stderr strings.Builder
+	cmd := exec.Command("sh", "-c", plan.Script())
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("err = %v, want exit status 3", err)
+	}
+	if out := stdout.String(); !strings.Contains(out, "\nb-ran\n") || strings.Contains(out, "\nb-continued\n") || strings.Contains(out, "c-ran") {
+		t.Errorf("stdout = %q", out)
+	}
+	want := "kota: install step b failed (exit 3): echo b-ran; (exit 3); echo b-continued\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	cmd = exec.Command("sh", "-c", Plan{Steps: []Step{{Name: "a", Script: "true"}}}.Script())
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil || stderr.Len() != 0 {
+		t.Errorf("passing script: err = %v, stderr = %q", err, stderr.String())
 	}
 }

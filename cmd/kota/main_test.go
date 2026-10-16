@@ -18,6 +18,7 @@ import (
 	"kota/internal/opencode"
 	"kota/internal/pi"
 	"kota/internal/prepgate"
+	"kota/internal/probe"
 	"kota/internal/projectimage"
 	"kota/internal/sandbox"
 	"kota/internal/sessionregistry"
@@ -881,5 +882,43 @@ esac
 	}
 	if !strings.Contains(string(data), "WARNING: could not check for model clashes:") {
 		t.Errorf("missing model scan warning: %s", data)
+	}
+}
+
+// TestPrintResultsAligned checks that the expectation column starts at the
+// same place on every row, for the longest current probe names.
+func TestPrintResultsAligned(t *testing.T) {
+	probes := probe.Suite(probe.Targets{
+		GatewayURL:  "http://gateway:8080",
+		GatewayHost: "gateway",
+		GatewayPort: 8080,
+		HostAddrs:   []string{"192.168.5.2"},
+		HostPorts:   []int{8080},
+		Workspace:   "/workspace",
+		ReadOnly:    []string{"/workspace/.kotaignore", "/etc/kota/opencode.json"},
+		Masked:      []string{"/workspace/.env"},
+		State:       "/home/agent/.local/share/opencode",
+	})
+	var results []probe.Result
+	for _, p := range probes {
+		results = append(results, probe.Result{Probe: p, ExitCode: 1})
+	}
+	var out strings.Builder
+	printResults(&out, results)
+	col := -1
+	for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
+		i := strings.Index(line, " must ")
+		if i < 0 {
+			t.Fatalf("no expectation column in %q", line)
+		}
+		if col < 0 {
+			col = i
+		} else if i != col {
+			t.Errorf("expectation column at %d, want %d:\n%s", i, col, out.String())
+			break
+		}
+	}
+	if !strings.Contains(out.String(), "internet [2606:4700:4700::1111]:443") {
+		t.Errorf("long probe name missing from output:\n%s", out.String())
 	}
 }

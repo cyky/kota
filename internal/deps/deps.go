@@ -647,26 +647,31 @@ func walkSkipping(project string, skip []string, fn func(rel string, names []str
 // FetchScript returns the shell script that runs every fetch command in
 // order and stops at the first failure, or "" when there is none.
 func (p Plan) FetchScript() string {
-	return script(p.Steps, func(s Step) string { return s.Fetch })
+	return script(p.Steps, "fetch", func(s Step) string { return s.Fetch })
 }
 
 // Script returns the shell script that runs every install command in order
 // and stops at the first failure, or "" when there is none.
 func (p Plan) Script() string {
-	return script(p.Steps, func(s Step) string { return s.Script })
+	return script(p.Steps, "install", func(s Step) string { return s.Script })
 }
 
-func script(steps []Step, cmd func(Step) string) string {
+// failTrap ends a failed script with a line naming the step that was
+// running, so it isn't buried under the package manager's output.
+const failTrap = `trap 's=$?; if [ "$s" -ne 0 ] && [ -n "$kota_step" ]; then printf '\''kota: %s failed (exit %s): %s\n'\'' "$kota_step" "$s" "$kota_cmd" >&2; fi' EXIT` + "\n"
+
+func script(steps []Step, kind string, cmd func(Step) string) string {
 	var b strings.Builder
 	for _, s := range steps {
 		if c := cmd(s); c != "" {
+			fmt.Fprintf(&b, "kota_step=%s kota_cmd=%s\n", shellQuote(kind+" step "+s.Name), shellQuote(strings.ReplaceAll(c, "\n", "; ")))
 			fmt.Fprintf(&b, "echo %s\n%s\n", shellQuote("==> "+s.Name+": "+c), c)
 		}
 	}
 	if b.Len() == 0 {
 		return ""
 	}
-	return "set -e\n" + b.String()
+	return "set -e\n" + failTrap + b.String()
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
