@@ -650,12 +650,18 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 	if err == nil {
 		err = layout.Prepare(project)
 	}
+	excludes := filepath.Join(sessionDir, "git-excludes")
+	if err == nil {
+		err = os.WriteFile(excludes, []byte(layout.Excludes()), 0o444)
+	}
 	if err != nil {
 		sess.cleanup()
 		return nil, err
 	}
+	cfgMounts = append(cfgMounts, sandbox.Mount{Source: excludes, Target: sandbox.GitExcludes})
 	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
 	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, readOnlyTargets...)
+	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, sandbox.GitExcludes)
 	if !prep {
 		sess.mounts.State = sandbox.StateDir
 	}
@@ -731,9 +737,10 @@ func missingDirs(project, rel string) []string {
 // gitEnv lets git work inside the sandbox without writing config there:
 // files on the shared mount can appear owned by another user, and commits
 // need the host identity. GIT_CONFIG_* is command-line scope, which git
-// trusts for safe.directory.
+// trusts for safe.directory. The excludes file keeps placeholders and masks
+// out of git add; the host's own global excludes aren't passed in.
 func gitEnv(project string) map[string]string {
-	settings := [][2]string{{"safe.directory", "*"}}
+	settings := [][2]string{{"safe.directory", "*"}, {"core.excludesFile", sandbox.GitExcludes}}
 	for _, key := range []string{"user.name", "user.email"} {
 		out, err := exec.Command("git", "-C", project, "config", "--get", key).Output()
 		if v := strings.TrimSpace(string(out)); err == nil && v != "" {
@@ -876,9 +883,12 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
+	commits := startCommitCheck(os.Stderr, sess.project)
 	err = runSession(sess, lease.Lease, sa.model, auto, skipCheck)
+	commits.finish()
 	sess.cleanup()
-	reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
+	reported := reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
+	commits.report(os.Stderr, sess.layout, reported)
 	return err
 }
 
@@ -980,21 +990,170 @@ func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Sess
 }
 
 // reportChanges warns about watched files, and the files in watch, that the
-// session added, modified or deleted.
-func reportChanges(w io.Writer, project string, watch []string, before changereport.Files) {
+// session added, modified or deleted, and returns them.
+func reportChanges(w io.Writer, project string, watch []string, before changereport.Files) []changereport.Change {
 	after, err := changereport.SnapshotWith(project, watch)
 	if err != nil {
 		fmt.Fprintf(w, "WARNING: could not check for changed files that run things: %v\n", err)
-		return
+		return nil
 	}
 	changes := changereport.Diff(before, after)
 	if len(changes) == 0 {
-		return
+		return nil
 	}
 	fmt.Fprintf(w, "WARNING: the session changed %d file(s) that can run code on the host. Review them before building, installing or opening the project in an editor:\n", len(changes))
 	for _, line := range changereport.Warnings(changes) {
 		fmt.Fprintln(w, "  "+line)
 	}
+	return changes
+}
+
+// commitCheck is a project's git refs, recorded before a command runs
+// project code in a container, to report the commits made while it ran.
+type commitCheck struct {
+	project string
+	before  changereport.Refs
+	// after, history and err are set by finish.
+	after   changereport.Refs
+	history changereport.History
+	err     error
+}
+
+// startCommitCheck records the refs of project. It returns nil for a
+// project git can't work in from inside the container, and after a warning
+// when the refs can't be read: the command still runs.
+func startCommitCheck(w io.Writer, project string) *commitCheck {
+	refs, ok, err := changereport.ReadRefs(project, offlineRunner)
+	if err != nil {
+		fmt.Fprintf(w, "WARNING: could not record git refs, so commits made while it runs won't be checked: %v\n", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return &commitCheck{project: project, before: refs}
+}
+
+// finish reads the refs and the commits made since c was started. It runs
+// once the containers are gone but before the session's cleanup: git needs
+// the seeded files in .git, and Docker Desktop's file sharing can still
+// show a removed file as present.
+func (c *commitCheck) finish() {
+	if c == nil {
+		return
+	}
+	c.after, _, c.err = changereport.ReadRefs(c.project, offlineRunner)
+	if c.err == nil {
+		c.history, c.err = changereport.ReadHistory(c.project, offlineRunner, c.before, c.after)
+	}
+}
+
+// report lists the branches, tags and commits that finish found, and warns
+// about paths in those commits that need review. reported are the watched
+// files the working tree report already listed.
+func (c *commitCheck) report(w io.Writer, layout mask.Layout, reported []changereport.Change) {
+	if c == nil {
+		return
+	}
+	if c.err != nil {
+		fmt.Fprintf(w, "WARNING: could not check for new commits: %v\n", c.err)
+		return
+	}
+	h := c.history
+	lines := changereport.HistoryLines(c.before, c.after, h)
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "git history changed:")
+	for _, line := range lines {
+		fmt.Fprintln(w, "  "+line)
+	}
+	paths := commitPaths(layout, reported)
+	ignored, err := globalExcludes()
+	if err != nil {
+		fmt.Fprintf(w, "WARNING: could not read your global git excludes, so commits aren't checked against them: %v\n", err)
+	}
+	paths.Ignored = ignored
+	warnings := changereport.CheckCommits(h.Commits, paths)
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "WARNING: %d path(s) in these commits need review before you push or merge them:\n", len(warnings))
+	for _, line := range changereport.WarningLines(warnings) {
+		fmt.Fprintln(w, "  "+line)
+	}
+}
+
+// commitPaths are the paths the commit check looks for: the layout's
+// placeholders and masks outside .git, and its extra watched files.
+func commitPaths(layout mask.Layout, reported []changereport.Change) changereport.CommitPaths {
+	p := changereport.CommitPaths{Watch: layout.Watch, Reported: reported}
+	for _, m := range layout.Mounts {
+		if mask.InGitDir(m.Path) {
+			continue
+		}
+		rel := m.Path
+		if m.Dir {
+			rel += "/"
+		}
+		switch {
+		case m.Placeholder:
+			p.Placeholders = append(p.Placeholders, rel)
+		case m.Mask:
+			p.Masked = append(p.Masked, rel)
+		}
+	}
+	return p
+}
+
+// maxGlobalExcludes caps the size of the global excludes file kota reads.
+const maxGlobalExcludes = 1 << 20
+
+// globalExcludes returns whether the host's global git excludes file
+// ignores a path, or nil when there is no such file. Only the user's global
+// config is read, from outside any repository: a repository config the
+// agent wrote could name any file. The file is matched on the host and
+// never reaches a container.
+func globalExcludes() (func(rel string) bool, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("git", "config", "--global", "--type=path", "--get", "core.excludesFile")
+	cmd.Dir = "/"
+	out, err := cmd.Output()
+	var exit *exec.ExitError
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
+		return nil, fmt.Errorf("git config --global core.excludesFile: %w", err)
+	}
+	file := strings.TrimSpace(string(out))
+	if file == "" {
+		config := os.Getenv("XDG_CONFIG_HOME")
+		if !filepath.IsAbs(config) {
+			config = filepath.Join(home, ".config")
+		}
+		file = filepath.Join(config, "git", "ignore")
+	}
+	info, err := os.Stat(file)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	case !info.Mode().IsRegular():
+		return nil, fmt.Errorf("%s is not a regular file", file)
+	case info.Size() > maxGlobalExcludes:
+		return nil, fmt.Errorf("%s is larger than %d bytes", file, maxGlobalExcludes)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	ig, err := mask.ParseIgnore(data, file)
+	if err != nil {
+		return nil, err
+	}
+	return ig.Ignored, nil
 }
 
 func cmdCheck(args []string) error {
@@ -1180,9 +1339,12 @@ func cmdPrep(args []string) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
+	commits := startCommitCheck(os.Stderr, sess.project)
 	err = runPrep(sess, cache, images)
+	commits.finish()
 	sess.cleanup()
-	reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
+	reported := reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
+	commits.report(os.Stderr, sess.layout, reported)
 	if err != nil {
 		return err
 	}
@@ -1574,7 +1736,8 @@ func confirmFullAuto(project, agent string, auto bool) error {
 	return nil
 }
 
-// offlineRunner runs git for approval.ReadStatus in the base image, offline
+// offlineRunner runs git for approval.ReadStatus and the commit check in
+// the base image, offline
 // and read-only, so filters or an fsmonitor the agent configured never run
 // on the host. Paths outside the project, such as a linked worktree's git
 // dir, must pass the --ro path policy.

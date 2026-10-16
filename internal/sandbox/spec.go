@@ -60,6 +60,9 @@ const (
 	EngineService = "engine"
 	// EngineCertDir holds the session's Docker client certificate, read-only.
 	EngineCertDir = "/etc/kota/engine"
+	// GitExcludes is git's core.excludesFile inside the container, read-only:
+	// the project's placeholders and masks, so git add skips them.
+	GitExcludes = "/etc/kota/git-excludes"
 	// EngineEnv tells the agent of a project with an Engine VM whether this
 	// session has it: EngineAvailable, or EngineUnavailable with --no-engine.
 	// It is unset in projects without one.
