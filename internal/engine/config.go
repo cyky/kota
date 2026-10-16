@@ -1,5 +1,5 @@
 // Package engine holds the pure parts of a project's Engine VM: its config
-// in localllm.yaml, its QEMU command line, its TLS certificates, its image
+// in kota.yaml, its QEMU command line, its TLS certificates, its image
 // archives and the definition of the Engine base disk it boots from.
 //
 // The Engine VM runs the containers the agent starts during a session (for
@@ -23,7 +23,7 @@ import (
 )
 
 // ConfigFile is the per-project config that holds the engine section.
-const ConfigFile = "localllm.yaml"
+const ConfigFile = "kota.yaml"
 
 const (
 	// DefaultCPUs and DefaultMemoryMiB size the Engine VM. It runs next to

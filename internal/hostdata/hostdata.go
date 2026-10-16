@@ -1,9 +1,9 @@
-// Package hostdata is where localllm keeps its state on the host: under
-// localllm/ in the user cache dir, outside every project and Sandbox. The
+// Package hostdata is where kota keeps its state on the host: under
+// kota/ in the user cache dir, outside every project and Sandbox. The
 // user cache dir lives under $HOME, so Docker VMs share it, which session
 // directories need for their bind mounts.
 //
-// Docker volumes are listed by package sandbox; everything else localllm
+// Docker volumes are listed by package sandbox; everything else kota
 // keeps for a project is found through ProjectData, so clean can't miss a
 // kind of state.
 package hostdata
@@ -17,24 +17,24 @@ import (
 	"regexp"
 	"strconv"
 
-	"localllm/internal/engine"
-	"localllm/internal/sandbox"
+	"kota/internal/engine"
+	"kota/internal/sandbox"
 )
 
-// Dirs is localllm's directory on the host.
+// Dirs is kota's directory on the host.
 type Dirs struct {
 	Root string
 }
 
-// Default is localllm's directory in the user cache dir. There is no
+// Default is kota's directory in the user cache dir. There is no
 // fallback: a record kept in a shared directory such as /tmp could be
 // planted by another user.
 func Default() (Dirs, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
-		return Dirs{}, fmt.Errorf("find localllm's data directory: %w", err)
+		return Dirs{}, fmt.Errorf("find kota's data directory: %w", err)
 	}
-	return Dirs{Root: filepath.Join(cache, "localllm")}, nil
+	return Dirs{Root: filepath.Join(cache, "kota")}, nil
 }
 
 // Engine holds the Engine base disk and each project's engine data.
@@ -79,7 +79,7 @@ func (d Dirs) SessionDirs(project string) ([]string, error) {
 	return dirs, nil
 }
 
-// ProjectData is what localllm keeps on the host for one project, apart
+// ProjectData is what kota keeps on the host for one project, apart
 // from its Docker volumes. The shared Engine base disk isn't part of it.
 type ProjectData struct {
 	// PrepRecord is the project's prep record, or "" when there is none.
@@ -113,8 +113,8 @@ func (p ProjectData) Paths() []string {
 	return paths
 }
 
-// ProjectData lists what localllm keeps for project. It doesn't parse
-// localllm.yaml, so it works when that is broken or gone. Call it under
+// ProjectData lists what kota keeps for project. It doesn't parse
+// kota.yaml, so it works when that is broken or gone. Call it under
 // the project's lease.
 func (d Dirs) ProjectData(project string) (ProjectData, error) {
 	var p ProjectData

@@ -325,7 +325,7 @@ func TestFallback(t *testing.T) {
 			if len(plan.Steps) != 0 || plan.Script() != "" {
 				t.Errorf("fallback has install steps: %q", steps(plan))
 			}
-			for _, want := range []string{"parse package.json: bad", c.note, "localllm prep"} {
+			for _, want := range []string{"parse package.json: bad", c.note, "kota prep"} {
 				if !strings.Contains(plan.Fallback, want) {
 					t.Errorf("Fallback = %q, want %q", plan.Fallback, want)
 				}

@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"localllm/internal/models"
+	"kota/internal/models"
 )
 
 // Agent is the agent name, used for its state volume and config directory.
 const Agent = "opencode"
 
 // ProviderID is the provider name the gateway is registered under.
-const ProviderID = "localllm"
+const ProviderID = "kota"
 
 // BaseConfig is the path of the base config in assets.Agents.
 const BaseConfig = "agents/opencode/opencode.json"
@@ -73,7 +73,7 @@ func Render(base []byte, s Settings) ([]byte, error) {
 	cfg["provider"] = map[string]any{
 		ProviderID: map[string]any{
 			"npm":     "@ai-sdk/openai-compatible",
-			"name":    "localllm gateway",
+			"name":    "kota gateway",
 			"options": options,
 			"models":  offered,
 		},

@@ -48,7 +48,7 @@ func TestParse(t *testing.T) {
 		{name: "shell characters", yaml: "engine:\n  images: [\"redis;rm -rf /\"]\n", wantErr: "not a valid image reference"},
 		{name: "option", yaml: "engine:\n  images: [--insecure]\n", wantErr: "not a valid image reference"},
 		{name: "duplicate", yaml: "engine:\n  images: [redis, redis]\n", wantErr: "twice"},
-		{name: "broken yaml", yaml: "engine: [\n", wantErr: "parse localllm.yaml"},
+		{name: "broken yaml", yaml: "engine: [\n", wantErr: "parse kota.yaml"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

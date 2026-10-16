@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/engine"
-	"localllm/internal/hostdata"
-	"localllm/internal/prepgate"
-	"localllm/internal/sandbox"
-	"localllm/internal/sessionregistry"
+	"kota/internal/engine"
+	"kota/internal/hostdata"
+	"kota/internal/prepgate"
+	"kota/internal/sandbox"
+	"kota/internal/sessionregistry"
 )
 
 // testPrepRecord is project's prep record file.
@@ -254,11 +254,11 @@ func TestCleanRefusesActiveProject(t *testing.T) {
 }
 
 func TestCleanArgumentsAndExclusiveCaches(t *testing.T) {
-	project := fakeHome(t, map[string]string{"localllm.yaml": "broken: [", "README.md": "test"})
+	project := fakeHome(t, map[string]string{"kota.yaml": "broken: [", "README.md": "test"})
 	fakeVolumeDocker(t, nil)
 	// No session preparation/model discovery is needed, even if project
 	// configuration is broken or the configured gateway key file is missing.
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", filepath.Join(t.TempDir(), "missing"))
 	t.Chdir(project)
 	for _, args := range [][]string{nil, {project}, {"--shared-caches", project}, {project, "--shared-caches"}} {
 		if err := cmdClean(args); err != nil {

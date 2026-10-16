@@ -1,6 +1,6 @@
 // Package gatewaykey loads the optional API key for the model gateway
 // (llama-swap apiKeys) from the host environment. The key is never stored
-// in this repo or in any file localllm writes.
+// in this repo or in any file kota writes.
 package gatewaykey
 
 import (
@@ -12,9 +12,9 @@ import (
 
 const (
 	// EnvKey holds the key itself.
-	EnvKey = "LOCALLLM_GATEWAY_KEY"
+	EnvKey = "KOTA_GATEWAY_KEY"
 	// EnvFile holds the path of a file containing the key.
-	EnvFile = "LOCALLLM_GATEWAY_KEY_FILE"
+	EnvFile = "KOTA_GATEWAY_KEY_FILE"
 )
 
 // Hint tells the user how to configure the key.

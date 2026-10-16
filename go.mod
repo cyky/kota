@@ -1,4 +1,4 @@
-module localllm
+module kota
 
 go 1.27.2
 

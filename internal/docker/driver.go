@@ -19,13 +19,13 @@ import (
 	"syscall"
 	"time"
 
-	"localllm/internal/interrupt"
-	"localllm/internal/sandbox"
+	"kota/internal/interrupt"
+	"kota/internal/sandbox"
 )
 
 // BuildImage builds an image from a build context held in an fs.FS.
 func BuildImage(tag string, context fs.FS) error {
-	dir, err := os.MkdirTemp("", "localllm-build-")
+	dir, err := os.MkdirTemp("", "kota-build-")
 	if err != nil {
 		return err
 	}
@@ -40,7 +40,7 @@ func BuildImage(tag string, context fs.FS) error {
 // context, so COPY and ADD can't take anything from the host, and labels
 // it.
 func BuildDockerfile(tag string, dockerfile []byte, labels map[string]string) error {
-	dir, err := os.MkdirTemp("", "localllm-build-")
+	dir, err := os.MkdirTemp("", "kota-build-")
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,6 @@
 package sandbox
 
-// The subset of the compose file format localllm generates. Compose accepts
+// The subset of the compose file format kota generates. Compose accepts
 // JSON, so specs are written with encoding/json.
 
 import (

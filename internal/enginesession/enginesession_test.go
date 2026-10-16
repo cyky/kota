@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/engine"
-	"localllm/internal/sandbox"
+	"kota/internal/engine"
+	"kota/internal/sandbox"
 )
 
 var host = engine.Host{OS: runtime.GOOS, Arch: runtime.GOARCH}
@@ -138,8 +138,8 @@ func TestPrepareRefusals(t *testing.T) {
 		want       string
 	}{
 		{name: "no QEMU", yaml: yaml, missing: []string{"qemu"}, want: "declares engine images, but"},
-		{name: "no base disk", yaml: yaml, missing: []string{"base"}, want: "localllm build"},
-		{name: "not prepped", yaml: yaml, missing: []string{"archives"}, want: "localllm prep"},
+		{name: "no base disk", yaml: yaml, missing: []string{"base"}, want: "kota build"},
+		{name: "not prepped", yaml: yaml, missing: []string{"archives"}, want: "kota prep"},
 		{name: "new image not prepped", yaml: "engine:\n  images: [postgres:16-alpine, redis:7]\n", want: "redis:7"},
 		{name: "broken config of a prepped project", yaml: "engine: [\n", want: "can't start without knowing its images"},
 	}

@@ -34,7 +34,7 @@ func NewCerts(now time.Time, hosts []string) (Certs, error) {
 		return Certs{}, err
 	}
 	ca := &x509.Certificate{
-		Subject:               pkix.Name{CommonName: "localllm engine CA"},
+		Subject:               pkix.Name{CommonName: "kota engine CA"},
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
@@ -45,7 +45,7 @@ func NewCerts(now time.Time, hosts []string) (Certs, error) {
 		return Certs{}, err
 	}
 	server := &x509.Certificate{
-		Subject:     pkix.Name{CommonName: "localllm engine"},
+		Subject:     pkix.Name{CommonName: "kota engine"},
 		KeyUsage:    x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
@@ -57,7 +57,7 @@ func NewCerts(now time.Time, hosts []string) (Certs, error) {
 		}
 	}
 	client := &x509.Certificate{
-		Subject:     pkix.Name{CommonName: "localllm sandbox"},
+		Subject:     pkix.Name{CommonName: "kota sandbox"},
 		KeyUsage:    x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}

@@ -12,13 +12,13 @@ import (
 
 func engineTargets() EngineTargets {
 	return EngineTargets{
-		Image:        "localllm-engine-probe:latest",
+		Image:        "kota-engine-probe:latest",
 		GuestAPIPort: 2376,
 		HostAddrs:    []string{"10.0.2.2", "192.168.1.1", "10.0.2.2"},
 		HostPorts:    []int{8080, 22, 51234},
 		EngineHost:   "engine",
 		APIPort:      2376,
-		CertDir:      "/etc/localllm/engine",
+		CertDir:      "/etc/kota/engine",
 	}
 }
 
@@ -133,7 +133,7 @@ esac`,
 		}
 	}
 	calls, _ := os.ReadFile(log)
-	for _, want := range []string{"run -d --pull never --name localllm-engine-probe -p 8080 --entrypoint socat", "--network host", "rm -f localllm-engine-probe", "rmi localllm-engine-probe:latest"} {
+	for _, want := range []string{"run -d --pull never --name kota-engine-probe -p 8080 --entrypoint socat", "--network host", "rm -f kota-engine-probe", "rmi kota-engine-probe:latest"} {
 		if !strings.Contains(string(calls), want) {
 			t.Errorf("docker calls lack %q:\n%s", want, calls)
 		}

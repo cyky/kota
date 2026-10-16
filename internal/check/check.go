@@ -9,9 +9,9 @@ import (
 	"slices"
 	"strings"
 
-	"localllm/internal/docker"
-	"localllm/internal/probe"
-	"localllm/internal/sandbox"
+	"kota/internal/docker"
+	"kota/internal/probe"
+	"kota/internal/sandbox"
 )
 
 // extraHostPorts are tried on every host address besides the gateway port:

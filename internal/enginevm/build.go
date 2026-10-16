@@ -20,8 +20,8 @@ import (
 	"syscall"
 	"time"
 
-	"localllm/internal/engine"
-	"localllm/internal/interrupt"
+	"kota/internal/engine"
+	"kota/internal/interrupt"
 )
 
 // buildTimeout bounds the online build boot, which installs Docker.
@@ -85,7 +85,7 @@ func BuildBase(layout engine.Layout, host engine.Host, out io.Writer) error {
 	}
 	defer seed.Close()
 	args := []string{
-		"-name", "localllm-engine-build",
+		"-name", "kota-engine-build",
 		"-nodefaults", "-no-user-config",
 		"-machine", m.Machine,
 		"-accel", m.Accel,

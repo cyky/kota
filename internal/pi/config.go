@@ -8,14 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"localllm/internal/models"
+	"kota/internal/models"
 )
 
 // Agent is the agent name, used for its state volume.
 const Agent = "pi"
 
 // ProviderID is the provider name the gateway is registered under.
-const ProviderID = "localllm"
+const ProviderID = "kota"
 
 // BaseSettings is the path of the base settings in assets.Agents.
 const BaseSettings = "agents/pi/settings.json"
@@ -28,7 +28,7 @@ const AppendSystem = "APPEND_SYSTEM.md"
 
 // placeholderKey is used without a gateway key: pi only offers a
 // provider's models when it has a key, and the gateway doesn't check it.
-const placeholderKey = "localllm"
+const placeholderKey = "kota"
 
 // Settings are the inputs for a session's pi config.
 type Settings struct {
@@ -75,7 +75,7 @@ func RenderModels(s Settings) ([]byte, error) {
 	return json.MarshalIndent(map[string]any{
 		"providers": map[string]any{
 			ProviderID: map[string]any{
-				"name":    "localllm gateway",
+				"name":    "kota gateway",
 				"baseUrl": s.GatewayURL + "/v1",
 				"api":     "openai-completions",
 				"apiKey":  key,

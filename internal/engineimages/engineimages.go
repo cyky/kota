@@ -3,7 +3,7 @@
 //
 // Plan works out what prep does with the declared images. Before the user
 // confirms, it looks up only the images the last prep recorded, so a
-// reference an agent wrote into localllm.yaml reaches the network only
+// reference an agent wrote into kota.yaml reaches the network only
 // after the user approved it. Fetch then downloads only new and moved
 // images, by digest, and replaces the cache only once every download
 // succeeded.
@@ -22,7 +22,7 @@ import (
 	"slices"
 	"strings"
 
-	"localllm/internal/engine"
+	"kota/internal/engine"
 )
 
 // Cache is one project's archive directory.

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"localllm/internal/docker"
+	"kota/internal/docker"
 )
 
-const testImage = "localllm-base:latest"
+const testImage = "kota-base:latest"
 
 // cacheDir creates a directory under the user cache dir, which Docker
 // Desktop-style VMs share by default (unlike macOS's per-user temp dir).
@@ -23,7 +23,7 @@ func cacheDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp(cache, "localllm-test-")
+	dir, err := os.MkdirTemp(cache, "kota-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func dockerRunner(mounts []string, dir string, cmd ...string) (string, error) {
 // runs. In the container it runs offline and can't write.
 func TestReadStatusRunsFiltersOffline(t *testing.T) {
 	if exec.Command("docker", "image", "inspect", testImage).Run() != nil {
-		t.Skip("docker or " + testImage + " not available; run 'localllm build'")
+		t.Skip("docker or " + testImage + " not available; run 'kota build'")
 	}
 	isolateGit(t)
 	project := cacheDir(t)
@@ -85,7 +85,7 @@ func TestReadStatusRunsFiltersOffline(t *testing.T) {
 // docker's --mount value.
 func TestReadStatusLinkedWorktreeInContainer(t *testing.T) {
 	if exec.Command("docker", "image", "inspect", testImage).Run() != nil {
-		t.Skip("docker or " + testImage + " not available; run 'localllm build'")
+		t.Skip("docker or " + testImage + " not available; run 'kota build'")
 	}
 	isolateGit(t)
 	root := cacheDir(t)

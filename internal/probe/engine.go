@@ -32,14 +32,14 @@ type EngineTargets struct {
 
 const (
 	// listenerName is the published-port probe's container in the VM.
-	listenerName = "localllm-engine-probe"
+	listenerName = "kota-engine-probe"
 	// listenerPort is the listener's container port, published to the
 	// VM's published range.
 	listenerPort = 8080
 	// listenerGreeting is what the listener sends to each connection.
-	listenerGreeting = "localllm-engine-probe"
+	listenerGreeting = "kota-engine-probe"
 	// publishedEnv holds the listener's published port in the script.
-	publishedEnv = "LOCALLLM_PROBE_PUBLISHED"
+	publishedEnv = "KOTA_PROBE_PUBLISHED"
 )
 
 // EngineSuite returns the Engine VM's probes. Inside the VM, everything

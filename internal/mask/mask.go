@@ -1,6 +1,6 @@
 // Package mask plans the mounts laid over the project inside the sandbox.
 //
-// Secrets matching the default rules or the project's .localllmignore are
+// Secrets matching the default rules or the project's .kotaignore are
 // masked: hidden behind an empty read-only file or directory. Files the host
 // later executes (git hooks, git config, direnv's .envrc) are mounted
 // read-only over themselves, and the directories on the way to them are
@@ -18,9 +18,9 @@ import (
 	"slices"
 	"strings"
 
-	"localllm/internal/deps"
-	"localllm/internal/projectimage"
-	"localllm/internal/sandbox"
+	"kota/internal/deps"
+	"kota/internal/projectimage"
+	"kota/internal/sandbox"
 )
 
 // Mount is one path laid over the project.
@@ -61,7 +61,7 @@ type Layout struct {
 }
 
 // IgnoreFile is the per-project mask rules file, in gitignore syntax.
-const IgnoreFile = ".localllmignore"
+const IgnoreFile = ".kotaignore"
 
 // DefaultRules are the mask rules every project gets, before IgnoreFile.
 var DefaultRules = []string{

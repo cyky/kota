@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"strings"
 
-	"localllm/internal/sandbox"
+	"kota/internal/sandbox"
 )
 
 // Policy holds the fixed locations paths are judged against.
@@ -66,7 +66,7 @@ func Validate(project string, roExtras []string, p Policy) (Paths, error) {
 	}
 	root, err := resolve(p.AllowedRoot)
 	if err != nil {
-		return Paths{}, fmt.Errorf("allowed root %s: %w (set LOCALLLM_ALLOWED_ROOT to change it)", p.AllowedRoot, err)
+		return Paths{}, fmt.Errorf("allowed root %s: %w (set KOTA_ALLOWED_ROOT to change it)", p.AllowedRoot, err)
 	}
 	forbidden := p.forbidden()
 	c := checker{fold: p.CaseInsensitive}
@@ -89,7 +89,7 @@ func Validate(project string, roExtras []string, p Policy) (Paths, error) {
 	case c.equal(proj, root):
 		return Paths{}, refuse(project, proj, "it is the allowed root itself; pick a project inside it")
 	case !c.within(proj, root):
-		return Paths{}, refuse(project, proj, fmt.Sprintf("it is outside the allowed root %s (set LOCALLLM_ALLOWED_ROOT to change it)", root))
+		return Paths{}, refuse(project, proj, fmt.Sprintf("it is outside the allowed root %s (set KOTA_ALLOWED_ROOT to change it)", root))
 	}
 	if f, ok := c.overlapsAny(proj, forbidden); ok {
 		return Paths{}, refuse(project, proj, "it overlaps "+f+", which is never mounted")

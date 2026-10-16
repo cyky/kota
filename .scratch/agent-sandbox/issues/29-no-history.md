@@ -8,9 +8,9 @@ Status: needs-triage
 
 ## What to build
 
-Today the agent sees the project's whole git history. `.git` is mounted in place so git works, and masks don't reach it, so anything ever committed can be read with `git log -p`, including a secret that is masked or deleted now. `.localllmignore` can't help, because `.git` is never searched for mask rules.
+Today the agent sees the project's whole git history. `.git` is mounted in place so git works, and masks don't reach it, so anything ever committed can be read with `git log -p`, including a secret that is masked or deleted now. `.kotaignore` can't help, because `.git` is never searched for mask rules.
 
-`localllm run --no-history [dir]` (and `shell`) runs the **Session** on a shallow copy of the project instead: a working git repository with only the current commit, and no link to the original's history, remotes or config. When the **Session** ends, the agent's commits are brought back into the original repository as a branch, for the user to review and merge.
+`kota run --no-history [dir]` (and `shell`) runs the **Session** on a shallow copy of the project instead: a working git repository with only the current commit, and no link to the original's history, remotes or config. When the **Session** ends, the agent's commits are brought back into the original repository as a branch, for the user to review and merge.
 
 The manual version works today (see Comments). This issue makes it one flag.
 
@@ -18,7 +18,7 @@ Sketch:
 
 1. **Make the copy.** Use `git clone --depth 1 --single-branch file://<project> <copy>` (the `file://` URL makes `--depth` take effect), then remove the `origin` remote. The agent's git then has one commit and nothing that points back to the original.
 2. **Run the Session on the copy,** with the usual masks, protections, probes and **Engine VM**.
-3. **Bring the work back.** Fetch the copy's new commits into the original as `localllm/<name>-<timestamp>`, and list them in the change report. The copy's working tree may hold uncommitted changes; report them, and say where the copy is.
+3. **Bring the work back.** Fetch the copy's new commits into the original as `kota/<name>-<timestamp>`, and list them in the change report. The copy's working tree may hold uncommitted changes; report them, and say where the copy is.
 
 ## Decisions for triage
 
@@ -26,7 +26,7 @@ Sketch:
 - **Kept or throwaway.** A kept copy (one per project, refreshed from `HEAD` at each start) lets the agent resume its own sessions and keeps `prep` results. A throwaway copy is simpler, but every session needs `prep` first.
 - **Volumes and Engine VM data.** Both are keyed by the project path today, so the copy would get its own state and dependency volumes and its own image archives. Options: key them by the original project, so `prep` of the original is reused; or treat the copy as its own project, with its own `prep` and `clean`.
 - **Uncommitted changes in the original.** The clone takes only `HEAD`. Options: refuse with the list of changes (as the full-auto check does), or carry them over as an uncommitted diff.
-- **Fetching back safely.** localllm never runs git on the host against a repository the agent controlled. The copy's config, hooks and objects were all writable by the agent, and local fetch from untrusted repositories has had CVEs. Do the fetch in a throwaway container of the base image, as the uncommitted-changes check does: no network, read-only copy, original's git dir writable only for the new ref. Or ask the user to fetch by hand, with the command printed.
+- **Fetching back safely.** kota never runs git on the host against a repository the agent controlled. The copy's config, hooks and objects were all writable by the agent, and local fetch from untrusted repositories has had CVEs. Do the fetch in a throwaway container of the base image, as the uncommitted-changes check does: no network, read-only copy, original's git dir writable only for the new ref. Or ask the user to fetch by hand, with the command printed.
 - **Leases.** Hold the leases of both the original and the copy for the whole session, so `prep`, `clean` or another session can't interleave.
 
 ## Acceptance criteria
@@ -50,8 +50,8 @@ Asked for after discussing how to keep history from the agent. The manual workar
 
 ```sh
 git clone --depth 1 file://$HOME/Projects/app ~/Projects/app-agent
-localllm prep ~/Projects/app-agent
-localllm run ~/Projects/app-agent
+kota prep ~/Projects/app-agent
+kota run ~/Projects/app-agent
 git -C ~/Projects/app fetch ~/Projects/app-agent HEAD:agent-work
 ```
 

@@ -1,11 +1,11 @@
-# localllm
+# kota
 
 Runs coding agents against local models in an offline sandbox, scoped to one project, so the agent can work unattended without access to the rest of the machine.
 
 ## Language
 
 **Session**:
-One agent (or shell) run in the **Sandbox** for one project, started by `localllm run` or `localllm shell`.
+One agent (or shell) run in the **Sandbox** for one project, started by `kota run` or `kota shell`.
 _Avoid_: container, run (as a noun)
 
 **Sandbox**:
@@ -25,15 +25,15 @@ A project check (tests, lint, build) that the agent runs itself inside the **Ses
 _Avoid_: CI, verification step, quality check
 
 **Engine VM**:
-A dedicated QEMU VM, managed by localllm, whose container engine runs the containers the agent starts during a **Session** (for example testcontainers), apart from the host's Docker.
+A dedicated QEMU VM, managed by kota, whose container engine runs the containers the agent starts during a **Session** (for example testcontainers), apart from the host's Docker.
 _Avoid_: Docker-in-Docker, sidecar engine, host Docker, Lima VM
 
 **Engine base disk**:
-The clean disk every **Engine VM** boots from, built once online by localllm and never changed by a **Session**.
+The clean disk every **Engine VM** boots from, built once online by kota and never changed by a **Session**.
 _Avoid_: engine image (that's an **Engine image**), template
 
 **Engine image**:
-A container image a project declares in `localllm.yaml` for its **Engine VM**, downloaded during **Prep** outside the **Engine VM** and loaded into it, because the **Engine VM** never has a route out.
+A container image a project declares in `kota.yaml` for its **Engine VM**, downloaded during **Prep** outside the **Engine VM** and loaded into it, because the **Engine VM** never has a route out.
 _Avoid_: test image, service image
 
 ## Relationships
@@ -60,6 +60,6 @@ _Avoid_: test image, service image
 
 ## Flagged ambiguities
 
-- "gate" could have meant a check localllm runs after the **Session**, before the user accepts the changes. Resolved: a **Gate** is run by the agent inside the **Session**.
+- "gate" could have meant a check kota runs after the **Session**, before the user accepts the changes. Resolved: a **Gate** is run by the agent inside the **Session**.
 - The **Engine VM** was first planned as a Lima VM. Resolved: it is a QEMU VM, because Lima can't lock its network down from outside the VM.
 - "a separate container that serves Docker" was considered for the agent's containers. Resolved: they run in the **Engine VM**, because a Docker-serving container would have to be privileged on the same VM as the host's Docker.

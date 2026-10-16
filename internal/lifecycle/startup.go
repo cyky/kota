@@ -20,7 +20,7 @@ import (
 	"io"
 	"slices"
 
-	"localllm/internal/interrupt"
+	"kota/internal/interrupt"
 )
 
 // Sandbox is a started Sandbox, as *docker.Session is.

@@ -5,8 +5,8 @@ import (
 	"slices"
 	"testing"
 
-	"localllm/assets"
-	"localllm/internal/models"
+	"kota/assets"
+	"kota/internal/models"
 )
 
 func base(t *testing.T) []byte {
@@ -158,7 +158,7 @@ func TestRenderModelsGatewayKey(t *testing.T) {
 	}{
 		{"", placeholderKey},
 		// pi interpolates $NAME; the key itself is never written.
-		{"LOCALLLM_GATEWAY_KEY", "$LOCALLLM_GATEWAY_KEY"},
+		{"KOTA_GATEWAY_KEY", "$KOTA_GATEWAY_KEY"},
 	}
 	for _, c := range cases {
 		s := settings

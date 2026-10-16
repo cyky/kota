@@ -18,7 +18,7 @@ func testInputs() Inputs {
 		AgentImage:     "agent:test",
 		ForwarderImage: "forwarder:test",
 		Pinned:         []Mount{{Source: "/Users/me/Projects/foo/.git", Target: "/workspace/.git"}},
-		ReadOnly:       []Mount{{Source: "/tmp/cfg.json", Target: "/etc/localllm/opencode.json"}},
+		ReadOnly:       []Mount{{Source: "/tmp/cfg.json", Target: "/etc/kota/opencode.json"}},
 		Env:            map[string]string{"FOO": "bar"},
 	}
 }
@@ -128,7 +128,7 @@ func TestMounts(t *testing.T) {
 	want := []Volume{
 		{Type: "bind", Source: "/Users/me/Projects/foo", Target: Workspace},
 		{Type: "bind", Source: "/Users/me/Projects/foo/.git", Target: "/workspace/.git"},
-		{Type: "bind", Source: "/tmp/cfg.json", Target: "/etc/localllm/opencode.json", ReadOnly: true},
+		{Type: "bind", Source: "/tmp/cfg.json", Target: "/etc/kota/opencode.json", ReadOnly: true},
 	}
 	if binds := slices.DeleteFunc(slices.Clone(agent.Volumes), func(v Volume) bool { return v.Type != "bind" }); !slices.Equal(binds, want) {
 		t.Errorf("volumes = %+v, want %+v", agent.Volumes, want)
@@ -154,7 +154,7 @@ func TestProjectName(t *testing.T) {
 	if a == ProjectName("/Users/me/Other/My App") {
 		t.Error("different paths share a project name")
 	}
-	if !strings.HasPrefix(a, "localllm-my-app-") {
+	if !strings.HasPrefix(a, "kota-my-app-") {
 		t.Errorf("project name = %q", a)
 	}
 }
@@ -199,7 +199,7 @@ func TestStateVolume(t *testing.T) {
 			t.Errorf("%q is shared", a)
 		}
 	}
-	if !regexp.MustCompile(`^localllm-state-opencode-[0-9a-f]{32}$`).MatchString(a) {
+	if !regexp.MustCompile(`^kota-state-opencode-[0-9a-f]{32}$`).MatchString(a) {
 		t.Errorf("state volume = %q", a)
 	}
 }
@@ -469,7 +469,7 @@ func TestVolumesServiceOnlyChowns(t *testing.T) {
 func TestProjectImageOnlyForAgent(t *testing.T) {
 	for _, mode := range []Mode{ModeRun, ModePrep, ModeFetch} {
 		in := depInputs(mode)
-		in.AgentImage, in.HelperImage = "localllm-project-abc:latest", "localllm-base:latest"
+		in.AgentImage, in.HelperImage = "kota-project-abc:latest", "kota-base:latest"
 		spec := Build(in)
 		if got := spec.Services[AgentService].Image; got != in.AgentImage {
 			t.Errorf("mode %d: agent image = %s", mode, got)
@@ -499,7 +499,7 @@ func TestDepVolume(t *testing.T) {
 	if !strings.HasPrefix(a, DepVolumePrefix("/Users/me/Projects/a")) || strings.HasPrefix(a, DepVolumePrefix("/Users/me/Projects/b")) {
 		t.Errorf("prefix of %q", a)
 	}
-	if !regexp.MustCompile(`^localllm-deps-[0-9a-f]{32}-[0-9a-f]{12}$`).MatchString(a) {
+	if !regexp.MustCompile(`^kota-deps-[0-9a-f]{32}-[0-9a-f]{12}$`).MatchString(a) {
 		t.Errorf("dependency volume = %q", a)
 	}
 }

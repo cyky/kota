@@ -93,7 +93,7 @@ func TestEngineNote(t *testing.T) {
 		// The declared images, how an undeclared one fails, and the fix.
 		"which you can't change: postgres:16-alpine, redis:7.", "never downloads images",
 		"Unable to find image", "Temporary failure in name resolution", "find it in the failing test's code", "Don't retry",
-		"under engine.images in localllm.yaml and run 'localllm prep' on the host",
+		"under engine.images in kota.yaml and run 'kota prep' on the host",
 	} {
 		if !strings.Contains(on, want) {
 			t.Errorf("available note lacks %q:\n%s", want, on)

@@ -1,8 +1,8 @@
 //go:build integration
 
 // Engine VM integration tests boot real Engine VMs, so they need QEMU and
-// the Engine base disk ('localllm build') as well as Docker. Prep needs
-// network access. Run with: go test -tags integration ./cmd/localllm
+// the Engine base disk ('kota build') as well as Docker. Prep needs
+// network access. Run with: go test -tags integration ./cmd/kota
 package main
 
 import (
@@ -20,14 +20,14 @@ import (
 	"testing"
 	"time"
 
-	"localllm/assets"
-	"localllm/internal/docker"
-	"localllm/internal/engine"
-	"localllm/internal/enginevm"
-	"localllm/internal/models"
-	"localllm/internal/opencode"
-	"localllm/internal/pi"
-	"localllm/internal/sandbox"
+	"kota/assets"
+	"kota/internal/docker"
+	"kota/internal/engine"
+	"kota/internal/enginevm"
+	"kota/internal/models"
+	"kota/internal/opencode"
+	"kota/internal/pi"
+	"kota/internal/sandbox"
 )
 
 func requireEngine(t *testing.T) {
@@ -50,7 +50,7 @@ func requireEngine(t *testing.T) {
 		t.Skip(err)
 	}
 	if err := exec.Command("docker", "run", "--rm", baseImage, "sh", "-c", "command -v crane && command -v docker").Run(); err != nil {
-		t.Skip("the base image lacks crane or the Docker CLI; run 'localllm build'")
+		t.Skip("the base image lacks crane or the Docker CLI; run 'kota build'")
 	}
 }
 
@@ -63,13 +63,13 @@ func engineProject(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := os.MkdirTemp(cache, "localllm-test-")
+	root, err := os.MkdirTemp(cache, "kota-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	root, _ = filepath.EvalSymlinks(root)
 	t.Cleanup(func() { os.RemoveAll(root) })
-	t.Setenv("LOCALLLM_ALLOWED_ROOT", root)
+	t.Setenv("KOTA_ALLOWED_ROOT", root)
 	project := filepath.Join(root, "app")
 	files := map[string]string{
 		// Not the default size, so the test sees the configured one applied.
@@ -310,8 +310,8 @@ func qemuRunning(pid int) bool {
 
 func TestEngineInShell(t *testing.T) {
 	requireEngine(t)
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	project := engineProject(t)
 	caches := renameCaches(t)
 	gateway := stubModelGateway(t)
@@ -370,7 +370,7 @@ cat `+opencodeInstructionsPath)
 			// testcontainers' error names only the registry it couldn't
 			// reach, so the note tells the agent to find the image in the test.
 			"UNDECLARED-ERR: generic container: create container: Error response from daemon: Get \"https://registry-1.docker.io/v2/\"",
-			"which you can't change: postgres:16-alpine.", "run 'localllm prep' on the host",
+			"which you can't change: postgres:16-alpine.", "run 'kota prep' on the host",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output lacks %q", want)
@@ -404,7 +404,7 @@ cat `+opencodeInstructionsPath)
 			}
 			withSession(t, sa, caches, func(_ *session, ds *docker.Session) {
 				out, err := ds.Capture("bash", "-c", `exec 2>&1
-echo "engine=$LOCALLLM_ENGINE"
+echo "engine=$KOTA_ENGINE"
 docker image inspect postgres:16-alpine >/dev/null && echo IMAGE-LOADED
 cat `+notes[agent]+`
 echo x > `+notes[agent]+` || echo NOTE-READ-ONLY
@@ -412,7 +412,7 @@ touch "$(dirname `+notes[agent]+`)/state" && echo DIR-WRITABLE`)
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, want := range []string{"engine=available", "IMAGE-LOADED", "LOCALLLM_ENGINE=available", "DOCKER_HOST", "NOTE-READ-ONLY", "DIR-WRITABLE"} {
+				for _, want := range []string{"engine=available", "IMAGE-LOADED", "KOTA_ENGINE=available", "DOCKER_HOST", "NOTE-READ-ONLY", "DIR-WRITABLE"} {
 					if !strings.Contains(out, want) {
 						t.Errorf("output lacks %q:\n%s", want, out)
 					}
@@ -432,7 +432,7 @@ touch "$(dirname `+notes[agent]+`)/state" && echo DIR-WRITABLE`)
 				t.Errorf("Engine VM pidfile with --no-engine: %v", err)
 			}
 			out, err := ds.Capture("bash", "-c", `exec 2>&1
-echo "engine=$LOCALLLM_ENGINE docker_host=$DOCKER_HOST"
+echo "engine=$KOTA_ENGINE docker_host=$DOCKER_HOST"
 getent hosts engine || echo NO-ENGINE-ROUTE
 cat `+opencodeInstructionsPath)
 			if err != nil {
@@ -474,13 +474,13 @@ DOCKER_CERT_PATH=$o docker version >/dev/null 2>&1; echo "cli-other=$?"`)
 
 	t.Run("clean disk every session", func(t *testing.T) {
 		out := shellSession(t, project, gateway, caches, `
-docker run --rm -v /:/host postgres:16-alpine sh -c 'echo planted > /host/etc/localllm-planted' && echo PLANTED
+docker run --rm -v /:/host postgres:16-alpine sh -c 'echo planted > /host/etc/kota-planted' && echo PLANTED
 docker tag postgres:16-alpine planted:1 && echo TAGGED`)
 		if !strings.Contains(out, "PLANTED") || !strings.Contains(out, "TAGGED") {
 			t.Fatalf("couldn't plant:\n%s", out)
 		}
 		out = shellSession(t, project, gateway, caches, `
-docker run --rm -v /:/host postgres:16-alpine sh -c 'test -e /host/etc/localllm-planted' && echo FILE-SURVIVED
+docker run --rm -v /:/host postgres:16-alpine sh -c 'test -e /host/etc/kota-planted' && echo FILE-SURVIVED
 docker image inspect planted:1 >/dev/null 2>&1 && echo TAG-SURVIVED
 docker image inspect postgres:16-alpine >/dev/null 2>&1 && echo IMAGE-LOADED`)
 		if strings.Contains(out, "SURVIVED") || !strings.Contains(out, "IMAGE-LOADED") {
@@ -532,8 +532,8 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 	})
 
 	t.Run("check shows the engine", func(t *testing.T) {
-		t.Setenv("LOCALLLM_GATEWAY", gateway)
-		cmd, output := startLocalllm(t, "check", project)
+		t.Setenv("KOTA_GATEWAY", gateway)
+		cmd, output := startKota(t, "check", project)
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 		select {
@@ -556,8 +556,8 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 
 	t.Run("stops on interrupt", func(t *testing.T) {
 		pidfile := layout.Pidfile(project)
-		t.Setenv("LOCALLLM_GATEWAY", gateway)
-		cmd, output := startLocalllm(t, "shell", project)
+		t.Setenv("KOTA_GATEWAY", gateway)
+		cmd, output := startKota(t, "shell", project)
 		waitFor(t, "the Engine VM to start", func() bool {
 			_, err := os.Stat(pidfile)
 			return err == nil
@@ -576,7 +576,7 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 		}
 	})
 
-	// Last: it changes localllm.yaml.
+	// Last: it changes kota.yaml.
 	t.Run("a failed download names the image and keeps the archives", func(t *testing.T) {
 		const bad = "localhost:1/missing:1"
 		yaml := "engine:\n  images: [postgres:16-alpine, " + bad + "]\n"

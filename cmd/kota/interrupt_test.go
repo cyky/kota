@@ -12,11 +12,11 @@ import (
 	"time"
 )
 
-// TestMain lets a test run the test binary as localllm itself, so a real
+// TestMain lets a test run the test binary as kota itself, so a real
 // signal can be sent to it.
 func TestMain(m *testing.M) {
-	if os.Getenv("LOCALLLM_TEST_MAIN") == "1" {
-		os.Args = append([]string{"localllm"}, strings.Fields(os.Getenv("LOCALLLM_TEST_ARGS"))...)
+	if os.Getenv("KOTA_TEST_MAIN") == "1" {
+		os.Args = append([]string{"kota"}, strings.Fields(os.Getenv("KOTA_TEST_ARGS"))...)
 		main()
 		os.Exit(0)
 	}
@@ -55,12 +55,12 @@ func fakeDocker(t *testing.T, body string) (log string) {
 	return log
 }
 
-// startLocalllm runs localllm with args in the test's environment, stdin
+// startKota runs kota with args in the test's environment, stdin
 // held open and never written.
-func startLocalllm(t *testing.T, args ...string) (*exec.Cmd, *syncBuffer) {
+func startKota(t *testing.T, args ...string) (*exec.Cmd, *syncBuffer) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0])
-	cmd.Env = append(os.Environ(), "LOCALLLM_TEST_MAIN=1", "LOCALLLM_TEST_ARGS="+strings.Join(args, " "))
+	cmd.Env = append(os.Environ(), "KOTA_TEST_MAIN=1", "KOTA_TEST_ARGS="+strings.Join(args, " "))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func waitFor(t *testing.T, what string, cond func() bool, output *syncBuffer) {
 	}
 }
 
-// interruptAndWait sends SIGINT to localllm alone, not its process group,
+// interruptAndWait sends SIGINT to kota alone, not its process group,
 // so its own handling has to stop its children, and returns the exit code.
 func interruptAndWait(t *testing.T, cmd *exec.Cmd, output *syncBuffer) int {
 	t.Helper()
@@ -96,9 +96,9 @@ func interruptAndWait(t *testing.T, cmd *exec.Cmd, output *syncBuffer) int {
 	select {
 	case <-done:
 	case <-time.After(20 * time.Second):
-		t.Fatalf("localllm didn't exit after SIGINT; output:\n%s", output)
+		t.Fatalf("kota didn't exit after SIGINT; output:\n%s", output)
 	}
-	if !strings.Contains(output.String(), "localllm: interrupted") {
+	if !strings.Contains(output.String(), "kota: interrupted") {
 		t.Errorf("output lacks the interrupted message:\n%s", output)
 	}
 	return cmd.ProcessState.ExitCode()
@@ -109,7 +109,7 @@ func interruptAndWait(t *testing.T, cmd *exec.Cmd, output *syncBuffer) int {
 // next command starts without recovery.
 func assertNothingLeft(t *testing.T, project string) {
 	t.Helper()
-	for _, rel := range []string{".git/commondir", ".envrc", ".localllmignore", "localllm.yaml"} {
+	for _, rel := range []string{".git/commondir", ".envrc", ".kotaignore", "kota.yaml"} {
 		if _, err := os.Lstat(filepath.Join(project, rel)); !os.IsNotExist(err) {
 			t.Errorf("%s left in the project: %v", rel, err)
 		}
@@ -118,10 +118,10 @@ func assertNothingLeft(t *testing.T, project string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(cache, "localllm", "sessions")); len(entries) > 0 {
+	if entries, _ := os.ReadDir(filepath.Join(cache, "kota", "sessions")); len(entries) > 0 {
 		t.Errorf("session dirs left: %v", entries)
 	}
-	locks, _ := filepath.Glob(filepath.Join(cache, "localllm", "registry", "*.lock"))
+	locks, _ := filepath.Glob(filepath.Join(cache, "kota", "registry", "*.lock"))
 	for _, l := range locks {
 		if info, err := os.Stat(l); err != nil || info.Size() != 0 {
 			t.Errorf("lease record %s not cleared: %v", l, err)
@@ -139,7 +139,7 @@ func assertNothingLeft(t *testing.T, project string) {
 func TestInterruptAtPrepPrompt(t *testing.T) {
 	project := fakeHome(t, map[string]string{"package.json": "{}", "package-lock.json": "{}"})
 	calls := fakeDocker(t, "")
-	cmd, output := startLocalllm(t, "prep", project)
+	cmd, output := startKota(t, "prep", project)
 	waitFor(t, "the prep prompt", func() bool { return strings.Contains(output.String(), "Type y to run prep") }, output)
 
 	if code := interruptAndWait(t, cmd, output); code != 130 {
@@ -155,14 +155,14 @@ func TestInterruptAtPrepPrompt(t *testing.T) {
 // and tears down the containers, placeholders and session dir.
 func TestInterruptDuringProbes(t *testing.T) {
 	project := fakeHome(t, map[string]string{"README.md": "test"})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	probing := filepath.Join(t.TempDir(), "probing")
 	calls := fakeDocker(t, `case "$*" in
   *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
   *'run --rm -T agent'*) touch `+probing+`; exec sleep 30 ;;
 esac`)
-	cmd, output := startLocalllm(t, "run", project)
+	cmd, output := startKota(t, "run", project)
 	waitFor(t, "the probes", func() bool { _, err := os.Stat(probing); return err == nil }, output)
 
 	if code := interruptAndWait(t, cmd, output); code != 130 {
@@ -186,14 +186,14 @@ esac`)
 // and still reports what the session changed.
 func TestInterruptDuringCommand(t *testing.T) {
 	project := fakeHome(t, map[string]string{"README.md": "test"})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	t.Setenv("TEST_PROJECT", project)
 	calls := fakeDocker(t, `case "$*" in
   *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
   *'run --rm agent'*) echo 'all:' > "$TEST_PROJECT/Makefile"; exec sleep 30 ;;
 esac`)
-	cmd, output := startLocalllm(t, "run", "--unsafe-skip-check", project, "--", "make")
+	cmd, output := startKota(t, "run", "--unsafe-skip-check", project, "--", "make")
 	waitFor(t, "the command", func() bool {
 		_, err := os.Stat(filepath.Join(project, "Makefile"))
 		return err == nil

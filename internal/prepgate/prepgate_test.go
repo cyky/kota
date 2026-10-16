@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"localllm/internal/changereport"
-	"localllm/internal/deps"
+	"kota/internal/changereport"
+	"kota/internal/deps"
 )
 
 func write(t *testing.T, dir, rel, content string) {
@@ -85,7 +85,7 @@ func TestChangedInputsAsk(t *testing.T) {
 		{"yarn release", func(dir string) { write(t, dir, ".yarn/releases/yarn.cjs", "x") }, false, []string{"added .yarn/releases/yarn.cjs"}},
 		{"lockfile removed", func(dir string) { os.Remove(filepath.Join(dir, "pnpm-lock.yaml")) }, true, []string{"deleted pnpm-lock.yaml"}},
 		{"go.sum added", func(dir string) { write(t, dir, "go.sum", "x") }, false, []string{"added go.sum"}},
-		{"project config", func(dir string) { write(t, dir, "localllm.yaml", "prep: {}") }, false, []string{"added localllm.yaml"}},
+		{"project config", func(dir string) { write(t, dir, "kota.yaml", "prep: {}") }, false, []string{"added kota.yaml"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

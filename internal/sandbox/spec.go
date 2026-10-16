@@ -33,7 +33,7 @@ const (
 	Home = "/home/agent"
 	// StateDir holds the agent's state volume. The base image creates it
 	// world-writable, and Docker copies that mode into a new volume.
-	StateDir = "/var/lib/localllm/state"
+	StateDir = "/var/lib/kota/state"
 
 	// AgentService is the compose service name of the agent container.
 	AgentService = "agent"
@@ -45,12 +45,12 @@ const (
 
 	// GoModCache, CorepackHome and PnpmStore hold the caches shared by all
 	// projects. The base image creates them world-writable, like StateDir.
-	GoModCache   = "/var/lib/localllm/gomod"
-	CorepackHome = "/var/lib/localllm/corepack"
-	PnpmStore    = "/var/lib/localllm/pnpm-store"
+	GoModCache   = "/var/lib/kota/gomod"
+	CorepackHome = "/var/lib/kota/corepack"
+	PnpmStore    = "/var/lib/kota/pnpm-store"
 
 	// GatewayKeyEnv carries the gateway API key into the agent container.
-	GatewayKeyEnv = "LOCALLLM_GATEWAY_KEY"
+	GatewayKeyEnv = "KOTA_GATEWAY_KEY"
 
 	// EngineHost is the engine forwarder's alias on the internal network:
 	// the Docker API and published container ports of the project's Engine
@@ -59,11 +59,11 @@ const (
 	// EngineService is the compose service name of the engine forwarder.
 	EngineService = "engine"
 	// EngineCertDir holds the session's Docker client certificate, read-only.
-	EngineCertDir = "/etc/localllm/engine"
+	EngineCertDir = "/etc/kota/engine"
 	// EngineEnv tells the agent of a project with an Engine VM whether this
 	// session has it: EngineAvailable, or EngineUnavailable with --no-engine.
 	// It is unset in projects without one.
-	EngineEnv         = "LOCALLLM_ENGINE"
+	EngineEnv         = "KOTA_ENGINE"
 	EngineAvailable   = "available"
 	EngineUnavailable = "unavailable"
 
@@ -141,13 +141,13 @@ type sharedCache struct {
 }
 
 var sharedCaches = []sharedCache{
-	{key: "gomod", name: "localllm-cache-gomod", target: GoModCache, env: "GOMODCACHE", inRun: true},
+	{key: "gomod", name: "kota-cache-gomod", target: GoModCache, env: "GOMODCACHE", inRun: true},
 	// corepack keeps the pnpm and yarn releases it downloads here, and the
 	// shims need them offline too.
-	{key: "corepack", name: "localllm-cache-corepack", target: CorepackHome, env: "COREPACK_HOME", inRun: true},
+	{key: "corepack", name: "kota-cache-corepack", target: CorepackHome, env: "COREPACK_HOME", inRun: true},
 	// pnpm copies packages from the store into node_modules, which is a
 	// different volume, so run doesn't need it.
-	{key: "pnpm-store", name: "localllm-cache-pnpm-store", target: PnpmStore},
+	{key: "pnpm-store", name: "kota-cache-pnpm-store", target: PnpmStore},
 }
 
 // SharedCacheVolumes returns the names of the volumes shared by all
@@ -199,13 +199,13 @@ func EngineNote(available bool, images []string) string {
 		return "# Containers\n\n" +
 			"This session has a container engine, the project's Engine VM (" + EngineEnv + "=" + EngineAvailable + "). " +
 			"Docker and testcontainers use it through DOCKER_HOST, so run the project's tests that need containers as part of your checks.\n\n" +
-			"It has no network and never downloads images. It has only the images declared under engine.images in localllm.yaml, which you can't change: " +
+			"It has no network and never downloads images. It has only the images declared under engine.images in kota.yaml, which you can't change: " +
 			strings.Join(images, ", ") + ". " +
 			"A test or docker command that needs any other image fails when Docker tries to pull it, with an error such as " +
 			`"Unable to find image", "lookup registry-1.docker.io", "Temporary failure in name resolution", "no such host", "i/o timeout" or another failure to reach a registry. ` +
 			"That means the image isn't declared. testcontainers' error often doesn't name the image: find it in the failing test's code, or the default image of the testcontainers module it uses. " +
 			"Don't retry, switch registries or rewrite the test to avoid the image. " +
-			"Say which tests couldn't run because of it, and tell the user to add the image (with its tag) under engine.images in localllm.yaml and run 'localllm prep' on the host.\n"
+			"Say which tests couldn't run because of it, and tell the user to add the image (with its tag) under engine.images in kota.yaml and run 'kota prep' on the host.\n"
 	}
 	return "# Containers\n\n" +
 		"This session has no container engine (" + EngineEnv + "=" + EngineUnavailable + "). " +
@@ -271,7 +271,7 @@ func ProjectName(projectDir string) string {
 	if base == "" {
 		base = "project"
 	}
-	return fmt.Sprintf("localllm-%s-%s", base, hex.EncodeToString(sum[:])[:8])
+	return fmt.Sprintf("kota-%s-%s", base, hex.EncodeToString(sum[:])[:8])
 }
 
 // StateVolume returns the name of the state volume for an agent in a
@@ -279,7 +279,7 @@ func ProjectName(projectDir string) string {
 // hash is long enough that two projects never share one.
 func StateVolume(projectDir, agent string) string {
 	sum := sha256.Sum256([]byte(projectDir))
-	return fmt.Sprintf("localllm-state-%s-%s", agent, hex.EncodeToString(sum[:])[:32])
+	return fmt.Sprintf("kota-state-%s-%s", agent, hex.EncodeToString(sum[:])[:32])
 }
 
 // DepVolume returns the name of the volume for the dependency directory rel
@@ -293,7 +293,7 @@ func DepVolume(projectDir, rel string) string {
 // DepVolumePrefix is the name prefix of a project's dependency volumes.
 func DepVolumePrefix(projectDir string) string {
 	sum := sha256.Sum256([]byte(projectDir))
-	return fmt.Sprintf("localllm-deps-%s-", hex.EncodeToString(sum[:])[:32])
+	return fmt.Sprintf("kota-deps-%s-", hex.EncodeToString(sum[:])[:32])
 }
 
 // ProjectVolumes selects existing state and dependency volumes belonging to
@@ -301,7 +301,7 @@ func DepVolumePrefix(projectDir string) string {
 func ProjectVolumes(projectDir string, available []string) []string {
 	sum := sha256.Sum256([]byte(projectDir))
 	hash := hex.EncodeToString(sum[:])[:32]
-	state := regexp.MustCompile(`^localllm-state-[a-z0-9][a-z0-9-]*-` + hash + `$`)
+	state := regexp.MustCompile(`^kota-state-[a-z0-9][a-z0-9-]*-` + hash + `$`)
 	deps := regexp.MustCompile(`^` + regexp.QuoteMeta(DepVolumePrefix(projectDir)) + `[a-f0-9]{12}$`)
 	var volumes []string
 	for _, name := range available {

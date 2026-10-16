@@ -146,7 +146,7 @@ func TestNameStablePerProject(t *testing.T) {
 	if name(a) == name(c) {
 		t.Errorf("two projects share the name %s", name(a))
 	}
-	if !strings.HasPrefix(name(a), "localllm-engine-") {
+	if !strings.HasPrefix(name(a), "kota-engine-") {
 		t.Errorf("name = %s", name(a))
 	}
 }
@@ -214,9 +214,9 @@ func TestTLSThroughFwCfg(t *testing.T) {
 	vm := testVM()
 	cmd := build(t, vm)
 	want := []string{
-		"name=opt/localllm/ca,file=/s/ca.pem",
-		"name=opt/localllm/cert,file=/s/server.pem",
-		"name=opt/localllm/key,file=/s/server-key.pem",
+		"name=opt/kota/ca,file=/s/ca.pem",
+		"name=opt/kota/cert,file=/s/server.pem",
+		"name=opt/kota/key,file=/s/server-key.pem",
 	}
 	if got := opts(cmd.Args, "-fw_cfg"); !slices.Equal(got, want) {
 		t.Errorf("-fw_cfg = %q, want %q", got, want)

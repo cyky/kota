@@ -36,7 +36,7 @@ esac
 			t.Setenv("TEST_DOCKER_IDS", c.ids)
 			t.Setenv("TEST_DOCKER_PS_EXIT", c.psExit)
 			t.Setenv("TEST_DOCKER_RM_EXIT", c.rmExit)
-			if err := RecoverProject("localllm-project-a"); (err != nil) != c.wantErr {
+			if err := RecoverProject("kota-project-a"); (err != nil) != c.wantErr {
 				t.Fatalf("recover = %v, want error %v", err, c.wantErr)
 			}
 			data, err := os.ReadFile(log)
@@ -44,7 +44,7 @@ esac
 				t.Fatal(err)
 			}
 			calls := string(data)
-			if !strings.HasPrefix(calls, "ps -aq --filter label=com.docker.compose.project=localllm-project-a\n") {
+			if !strings.HasPrefix(calls, "ps -aq --filter label=com.docker.compose.project=kota-project-a\n") {
 				t.Errorf("recovery isn't scoped to this compose project: %q", calls)
 			}
 			if strings.Contains(calls, "rm -f ") != c.wantRemove {

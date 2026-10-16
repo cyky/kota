@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"localllm/internal/sandbox"
+	"kota/internal/sandbox"
 )
 
 // Probe is one containment check.
@@ -108,14 +108,14 @@ exec curl -fsS -m 3 -o /dev/null "$@" "$url"`, "sh", t.GatewayURL + "/v1/models"
 		},
 		Probe{
 			Name:        "workspace writable",
-			Cmd:         []string{"sh", "-c", `f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"`, "sh", t.Workspace},
+			Cmd:         []string{"sh", "-c", `f="$1/.kota-probe-$$" && : > "$f" && rm -f "$f"`, "sh", t.Workspace},
 			MustSucceed: true,
 		},
 	)
 	if t.State != "" {
 		probes = append(probes, Probe{
 			Name:        "state writable",
-			Cmd:         []string{"sh", "-c", `f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"`, "sh", t.State},
+			Cmd:         []string{"sh", "-c", `f="$1/.kota-probe-$$" && : > "$f" && rm -f "$f"`, "sh", t.State},
 			MustSucceed: true,
 		})
 	}
@@ -125,7 +125,7 @@ exec curl -fsS -m 3 -o /dev/null "$@" "$url"`, "sh", t.GatewayURL + "/v1/models"
 		probes = append(probes, Probe{
 			Name: "read-only " + path,
 			Cmd: []string{"sh", "-c", `[ -e "$1" ] || exit 0
-if [ -d "$1" ]; then f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"; else : >> "$1"; fi`, "sh", path},
+if [ -d "$1" ]; then f="$1/.kota-probe-$$" && : > "$f" && rm -f "$f"; else : >> "$1"; fi`, "sh", path},
 		})
 	}
 	for _, path := range t.Masked {
@@ -140,7 +140,7 @@ if [ -d "$1" ]; then f="$1/.localllm-probe-$$" && : > "$f" && rm -f "$f"; else :
 		// backslashes in it.
 		probes = append(probes, Probe{
 			Name:        "pinned " + path,
-			Cmd:         []string{"env", "LOCALLLM_PIN=" + MountinfoEscape(path), "awk", `$5 == ENVIRON["LOCALLLM_PIN"] { found = 1 } END { exit !found }`, "/proc/self/mountinfo"},
+			Cmd:         []string{"env", "KOTA_PIN=" + MountinfoEscape(path), "awk", `$5 == ENVIRON["KOTA_PIN"] { found = 1 } END { exit !found }`, "/proc/self/mountinfo"},
 			MustSucceed: true,
 		})
 	}
@@ -174,10 +174,10 @@ func tcp(name, host string, port int) Probe {
 // network fail immediately; the timeout only matters for silent drops.
 const Timeout = 2
 
-const resultPrefix = "LOCALLLM-PROBE"
+const resultPrefix = "KOTA-PROBE"
 
 // Script renders probes as a bash script that runs them in parallel and prints
-// one result line per probe: LOCALLLM-PROBE <index> <exit code>.
+// one result line per probe: KOTA-PROBE <index> <exit code>.
 func Script(probes []Probe) string {
 	var all []int
 	for i := range probes {

@@ -98,7 +98,7 @@ func TestResultPassed(t *testing.T) {
 
 func TestParse(t *testing.T) {
 	probes := []Probe{{Name: "a"}, {Name: "b", MustSucceed: true}, {Name: "c"}}
-	out := "noise\r\nLOCALLLM-PROBE 1 0\r\nLOCALLLM-PROBE 0 7\nLOCALLLM-PROBE 9 0\nLOCALLLM-PROBE x 0\n"
+	out := "noise\r\nKOTA-PROBE 1 0\r\nKOTA-PROBE 0 7\nKOTA-PROBE 9 0\nKOTA-PROBE x 0\n"
 
 	results := Parse(probes, out)
 	if results[0].Missing || results[0].ExitCode != 7 || !results[0].Passed() {

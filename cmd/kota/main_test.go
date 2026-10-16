@@ -12,15 +12,15 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/changereport"
-	"localllm/internal/deps"
-	"localllm/internal/docker"
-	"localllm/internal/opencode"
-	"localllm/internal/pi"
-	"localllm/internal/prepgate"
-	"localllm/internal/projectimage"
-	"localllm/internal/sandbox"
-	"localllm/internal/sessionregistry"
+	"kota/internal/changereport"
+	"kota/internal/deps"
+	"kota/internal/docker"
+	"kota/internal/opencode"
+	"kota/internal/pi"
+	"kota/internal/prepgate"
+	"kota/internal/projectimage"
+	"kota/internal/sandbox"
+	"kota/internal/sessionregistry"
 )
 
 // TestSessionMountsNoHostAgentConfig builds a session for each agent against
@@ -31,10 +31,10 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("XDG_CONFIG_HOME", "")
-	t.Setenv("LOCALLLM_ALLOWED_ROOT", "")
+	t.Setenv("KOTA_ALLOWED_ROOT", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	hostDirs := []string{".config/opencode", ".local/share/opencode", ".local/state/opencode", ".opencode", ".pi"}
 	for _, d := range append(hostDirs, "Projects/app") {
 		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
@@ -126,11 +126,11 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("LOCALLLM_ALLOWED_ROOT", "")
+	t.Setenv("KOTA_ALLOWED_ROOT", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	const secret = "sk-unit-test-secret"
-	t.Setenv("LOCALLLM_GATEWAY_KEY", secret)
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", secret)
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	project := filepath.Join(home, "Projects/app")
 	if err := os.MkdirAll(project, 0o755); err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func fakeHome(t *testing.T, files map[string]string) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	t.Setenv("LOCALLLM_ALLOWED_ROOT", "")
+	t.Setenv("KOTA_ALLOWED_ROOT", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	project := filepath.Join(home, "Projects/app")
 	for rel, content := range files {
@@ -208,8 +208,8 @@ func TestPrepSession(t *testing.T) {
 		"pnpm-lock.yaml": "",
 		".env":           "SECRET=1\n",
 	})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "sk-unit-test-secret")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "sk-unit-test-secret")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 
 	sess, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep)
 	if err != nil {
@@ -239,7 +239,7 @@ func TestPrepSession(t *testing.T) {
 			t.Errorf("prep mounts agent state: %+v", v)
 		}
 	}
-	for _, target := range []string{"/workspace/.env", "/workspace/.git/hooks", "/workspace/.git/config", "/workspace/.envrc", "/workspace/localllm.yaml"} {
+	for _, target := range []string{"/workspace/.env", "/workspace/.git/hooks", "/workspace/.git/config", "/workspace/.envrc", "/workspace/kota.yaml"} {
 		if !readOnly[target] {
 			t.Errorf("%s is not read-only in prep", target)
 		}
@@ -264,7 +264,7 @@ func TestPrepSession(t *testing.T) {
 	for _, v := range fetch.Volumes {
 		fetchRO[v.Target] = v.ReadOnly
 	}
-	for _, target := range []string{"/workspace/.env", "/workspace/.git/hooks", "/workspace/.git/config", "/workspace/localllm.yaml"} {
+	for _, target := range []string{"/workspace/.env", "/workspace/.git/hooks", "/workspace/.git/config", "/workspace/kota.yaml"} {
 		if !fetchRO[target] {
 			t.Errorf("%s is not read-only in fetch", target)
 		}
@@ -311,8 +311,8 @@ func TestBrokenManifestSession(t *testing.T) {
 		"packages/a/package.json":        "{}",
 		"packages/a/node_modules/x/i.js": "host",
 	})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "sk-unit-test-secret")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "sk-unit-test-secret")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	record := prepgate.Record{Dirs: []deps.Dir{
 		{Path: "node_modules", Manifest: "package.json"},
 		{Path: "packages/b/node_modules", Manifest: "packages/b/package.json"},
@@ -496,9 +496,9 @@ func TestParseSessionArgs(t *testing.T) {
 // TestSessionImage checks which image prepareSession gives the agent and
 // the volumes service, with Docker's images faked.
 func TestSessionImage(t *testing.T) {
-	const dockerfile = "FROM localllm-base:latest\nRUN apt-get install -y tree\n"
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	const dockerfile = "FROM kota-base:latest\nRUN apt-get install -y tree\n"
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	cases := []struct {
 		name    string
 		files   map[string]string
@@ -510,7 +510,7 @@ func TestSessionImage(t *testing.T) {
 		{name: "no Dockerfile", files: map[string]string{"package.json": "{}"}, image: baseImage},
 		{name: "built", files: map[string]string{projectimage.File: dockerfile, "package.json": "{}"}, built: true, labels: dockerfile, image: "project"},
 		{name: "not built", files: map[string]string{projectimage.File: dockerfile, "package.json": "{}"}, image: baseImage, warning: "has no image yet"},
-		{name: "stale", files: map[string]string{projectimage.File: dockerfile, "package.json": "{}"}, built: true, labels: "FROM localllm-base:latest\n", image: "project", warning: "changed since"},
+		{name: "stale", files: map[string]string{projectimage.File: dockerfile, "package.json": "{}"}, built: true, labels: "FROM kota-base:latest\n", image: "project", warning: "changed since"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -555,7 +555,7 @@ func TestSessionImage(t *testing.T) {
 				if c.warning == "" && strings.Contains(out.String(), "WARNING") {
 					t.Errorf("mode %d: unexpected warning: %s", mode, out.String())
 				}
-				if c.warning != "" && (!strings.Contains(out.String(), c.warning) || !strings.Contains(out.String(), "localllm build "+project)) {
+				if c.warning != "" && (!strings.Contains(out.String(), c.warning) || !strings.Contains(out.String(), "kota build "+project)) {
 					t.Errorf("mode %d: output = %q, want %q and the build command", mode, out.String(), c.warning)
 				}
 			}
@@ -567,11 +567,11 @@ func TestSessionImage(t *testing.T) {
 }
 
 // TestDockerfileReadOnly checks the project Dockerfile is protected like
-// localllm.yaml, since a build runs it with network access.
+// kota.yaml, since a build runs it with network access.
 func TestDockerfileReadOnly(t *testing.T) {
 	project := fakeHome(t, map[string]string{})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	sess, err := prepareTestSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
@@ -590,8 +590,8 @@ func TestShellMatchesRun(t *testing.T) {
 			project := fakeHome(t, map[string]string{
 				"package.json": "{}", ".env": "SECRET=1\n",
 			})
-			t.Setenv("LOCALLLM_GATEWAY_KEY", "shell-test-key")
-			t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+			t.Setenv("KOTA_GATEWAY_KEY", "shell-test-key")
+			t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 			reference := t.TempDir()
 			sa := sessionArgs{agent: name, gatewayURL: defaultGateway, dir: project, ro: []string{reference}}
 			run, err := prepareTestSession(sa, sandbox.ModeRun)
@@ -632,8 +632,8 @@ func TestShellMatchesRun(t *testing.T) {
 
 func TestShellRefusesFailedProbes(t *testing.T) {
 	project := fakeHome(t, map[string]string{"README.md": "test"})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	bin := t.TempDir()
 	entered := filepath.Join(bin, "entered")
 	t.Setenv("TEST_SHELL_ENTERED", entered)
@@ -728,8 +728,8 @@ func TestStartupFailureReleasesProject(t *testing.T) {
 
 func TestRunWarnsOnDifferentSessionModel(t *testing.T) {
 	project := fakeHome(t, map[string]string{"README.md": "test"})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	other := filepath.Join(filepath.Dir(project), "other")
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
@@ -776,8 +776,8 @@ esac
 
 func TestLockedSessionKeepsResolvedPaths(t *testing.T) {
 	project := fakeHome(t, map[string]string{"README.md": "a"})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	other := filepath.Join(filepath.Dir(project), "other")
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
@@ -837,15 +837,15 @@ func TestLockedSessionKeepsResolvedPaths(t *testing.T) {
 
 func TestRunContinuesAfterModelWarningFailure(t *testing.T) {
 	project := fakeHome(t, map[string]string{"README.md": "test"})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Opening a directory read-write fails deterministically, including
 	// when tests run as root. Only the advisory registry scan touches it.
-	if err := os.MkdirAll(filepath.Join(cache, "localllm", "registry", "unreadable.lock"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(cache, "kota", "registry", "unreadable.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()

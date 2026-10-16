@@ -84,7 +84,7 @@ func TestLoadBase(t *testing.T) {
 		t.Error("loaded an arm64 disk for amd64")
 	}
 	write(BaseInfo{Definition: "old", Arch: "arm64", Root: "PARTUUID=0b6ff0a5-3d1e-4e57-a02c-4ad3c2a3b8a1"})
-	if _, warning, err := l.LoadBase("arm64"); err != nil || !strings.Contains(warning, "localllm build") {
+	if _, warning, err := l.LoadBase("arm64"); err != nil || !strings.Contains(warning, "kota build") {
 		t.Errorf("stale disk: warning %q, %v", warning, err)
 	}
 	os.Remove(filepath.Join(dir, BaseKernel))

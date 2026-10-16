@@ -15,18 +15,18 @@ import (
 	"path/filepath"
 	"time"
 
-	"localllm/internal/check"
-	"localllm/internal/docker"
-	"localllm/internal/engine"
-	"localllm/internal/enginevm"
-	"localllm/internal/probe"
-	"localllm/internal/sandbox"
+	"kota/internal/check"
+	"kota/internal/docker"
+	"kota/internal/engine"
+	"kota/internal/enginevm"
+	"kota/internal/probe"
+	"kota/internal/sandbox"
 )
 
 // ProbeImage is the tag the probe image gets inside the Engine VM.
-const ProbeImage = "localllm-engine-probe:latest"
+const ProbeImage = "kota-engine-probe:latest"
 
-// Options are what every Engine VM of this localllm shares.
+// Options are what every Engine VM of this kota shares.
 type Options struct {
 	Layout engine.Layout
 	Host   engine.Host
@@ -83,7 +83,7 @@ func Prepare(o Options, project, sessionDir string) (*Engine, error) {
 	}
 	archives, err := rec.Select(cfg.Images)
 	if err != nil {
-		return nil, fmt.Errorf("%w; run 'localllm prep %s'", err, project)
+		return nil, fmt.Errorf("%w; run 'kota prep %s'", err, project)
 	}
 	ports, err := enginevm.FreePorts(1 + len(engine.PublishedPorts()))
 	if err != nil {
@@ -133,7 +133,7 @@ func Declared(layout engine.Layout, project string) bool {
 func config(layout engine.Layout, project string) (*engine.Config, error) {
 	cfg, err := engine.Read(project)
 	if err != nil {
-		// A broken localllm.yaml shouldn't block a project that never used
+		// A broken kota.yaml shouldn't block a project that never used
 		// an engine, but an engine project can't tell which images to load.
 		if rec, rerr := engine.LoadRecord(layout.ArchiveDir(project)); rerr == nil && rec == nil {
 			return nil, nil
@@ -207,15 +207,15 @@ func (e *Engine) PID() int {
 // It also saves the probe image from the host while the VM boots.
 func (e *Engine) Ready(w io.Writer) error {
 	if err := docker.SaveImage(e.opts.ProbeSource, e.probeTar); err != nil {
-		return fmt.Errorf("the Engine VM probes: %w; run 'localllm build'", err)
+		return fmt.Errorf("the Engine VM probes: %w; run 'kota build'", err)
 	}
 	if err := e.running.WaitReady(e.opts.BootTimeout); err != nil {
-		return fmt.Errorf("%w\nIf this keeps happening, remove %s and run 'localllm build' to rebuild the Engine base disk", err, filepath.Dir(e.vm.Base.Disk))
+		return fmt.Errorf("%w\nIf this keeps happening, remove %s and run 'kota build' to rebuild the Engine base disk", err, filepath.Dir(e.vm.Base.Disk))
 	}
 	booted := time.Since(e.started)
 	loadStart := time.Now()
 	if err := e.running.Load(e.archiveDir, e.archives); err != nil {
-		return fmt.Errorf("%w; run 'localllm prep' to download the archives again", err)
+		return fmt.Errorf("%w; run 'kota prep' to download the archives again", err)
 	}
 	fmt.Fprintf(w, "Engine VM ready: booted in %s, loaded %d image(s) in %s\n",
 		booted.Round(100*time.Millisecond), len(e.archives), time.Since(loadStart).Round(100*time.Millisecond))

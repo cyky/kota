@@ -8,7 +8,7 @@ Status: needs-triage
 
 ## What to build
 
-Found in the issue 17 trial run. An agent session renamed the package in `package.json` and added `"wrangler": "^4.0.0"` to devDependencies, without updating `package-lock.json`. The change report on exit only said `modified package.json`. The next `localllm prep` failed in `npm ci` because the lock file was out of date. The new dependency, which would have run code on the next install, was only found with `git diff`.
+Found in the issue 17 trial run. An agent session renamed the package in `package.json` and added `"wrangler": "^4.0.0"` to devDependencies, without updating `package-lock.json`. The change report on exit only said `modified package.json`. The next `kota prep` failed in `npm ci` because the lock file was out of date. The new dependency, which would have run code on the next install, was only found with `git diff`.
 
 For a modified watched file, show what changed, or at least where to look:
 

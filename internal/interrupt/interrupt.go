@@ -1,5 +1,5 @@
 // Package interrupt turns SIGINT, SIGTERM and SIGHUP into a cancelled
-// context, so localllm stops at the next step and tears down as on an error
+// context, so kota stops at the next step and tears down as on an error
 // instead of dying with containers and host files left behind.
 package interrupt
 
@@ -43,7 +43,7 @@ func Err() error {
 }
 
 // Ask runs prompt, which reads an answer, and returns false as soon as a
-// signal arrives. The abandoned prompt keeps waiting for input; localllm
+// signal arrives. The abandoned prompt keeps waiting for input; kota
 // exits soon after.
 func Ask(prompt func() bool) bool {
 	answer := make(chan bool, 1)

@@ -20,7 +20,7 @@ const (
 
 	// fwCfgPrefix names the fw_cfg entries the Engine base disk's
 	// engine-tls service reads at boot.
-	fwCfgPrefix = "opt/localllm/"
+	fwCfgPrefix = "opt/kota/"
 )
 
 // PublishedPorts returns the in-VM published port range, in order.
@@ -131,7 +131,7 @@ type VM struct {
 	// Serial is the file the VM's console is written to.
 	Serial string
 	// Pidfile is where QEMU writes its PID, so a later command can stop a
-	// VM whose localllm died.
+	// VM whose kota died.
 	Pidfile string
 }
 
@@ -146,7 +146,7 @@ type Command struct {
 // paths.
 func Name(project string) string {
 	sum := sha256.Sum256([]byte(project))
-	return "localllm-engine-" + hex.EncodeToString(sum[:])[:32]
+	return "kota-engine-" + hex.EncodeToString(sum[:])[:32]
 }
 
 // Build returns the QEMU command line for vm. The VM has no host mounts:

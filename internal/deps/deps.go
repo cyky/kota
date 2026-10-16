@@ -31,7 +31,7 @@ import (
 
 // ConfigFile is the per-project config at the project root. Its prep
 // command runs with network access, so it is read-only inside the sandbox.
-const ConfigFile = "localllm.yaml"
+const ConfigFile = "kota.yaml"
 
 // Step is one package manager's commands, each run by sh in the project
 // root. Either may be empty.
@@ -141,7 +141,7 @@ func Fallback(project string, last []Dir, cause error) (Plan, error) {
 		last = []Dir{{Path: "node_modules", Manifest: "package.json"}}
 		plan.Fallback = fmt.Sprintf("can't work out the dependencies (%v); the project has no prep record, so only node_modules directories get volumes", cause)
 	}
-	plan.Fallback += ". Fix the file on the host or in the session, then run 'localllm prep'"
+	plan.Fallback += ". Fix the file on the host or in the session, then run 'kota prep'"
 	add := func(d Dir) {
 		if !slices.ContainsFunc(plan.Dirs, func(o Dir) bool { return o.Path == d.Path }) {
 			plan.Dirs = append(plan.Dirs, d)

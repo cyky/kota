@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/engine"
+	"kota/internal/engine"
 )
 
 var (

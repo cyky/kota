@@ -13,8 +13,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"localllm/internal/changereport"
-	"localllm/internal/deps"
+	"kota/internal/changereport"
+	"kota/internal/deps"
 )
 
 // Inputs are the files that decide what prep runs, in the syntax of
@@ -41,7 +41,7 @@ var Inputs = []string{
 	"go.sum",
 	"go.work",
 	"go.work.sum",
-	"localllm.yaml",
+	"kota.yaml",
 }
 
 // Record is the state of a project after a prep.

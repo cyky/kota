@@ -1,6 +1,6 @@
 //go:build integration
 
-// Project image tests build an image from a localllm.Dockerfile, which
+// Project image tests build an image from a kota.Dockerfile, which
 // installs an apt package, so they need network access as well as Docker.
 package check
 
@@ -11,14 +11,14 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/docker"
-	"localllm/internal/mask"
-	"localllm/internal/probe"
-	"localllm/internal/projectimage"
-	"localllm/internal/sandbox"
+	"kota/internal/docker"
+	"kota/internal/mask"
+	"kota/internal/probe"
+	"kota/internal/projectimage"
+	"kota/internal/sandbox"
 )
 
-// buildProjectImage builds project's Dockerfile the way 'localllm build
+// buildProjectImage builds project's Dockerfile the way 'kota build
 // dir' does and removes the image after the test.
 func buildProjectImage(t *testing.T, project string) string {
 	t.Helper()

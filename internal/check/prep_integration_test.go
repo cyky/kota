@@ -15,10 +15,10 @@ import (
 	"sync"
 	"testing"
 
-	"localllm/internal/deps"
-	"localllm/internal/docker"
-	"localllm/internal/mask"
-	"localllm/internal/sandbox"
+	"kota/internal/deps"
+	"kota/internal/docker"
+	"kota/internal/mask"
+	"kota/internal/sandbox"
 )
 
 // testCaches returns a mutation that gives the shared cache volumes
@@ -341,7 +341,7 @@ func TestPrepDiscardsPlantedDependencies(t *testing.T) {
 }
 
 // TestPrepProtections checks that install scripts see masked secrets as
-// empty and can't write git hooks, git config, .envrc or localllm.yaml,
+// empty and can't write git hooks, git config, .envrc or kota.yaml,
 // while they do have network access.
 func TestPrepProtections(t *testing.T) {
 	requireDocker(t)
@@ -356,8 +356,8 @@ try() { name=$1; shift; "$@" >/dev/null 2>&1 && echo "ESCAPED $name"; }
 try hook touch .git/hooks/pre-commit
 try config git config core.hooksPath x
 try envrc sh -c 'echo x > .envrc'
-try project-config sh -c 'echo x > localllm.yaml'
-try key sh -c 'test -n "$LOCALLLM_GATEWAY_KEY"'
+try project-config sh -c 'echo x > kota.yaml'
+try key sh -c 'test -n "$KOTA_GATEWAY_KEY"'
 try gateway-host getent hosts gateway
 curl -fsS -o /dev/null https://registry.npmjs.org/ && echo NETWORK-OK
 echo DONE`)

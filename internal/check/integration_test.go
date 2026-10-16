@@ -17,16 +17,16 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/assets"
-	"localllm/internal/docker"
-	"localllm/internal/mask"
-	"localllm/internal/probe"
-	"localllm/internal/sandbox"
+	"kota/assets"
+	"kota/internal/docker"
+	"kota/internal/mask"
+	"kota/internal/probe"
+	"kota/internal/sandbox"
 )
 
 const (
-	testAgentImage     = "localllm-base:latest"
-	testForwarderImage = "localllm-forwarder:latest"
+	testAgentImage     = "kota-base:latest"
+	testForwarderImage = "kota-forwarder:latest"
 )
 
 func requireDocker(t *testing.T) {
@@ -90,7 +90,7 @@ func projectDir(t *testing.T) string {
 	if err := os.MkdirAll(cache, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp(cache, "localllm-test-")
+	dir, err := os.MkdirTemp(cache, "kota-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestSecretsMasked(t *testing.T) {
 		".env":                    "API_KEY=secret\n",
 		"deploy/.aws/credentials": "aws_secret_access_key=secret\n",
 		"private/notes.txt":       "secret\n",
-		".localllmignore":         "private/\n",
+		".kotaignore":             "private/\n",
 		"main.go":                 "package main\n",
 	}
 	for rel, content := range files {
@@ -493,7 +493,7 @@ try() { name=$1; shift; "$@" >/dev/null 2>&1 && echo "ESCAPED $name"; }
 try env-write sh -c 'echo x > .env'
 try env-remove rm -f .env
 try aws-write touch deploy/.aws/new
-try ignore-edit sh -c 'echo "!.env" >> .localllmignore'
+try ignore-edit sh -c 'echo "!.env" >> .kotaignore'
 echo DONE`)
 	if err != nil {
 		t.Fatal(err)
@@ -532,7 +532,7 @@ func startWithState(t *testing.T, project string) (*docker.Session, sandbox.Gate
 	if err := os.WriteFile(cfg, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	const cfgTarget = "/etc/localllm/opencode.json"
+	const cfgTarget = "/etc/kota/opencode.json"
 	vol := sandbox.StateVolume(project, "opencode")
 	s, gw := startInputs(t, sandbox.Inputs{
 		ProjectDir:  project,
@@ -564,7 +564,7 @@ func TestStateVolumePerProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	requirePass(t, results)
-	for _, name := range []string{"state writable", "read-only /etc/localllm/opencode.json"} {
+	for _, name := range []string{"state writable", "read-only /etc/kota/opencode.json"} {
 		if !slices.Contains(names(results), name) {
 			t.Errorf("no probe %q", name)
 		}

@@ -10,7 +10,7 @@ Status: needs-triage
 
 Found in the issue 17 trial run. pi, in full auto, committed its README edit with `git add -A`. The commit also contained:
 
-- the empty files mounted over paths that don't exist on the host (`.envrc`, `.localllmignore`, `localllm.Dockerfile`, `localllm.yaml`), added as new empty files;
+- the empty files mounted over paths that don't exist on the host (`.envrc`, `.kotaignore`, `kota.Dockerfile`, `kota.yaml`), added as new empty files;
 - the masked `.env` (untracked on the host, not in `.gitignore`), added as an empty file;
 - the masked, tracked `.npmrc`, recorded as emptied;
 - `.claude/settings.local.json`, which the host ignores only through the global excludes file `~/.config/git/ignore`. The sandbox doesn't have that file.
@@ -26,7 +26,7 @@ Two parts, to decide in triage:
 
 ## Acceptance criteria
 
-- [ ] After a session in which the agent runs `git add -A && git commit`, either the commit contains no placeholder or masked paths, or localllm warns that it does
+- [ ] After a session in which the agent runs `git add -A && git commit`, either the commit contains no placeholder or masked paths, or kota warns that it does
 - [ ] The change report lists the commits made during the session
 - [ ] Files ignored by the host's global excludes behave the same inside the sandbox, or the README says they don't
 - [ ] Integration test for an agent commit made with `git add -A`

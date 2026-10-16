@@ -1,6 +1,6 @@
 # Architecture
 
-How localllm is put together, as diagrams. The README describes each behaviour in detail; terms are as in `CONTEXT.md`, and the Engine VM decision is in `docs/adr/0001-engine-vm-for-agent-containers.md`.
+How kota is put together, as diagrams. The README describes each behaviour in detail; terms are as in `CONTEXT.md`, and the Engine VM decision is in `docs/adr/0001-engine-vm-for-agent-containers.md`.
 
 ## Runtime view
 
@@ -9,10 +9,10 @@ What runs where during a `run` or `shell` **Session** of a project with an **Eng
 ```mermaid
 flowchart LR
     subgraph host["Host (macOS)"]
-        cli["localllm CLI"]
+        cli["kota CLI"]
         gw["Gateway<br/>llama-swap :8080"]
         project[("Project dir<br/>~/Projects/app")]
-        cache[("User cache dir<br/>localllm/")]
+        cache[("User cache dir<br/>kota/")]
         subgraph vm["Engine VM (QEMU)"]
             dockerd["dockerd<br/>TLS :2376"]
             ctrs["containers the agent starts<br/>(testcontainers, docker run)"]
@@ -49,16 +49,16 @@ Containment, enforced from outside the agent:
 
 ```mermaid
 flowchart LR
-    build["localllm build<br/>base image, forwarder,<br/>Engine base disk"]
-    pbuild["localllm build dir<br/>project image from<br/>localllm.Dockerfile"]
-    prep["localllm prep<br/>network on, no agent:<br/>dependencies, Engine images"]
-    run["localllm run / shell<br/>offline Session"]
-    check["localllm check<br/>mounts, models,<br/>Engine VM, probes"]
-    clean["localllm clean<br/>volumes, prep record,<br/>engine data"]
+    build["kota build<br/>base image, forwarder,<br/>Engine base disk"]
+    pbuild["kota build dir<br/>project image from<br/>kota.Dockerfile"]
+    prep["kota prep<br/>network on, no agent:<br/>dependencies, Engine images"]
+    run["kota run / shell<br/>offline Session"]
+    check["kota check<br/>mounts, models,<br/>Engine VM, probes"]
+    clean["kota clean<br/>volumes, prep record,<br/>engine data"]
 
     build --> pbuild --> prep --> run
     build --> prep
-    run -- "manifest or localllm.yaml changed" --> prep
+    run -- "manifest or kota.yaml changed" --> prep
     prep -. "optional" .-> check -.-> run
     run --> clean
     clean -- "prep again" --> prep
@@ -70,7 +70,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    start(["localllm run / shell"]) --> lease["Take the project lease<br/>(stop orphaned containers and Engine VM)"]
+    start(["kota run / shell"]) --> lease["Take the project lease<br/>(stop orphaned containers and Engine VM)"]
     lease --> validate["Validate agent, models.yaml,<br/>dependency plan"]
     validate --> auto{"run, full auto,<br/>uncommitted changes?"}
     auto -- "yes" --> ask["List changes, ask for y"]
@@ -97,8 +97,8 @@ The order from "Start the Engine VM" to the probes, and the teardown on any fail
 
 ```mermaid
 flowchart TD
-    start(["localllm prep"]) --> lease["Take the project lease"]
-    lease --> plan["Detect installs (package.json, go.mod,<br/>localllm.yaml), read engine section"]
+    start(["kota prep"]) --> lease["Take the project lease"]
+    lease --> plan["Detect installs (package.json, go.mod,<br/>kota.yaml), read engine section"]
     plan --> images["Look up the tags recorded<br/>by the last prep (crane)"]
     images --> gate{"First prep, or inputs<br/>or images changed?"}
     gate -- "yes" --> ask["List commands, changed files,<br/>new / moved / removed images;<br/>ask for y"]
@@ -114,17 +114,17 @@ flowchart TD
 
 ## Packages
 
-`cmd/localllm` wires the commands together. The packages under `internal/` are mostly pure and table-tested. `docker` and `enginevm` are the thin adapters over the Docker CLI and QEMU.
+`cmd/kota` wires the commands together. The packages under `internal/` are mostly pure and table-tested. `docker` and `enginevm` are the thin adapters over the Docker CLI and QEMU.
 
 ```mermaid
 flowchart TD
-    main["cmd/localllm<br/>commands, session wiring"]
+    main["cmd/kota<br/>commands, session wiring"]
 
     subgraph policy["What may be mounted and shown"]
         pathpolicy["pathpolicy<br/>allowed project and --ro paths"]
         mask["mask<br/>secret masks, git and .envrc protections"]
-        deps["deps<br/>dependency plan, localllm.yaml prep"]
-        projectimage["projectimage<br/>localllm.Dockerfile"]
+        deps["deps<br/>dependency plan, kota.yaml prep"]
+        projectimage["projectimage<br/>kota.Dockerfile"]
     end
 
     subgraph spec["Sandbox definition"]
@@ -154,7 +154,7 @@ flowchart TD
         lifecycle["lifecycle<br/>start and stop order,<br/>teardown on failure or signal"]
         docker["docker<br/>Docker CLI adapter"]
         sessionregistry["sessionregistry<br/>per-project lease"]
-        hostdata["hostdata<br/>localllm's directory on the host"]
+        hostdata["hostdata<br/>kota's directory on the host"]
         interrupt["interrupt<br/>signals"]
     end
 
@@ -175,16 +175,16 @@ flowchart TD
 
 ## Where data lives
 
-Everything under `localllm/` in the user cache dir comes from `internal/hostdata`, which also lists what `clean` removes for a project.
+Everything under `kota/` in the user cache dir comes from `internal/hostdata`, which also lists what `clean` removes for a project.
 
 | What | Where | Removed by |
 | --- | --- | --- |
 | Project source | the project dir, mounted at `/workspace` | never |
-| Agent state | volume `localllm-state-<agent>-<hash>` | `clean` |
-| Dependency dirs | volumes `localllm-deps-<hash>-<hash>` | `prep` (recreated), `clean` |
-| Shared caches (Go modules, corepack, pnpm store) | volumes `localllm-cache-*` | `clean --shared-caches` |
-| Session lease records | `localllm/registry/` in the user cache dir | kept (lock files) |
-| Prep confirmation record | `localllm/prep/` | `clean` |
-| Session dir (agent config, engine certs, console log) | `localllm/sessions/` | end of session, `clean` for leftovers |
-| Engine base disk, kernel, initrd | `localllm/engine/base/` | replaced by `build` |
-| Engine image archives, VM pidfile | `localllm/engine/projects/<hash>/` | `clean` |
+| Agent state | volume `kota-state-<agent>-<hash>` | `clean` |
+| Dependency dirs | volumes `kota-deps-<hash>-<hash>` | `prep` (recreated), `clean` |
+| Shared caches (Go modules, corepack, pnpm store) | volumes `kota-cache-*` | `clean --shared-caches` |
+| Session lease records | `kota/registry/` in the user cache dir | kept (lock files) |
+| Prep confirmation record | `kota/prep/` | `clean` |
+| Session dir (agent config, engine certs, console log) | `kota/sessions/` | end of session, `clean` for leftovers |
+| Engine base disk, kernel, initrd | `kota/engine/base/` | replaced by `build` |
+| Engine image archives, VM pidfile | `kota/engine/projects/<hash>/` | `clean` |

@@ -1,5 +1,5 @@
 // Package assets embeds the image build contexts, agent configs and model
-// metadata shipped with localllm.
+// metadata shipped with kota.
 package assets
 
 import "embed"

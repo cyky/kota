@@ -13,7 +13,7 @@ import (
 	"strconv"
 )
 
-// Layout is where localllm keeps engine data, outside every project and
+// Layout is where kota keeps engine data, outside every project and
 // sandbox.
 type Layout struct {
 	Root string
@@ -72,7 +72,7 @@ func CheckRoot(root string) error {
 }
 
 // ErrNoBase is returned by LoadBase when no Engine base disk is built.
-var ErrNoBase = errors.New("the Engine base disk isn't built; run 'localllm build'")
+var ErrNoBase = errors.New("the Engine base disk isn't built; run 'kota build'")
 
 // LoadBase returns the built Engine base disk for arch, and a warning when
 // it was built from an older definition.
@@ -89,10 +89,10 @@ func (l Layout) LoadBase(arch string) (Base, string, error) {
 		return Base{}, "", fmt.Errorf("read %s: %w", filepath.Join(dir, BaseFile), err)
 	}
 	if info.Arch != arch {
-		return Base{}, "", fmt.Errorf("the Engine base disk is for %s, not %s; run 'localllm build'", info.Arch, arch)
+		return Base{}, "", fmt.Errorf("the Engine base disk is for %s, not %s; run 'kota build'", info.Arch, arch)
 	}
 	if err := CheckRoot(info.Root); err != nil {
-		return Base{}, "", fmt.Errorf("the Engine base disk: %w; run 'localllm build'", err)
+		return Base{}, "", fmt.Errorf("the Engine base disk: %w; run 'kota build'", err)
 	}
 	b := Base{
 		Disk:   filepath.Join(dir, BaseDisk),
@@ -102,12 +102,12 @@ func (l Layout) LoadBase(arch string) (Base, string, error) {
 	}
 	for _, f := range []string{b.Disk, b.Kernel, b.Initrd} {
 		if _, err := os.Stat(f); err != nil {
-			return Base{}, "", fmt.Errorf("the Engine base disk is incomplete (%v); run 'localllm build'", err)
+			return Base{}, "", fmt.Errorf("the Engine base disk is incomplete (%v); run 'kota build'", err)
 		}
 	}
 	warning := ""
 	if def, err := BaseDefinition(arch); err == nil && def != info.Definition {
-		warning = "the Engine base disk was built from an older definition; run 'localllm build' to rebuild it"
+		warning = "the Engine base disk was built from an older definition; run 'kota build' to rebuild it"
 	}
 	return b, warning, nil
 }
@@ -142,7 +142,7 @@ func CloudImageFor(arch string) (CloudImage, error) {
 }
 
 // BaseDefinition identifies what a base disk for arch is built from, so a
-// disk built by an older localllm can be told apart.
+// disk built by an older kota can be told apart.
 func BaseDefinition(arch string) (string, error) {
 	img, err := CloudImageFor(arch)
 	if err != nil {
@@ -153,7 +153,7 @@ func BaseDefinition(arch string) (string, error) {
 }
 
 // MetaData is the NoCloud meta-data of the base disk build.
-const MetaData = "instance-id: localllm-engine-base\nlocal-hostname: engine\n"
+const MetaData = "instance-id: kota-engine-base\nlocal-hostname: engine\n"
 
 // UserData returns the cloud-config of the one online boot that builds the
 // Engine base disk. seed is the build's HTTP endpoint on the host, ending
@@ -185,7 +185,7 @@ write_files:
       mkdir -p /run/engine-tls
       chmod 700 /run/engine-tls
       for f in ca cert key; do
-        cp "/sys/firmware/qemu_fw_cfg/by_name/opt/localllm/$f/raw" "/run/engine-tls/$f.pem"
+        cp "/sys/firmware/qemu_fw_cfg/by_name/opt/kota/$f/raw" "/run/engine-tls/$f.pem"
       done
   - path: /etc/systemd/system/engine-tls.service
     defer: true

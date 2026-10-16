@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/engine"
-	"localllm/internal/sandbox"
+	"kota/internal/engine"
+	"kota/internal/sandbox"
 )
 
 func TestDefaultHasNoFallback(t *testing.T) {
@@ -20,7 +20,7 @@ func TestDefaultHasNoFallback(t *testing.T) {
 }
 
 func TestPathsStayUnderRoot(t *testing.T) {
-	d := Dirs{Root: "/data/localllm"}
+	d := Dirs{Root: "/data/kota"}
 	for _, p := range []string{d.Engine().Root, d.Registry(), d.Sessions(), d.PrepRecord("/p/app")} {
 		if !strings.HasPrefix(p, d.Root+"/") {
 			t.Errorf("%s outside %s", p, d.Root)

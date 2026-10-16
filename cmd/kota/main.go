@@ -1,4 +1,4 @@
-// Command localllm runs coding agents in an offline Docker sandbox that can
+// Command kota runs coding agents in an offline Docker sandbox that can
 // reach only the local model gateway.
 package main
 
@@ -20,35 +20,35 @@ import (
 	"strings"
 	"time"
 
-	"localllm/assets"
-	"localllm/internal/approval"
-	"localllm/internal/changereport"
-	"localllm/internal/check"
-	"localllm/internal/deps"
-	"localllm/internal/docker"
-	"localllm/internal/engine"
-	"localllm/internal/engineimages"
-	"localllm/internal/enginesession"
-	"localllm/internal/enginevm"
-	"localllm/internal/gatewaykey"
-	"localllm/internal/hostdata"
-	"localllm/internal/interrupt"
-	"localllm/internal/lifecycle"
-	"localllm/internal/mask"
-	"localllm/internal/models"
-	"localllm/internal/opencode"
-	"localllm/internal/pathpolicy"
-	"localllm/internal/pi"
-	"localllm/internal/prepgate"
-	"localllm/internal/probe"
-	"localllm/internal/projectimage"
-	"localllm/internal/sandbox"
-	"localllm/internal/sessionregistry"
+	"kota/assets"
+	"kota/internal/approval"
+	"kota/internal/changereport"
+	"kota/internal/check"
+	"kota/internal/deps"
+	"kota/internal/docker"
+	"kota/internal/engine"
+	"kota/internal/engineimages"
+	"kota/internal/enginesession"
+	"kota/internal/enginevm"
+	"kota/internal/gatewaykey"
+	"kota/internal/hostdata"
+	"kota/internal/interrupt"
+	"kota/internal/lifecycle"
+	"kota/internal/mask"
+	"kota/internal/models"
+	"kota/internal/opencode"
+	"kota/internal/pathpolicy"
+	"kota/internal/pi"
+	"kota/internal/prepgate"
+	"kota/internal/probe"
+	"kota/internal/projectimage"
+	"kota/internal/sandbox"
+	"kota/internal/sessionregistry"
 )
 
 const (
-	baseImage      = "localllm-base:latest"
-	forwarderImage = "localllm-forwarder:latest"
+	baseImage      = "kota-base:latest"
+	forwarderImage = "kota-forwarder:latest"
 	defaultGateway = "http://host.docker.internal:8080"
 	defaultAgent   = opencode.Agent
 	// engineHostAlias is the host as the engine forwarder reaches it, where
@@ -57,12 +57,12 @@ const (
 	// engineBootTimeout bounds the Engine VM's boot to a ready Docker API.
 	engineBootTimeout = 60 * time.Second
 
-	opencodeConfigPath = "/etc/localllm/opencode.json"
+	opencodeConfigPath = "/etc/kota/opencode.json"
 	// opencodeConfigDir is opencode's global config directory. opencode
 	// writes its service state there, so it and ~/.config stay writable on
 	// their own tmpfs, around the read-only opencodeInstructionsPath.
 	opencodeConfigDir = sandbox.Home + "/.config/opencode"
-	// opencodeInstructionsPath holds localllm's instructions to opencode,
+	// opencodeInstructionsPath holds kota's instructions to opencode,
 	// empty when there are none. opencode reads the global AGENTS.md as
 	// well as the project's; its config's instructions setting is ignored.
 	opencodeInstructionsPath = opencodeConfigDir + "/AGENTS.md"
@@ -74,7 +74,7 @@ const (
 	piSessionDir = sandbox.StateDir + "/pi/sessions"
 )
 
-const usage = `usage: localllm <command> [flags]
+const usage = `usage: kota <command> [flags]
 
 commands:
   build                 build the sandbox images and, with QEMU installed,
@@ -96,7 +96,7 @@ commands:
 flags:
   --agent NAME          opencode (default) or pi; pi has no permission
                         system and always runs in full auto
-  --gateway URL         model gateway (default $LOCALLLM_GATEWAY or ` + defaultGateway + `)
+  --gateway URL         model gateway (default $KOTA_GATEWAY or ` + defaultGateway + `)
   --model ID            model to start with (default: models.yaml's default);
                         the agent is offered every model the gateway serves
   --ro PATH             mount PATH read-only at ` + sandbox.ReadOnlyRoot + `/<name> (repeatable)
@@ -108,9 +108,9 @@ flags:
   --shared-caches       clean only: also reset shared caches; all sessions
                         must be idle
 
-dir must be inside the allowed root ($LOCALLLM_ALLOWED_ROOT, default ~/Projects).
-A gateway API key (llama-swap apiKeys) is read from $LOCALLLM_GATEWAY_KEY or
-the file named by $LOCALLLM_GATEWAY_KEY_FILE.
+dir must be inside the allowed root ($KOTA_ALLOWED_ROOT, default ~/Projects).
+A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
+the file named by $KOTA_GATEWAY_KEY_FILE.
 `
 
 func main() {
@@ -118,7 +118,7 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	// A signal stops localllm at the next step, after which it tears down as
+	// A signal stops kota at the next step, after which it tears down as
 	// on an error.
 	interrupt.Catch()
 	var err error
@@ -144,11 +144,11 @@ func main() {
 	}
 	if interrupt.Err() != nil {
 		// Whatever failed, it failed because of the signal.
-		fmt.Fprintln(os.Stderr, "localllm: interrupted")
+		fmt.Fprintln(os.Stderr, "kota: interrupted")
 		os.Exit(130)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "localllm:", err)
+		fmt.Fprintln(os.Stderr, "kota:", err)
 		os.Exit(1)
 	}
 }
@@ -193,7 +193,7 @@ func buildBase() error {
 }
 
 // engineLayout is where engine data lives: the Engine base disk and each
-// project's image archives, in the user cache dir with localllm's other
+// project's image archives, in the user cache dir with kota's other
 // host state, outside every project and sandbox.
 func engineLayout() (engine.Layout, error) {
 	dirs, err := hostdata.Default()
@@ -209,7 +209,7 @@ func buildProject(dir string) error {
 	if err != nil {
 		return err
 	}
-	paths, err := pathpolicy.Validate(dir, nil, pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT")))
+	paths, err := pathpolicy.Validate(dir, nil, pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT")))
 	if err != nil {
 		return err
 	}
@@ -226,7 +226,7 @@ func buildProject(dir string) error {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("the base image %s is missing; run 'localllm build' first", baseImage)
+		return fmt.Errorf("the base image %s is missing; run 'kota build' first", baseImage)
 	}
 	tag := projectimage.Tag(project)
 	fmt.Printf("building %s from %s (no build context: COPY and ADD can't read the project)\n", tag, filepath.Join(project, projectimage.File))
@@ -270,7 +270,7 @@ type agentSetup struct {
 	// render returns the content of each of configs, in order. keyEnv,
 	// when set, names the variable holding the gateway key.
 	render func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error)
-	// notePath is where the agent reads localllm's instructions, mounted
+	// notePath is where the agent reads kota's instructions, mounted
 	// read-only only when there are any, with noteScratch around it.
 	notePath    string
 	noteScratch []string
@@ -383,7 +383,7 @@ func (s *session) engineNote() string {
 	return ""
 }
 
-// engineOptions are what this localllm's Engine VMs share.
+// engineOptions are what this kota's Engine VMs share.
 func engineOptions() (enginesession.Options, error) {
 	layout, err := engineLayout()
 	if err != nil {
@@ -461,7 +461,7 @@ func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
 	fset := flag.NewFlagSet(name, flag.ContinueOnError)
 	agent := fset.String("agent", defaultAgent, "agent `NAME`: opencode or pi")
-	gw := fset.String("gateway", envOr("LOCALLLM_GATEWAY", defaultGateway), "model gateway URL")
+	gw := fset.String("gateway", envOr("KOTA_GATEWAY", defaultGateway), "model gateway URL")
 	model := fset.String("model", "", "model `ID` to start with")
 	var ro stringList
 	fset.Var(&ro, "ro", "mount `PATH` read-only (repeatable)")
@@ -506,7 +506,7 @@ func resolveSessionPaths(sa sessionArgs) (pathpolicy.Paths, error) {
 	if err != nil {
 		return pathpolicy.Paths{}, err
 	}
-	return pathpolicy.Validate(sa.dir, sa.ro, pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT")))
+	return pathpolicy.Validate(sa.dir, sa.ro, pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT")))
 }
 
 // detectDeps works out the project's dependency plan. It only reads the
@@ -780,7 +780,7 @@ func cmdShell(args []string) error {
 		return err
 	}
 	if len(sa.command) > 0 {
-		return errors.New("shell does not take a command; use 'localllm run [dir] -- cmd...' instead")
+		return errors.New("shell does not take a command; use 'kota run [dir] -- cmd...' instead")
 	}
 	sa.shell = true
 	return cmdOffline(sa, false, false)
@@ -899,7 +899,7 @@ func runSession(sess *session, lease *sessionregistry.Lease, model string, auto,
 func startSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) (*docker.Session, func(), error) {
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
-		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'localllm check' to list them\n", n)
+		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'kota check' to list them\n", n)
 	}
 	var catalog models.Catalog
 	st := sess.startup(os.Stderr)
@@ -937,7 +937,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 		}
 		if failed := probe.Failed(results); len(failed) > 0 {
 			printResults(os.Stderr, failed)
-			return fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'localllm check' for details)", len(failed), len(results))
+			return fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'kota check' for details)", len(failed), len(results))
 		}
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
 		if sess.engine == nil {
@@ -949,7 +949,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 		}
 		if failed := probe.Failed(results); len(failed) > 0 {
 			printResults(os.Stderr, failed)
-			return fmt.Errorf("refusing to start: %d of %d Engine VM probes failed (run 'localllm check' for details)", len(failed), len(results))
+			return fmt.Errorf("refusing to start: %d of %d Engine VM probes failed (run 'kota check' for details)", len(failed), len(results))
 		}
 		fmt.Fprintf(os.Stderr, "Engine VM containment verified: %d probes passed\n", len(results))
 		return nil
@@ -1297,7 +1297,7 @@ func cleanProject(project string, shared bool, in io.Reader, out io.Writer) erro
 			return fmt.Errorf("remove %s: %w", path, err)
 		}
 	}
-	fmt.Fprintln(out, "project cleaned; run 'localllm prep' before the next session if dependencies or Engine images are needed")
+	fmt.Fprintln(out, "project cleaned; run 'kota prep' before the next session if dependencies or Engine images are needed")
 	return nil
 }
 
@@ -1463,7 +1463,7 @@ func runPrep(sess *session, cache engineimages.Cache, images *engine.ImagePlan) 
 			return fmt.Errorf("prep install failed: %w", err)
 		}
 	}
-	fmt.Fprintln(os.Stderr, "dependencies installed; 'localllm run' uses them offline")
+	fmt.Fprintln(os.Stderr, "dependencies installed; 'kota run' uses them offline")
 	return nil
 }
 
@@ -1504,7 +1504,7 @@ func runAttached(spec sandbox.Compose, sessionDir string) error {
 func printEmptyDeps(w io.Writer, sess *session, empty []string) {
 	for _, d := range sess.deps.Dirs {
 		if slices.Contains(empty, sandbox.Workspace+"/"+d.Path) {
-			fmt.Fprintf(w, "hint: %s is empty although %s exists; run 'localllm prep %s' to install dependencies\n", d.Path, d.Manifest, sess.project)
+			fmt.Fprintf(w, "hint: %s is empty although %s exists; run 'kota prep %s' to install dependencies\n", d.Path, d.Manifest, sess.project)
 		}
 	}
 }
@@ -1583,7 +1583,7 @@ func offlineRunner(mounts []string, dir string, cmd ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	policy := pathpolicy.Default(home, os.Getenv("LOCALLLM_ALLOWED_ROOT"))
+	policy := pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT"))
 	for _, m := range mounts {
 		if err := policy.CheckReadOnly(m); err != nil {
 			return "", err
@@ -1681,7 +1681,7 @@ func printResults(w io.Writer, results []probe.Result) {
 	}
 }
 
-// newSessionDir creates a per-session directory in localllm's data
+// newSessionDir creates a per-session directory in kota's data
 // directory, which the Docker VM shares.
 func newSessionDir(project string) (string, error) {
 	dirs, err := hostdata.Default()

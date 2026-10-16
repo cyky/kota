@@ -1,4 +1,4 @@
-# Base image for localllm sandboxes: agent + Node + Go toolchains.
+# Base image for kota sandboxes: agent + Node + Go toolchains.
 # Versions are pinned so builds are reproducible; bump them deliberately.
 # Base images are pinned by digest (the multi-arch index); the tag says
 # what it is. To bump: docker buildx imagetools inspect <tag>.
@@ -39,10 +39,10 @@ RUN corepack enable \
 # The per-project state volume and the shared caches (Go modules, corepack,
 # pnpm store) are mounted here. Docker copies this mode into a new volume,
 # so the session's UID (not known at build time) can write it.
-RUN mkdir -p /var/lib/localllm/state /var/lib/localllm/gomod \
-      /var/lib/localllm/corepack /var/lib/localllm/pnpm-store \
- && chmod 1777 /var/lib/localllm/state /var/lib/localllm/gomod \
-      /var/lib/localllm/corepack /var/lib/localllm/pnpm-store
+RUN mkdir -p /var/lib/kota/state /var/lib/kota/gomod \
+      /var/lib/kota/corepack /var/lib/kota/pnpm-store \
+ && chmod 1777 /var/lib/kota/state /var/lib/kota/gomod \
+      /var/lib/kota/corepack /var/lib/kota/pnpm-store
 
 # Sessions run as the host UID with HOME on a tmpfs; nothing here needs root.
 WORKDIR /workspace

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/sandbox"
+	"kota/internal/sandbox"
 )
 
 // fixture lays out a fake home with an allowed root, projects, forbidden
@@ -247,7 +247,7 @@ func TestAllowedRootIsConfigurable(t *testing.T) {
 		t.Error("project outside configured root accepted")
 	}
 	p.AllowedRoot = filepath.Join(home, "missing")
-	if _, err := Validate(filepath.Join(home, "Projects/app"), nil, p); err == nil || !strings.Contains(err.Error(), "LOCALLLM_ALLOWED_ROOT") {
+	if _, err := Validate(filepath.Join(home, "Projects/app"), nil, p); err == nil || !strings.Contains(err.Error(), "KOTA_ALLOWED_ROOT") {
 		t.Errorf("missing allowed root: err = %v", err)
 	}
 }

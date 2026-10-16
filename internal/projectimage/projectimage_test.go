@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const base = "localllm-base:latest"
+const base = "kota-base:latest"
 
 func TestTag(t *testing.T) {
 	a, b := Tag("/Users/me/Projects/a"), Tag("/Users/me/Projects/b")
@@ -17,14 +17,14 @@ func TestTag(t *testing.T) {
 	if a != Tag("/Users/me/Projects/a") {
 		t.Error("tag is not stable")
 	}
-	if !strings.HasPrefix(a, "localllm-project-") || !strings.HasSuffix(a, ":latest") {
+	if !strings.HasPrefix(a, "kota-project-") || !strings.HasSuffix(a, ":latest") {
 		t.Errorf("tag = %s", a)
 	}
 }
 
 func TestChoose(t *testing.T) {
 	const project = "/Users/me/Projects/a"
-	df := []byte("FROM localllm-base:latest\nRUN apt-get install -y tree\n")
+	df := []byte("FROM kota-base:latest\nRUN apt-get install -y tree\n")
 	current := Image{Exists: true, Labels: Labels(df, "sha256:base1")}
 
 	cases := []struct {
@@ -51,7 +51,7 @@ func TestChoose(t *testing.T) {
 			if c.warning == "" && got.Warning != "" {
 				t.Errorf("unexpected warning %q", got.Warning)
 			}
-			if c.warning != "" && (!strings.Contains(got.Warning, c.warning) || !strings.Contains(got.Warning, "localllm build "+project)) {
+			if c.warning != "" && (!strings.Contains(got.Warning, c.warning) || !strings.Contains(got.Warning, "kota build "+project)) {
 				t.Errorf("warning = %q, want %q and the build command", got.Warning, c.warning)
 			}
 		})

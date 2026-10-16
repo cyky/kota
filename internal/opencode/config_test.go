@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"localllm/assets"
-	"localllm/internal/models"
+	"kota/assets"
+	"kota/internal/models"
 )
 
 func base(t *testing.T) []byte {
@@ -68,7 +68,7 @@ var catalog = models.Catalog{
 func TestRender(t *testing.T) {
 	cfg := render(t, base(t), catalog)
 
-	if cfg.Model != "localllm/big" || cfg.SmallModel != "localllm/small" {
+	if cfg.Model != "kota/big" || cfg.SmallModel != "kota/small" {
 		t.Errorf("model = %q, small_model = %q", cfg.Model, cfg.SmallModel)
 	}
 	if cfg.Autoupdate || cfg.Share != "disabled" {
@@ -120,7 +120,7 @@ func TestRenderOverridesProvidersInBase(t *testing.T) {
 	if cfg.Share != "disabled" {
 		t.Errorf("share = %q, want the base value", cfg.Share)
 	}
-	if cfg.Model != "localllm/big" || !slices.Equal(cfg.EnabledProviders, []string{ProviderID}) {
+	if cfg.Model != "kota/big" || !slices.Equal(cfg.EnabledProviders, []string{ProviderID}) {
 		t.Errorf("model = %q, enabled_providers = %v", cfg.Model, cfg.EnabledProviders)
 	}
 	if _, ok := cfg.Provider["openai"]; ok || len(cfg.Provider) != 1 {
@@ -135,8 +135,8 @@ func TestRenderRejectsBadBase(t *testing.T) {
 }
 
 func TestEnvIgnoresProjectConfig(t *testing.T) {
-	env := Env("/etc/localllm/opencode.json")
-	if env["OPENCODE_CONFIG"] != "/etc/localllm/opencode.json" || env["OPENCODE_DISABLE_PROJECT_CONFIG"] != "1" {
+	env := Env("/etc/kota/opencode.json")
+	if env["OPENCODE_CONFIG"] != "/etc/kota/opencode.json" || env["OPENCODE_DISABLE_PROJECT_CONFIG"] != "1" {
 		t.Errorf("env = %v", env)
 	}
 }
@@ -175,7 +175,7 @@ func TestRenderGatewayKey(t *testing.T) {
 		t.Errorf("apiKey = %q without a gateway key, want unset", *k)
 	}
 
-	data, err := Render(base(t), Settings{GatewayURL: "http://gateway:8080", Models: catalog, APIKeyEnv: "LOCALLLM_GATEWAY_KEY"})
+	data, err := Render(base(t), Settings{GatewayURL: "http://gateway:8080", Models: catalog, APIKeyEnv: "KOTA_GATEWAY_KEY"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestRenderGatewayKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// opencode substitutes {env:NAME}; the key itself is never written.
-	if k := withKey.Provider[ProviderID].Options.APIKey; k == nil || *k != "{env:LOCALLLM_GATEWAY_KEY}" {
-		t.Errorf("apiKey = %v, want {env:LOCALLLM_GATEWAY_KEY}", k)
+	if k := withKey.Provider[ProviderID].Options.APIKey; k == nil || *k != "{env:KOTA_GATEWAY_KEY}" {
+		t.Errorf("apiKey = %v, want {env:KOTA_GATEWAY_KEY}", k)
 	}
 }

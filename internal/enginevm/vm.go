@@ -25,8 +25,8 @@ import (
 	"syscall"
 	"time"
 
-	"localllm/internal/engine"
-	"localllm/internal/interrupt"
+	"kota/internal/engine"
+	"kota/internal/interrupt"
 )
 
 // ErrNoQEMU is returned when the QEMU binary for the host isn't installed.
@@ -78,7 +78,7 @@ type VM struct {
 // waiting for the VM to boot. clientCert and clientKey are the session's
 // client certificate, and ca the CA its server certificate is signed by.
 // QEMU gets its own process group, so a Ctrl-C at the terminal reaches
-// localllm, which stops the VM, rather than QEMU directly.
+// kota, which stops the VM, rather than QEMU directly.
 func Start(cmd engine.Command, vm engine.VM, ca, clientCert, clientKey []byte) (*VM, error) {
 	pair, err := tls.X509KeyPair(clientCert, clientKey)
 	if err != nil {
@@ -297,7 +297,7 @@ func (v *VM) Stop() {
 	os.Remove(v.pidfile)
 }
 
-// Recover stops a VM left running by a localllm that died, found through
+// Recover stops a VM left running by a kota that died, found through
 // its pidfile. The process is only signalled if its command line names the
 // pidfile, so a reused PID is never hit.
 func Recover(pidfile string) error {

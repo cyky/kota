@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/assets"
+	"kota/assets"
 )
 
 const testFile = `

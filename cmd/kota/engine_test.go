@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"localllm/internal/changereport"
-	"localllm/internal/deps"
-	"localllm/internal/engine"
-	"localllm/internal/opencode"
-	"localllm/internal/pi"
-	"localllm/internal/prepgate"
-	"localllm/internal/sandbox"
+	"kota/internal/changereport"
+	"kota/internal/deps"
+	"kota/internal/engine"
+	"kota/internal/opencode"
+	"kota/internal/pi"
+	"kota/internal/prepgate"
+	"kota/internal/sandbox"
 )
 
 // fakeEngine puts a stub QEMU on PATH and, unless missing says otherwise,
@@ -86,8 +86,8 @@ func prepareShellSession(sa sessionArgs) (*session, error) {
 
 func TestShellEngineSession(t *testing.T) {
 	project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	fakeEngine(t, project, []string{"postgres:16-alpine"})
 	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project, shell: true, engine: true}
 	sess, err := prepareTestSession(sa, sandbox.ModeRun)
@@ -125,8 +125,8 @@ func TestShellEngineSession(t *testing.T) {
 }
 
 func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	t.Run("not wanted", func(t *testing.T) {
 		project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
 		fakeEngine(t, project, []string{"postgres:16-alpine"})
@@ -167,8 +167,8 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 }
 
 func TestRunEngineSession(t *testing.T) {
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	for _, agent := range []string{opencode.Agent, pi.Agent} {
 		t.Run(agent, func(t *testing.T) {
 			project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
@@ -203,8 +203,8 @@ func TestRunEngineSession(t *testing.T) {
 // without the VM, even when it couldn't start, and tells the agent; and
 // that it changes nothing for a project without an engine.
 func TestNoEngine(t *testing.T) {
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	for _, cmd := range []string{"run", "shell"} {
 		t.Run(cmd, func(t *testing.T) {
 			// No base disk and nothing prepped: the VM couldn't start.
@@ -306,8 +306,8 @@ func TestParseOfflineArgs(t *testing.T) {
 // instructions from: opencode's global AGENTS.md, pi's APPEND_SYSTEM.md.
 // Without an engine, nothing is mounted there.
 func TestAgentEngineInstructions(t *testing.T) {
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	notes := map[string]string{
 		opencode.Agent: opencodeInstructionsPath,
 		pi.Agent:       piAgentDir + "/" + pi.AppendSystem,
@@ -381,16 +381,16 @@ func TestAgentEngineInstructions(t *testing.T) {
 }
 
 func TestEngineSessionRefusals(t *testing.T) {
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	cases := []struct {
 		name    string
 		yaml    string
 		missing []string
 		want    string
 	}{
-		{name: "no base disk", yaml: engineYAML, missing: []string{"base"}, want: "localllm build"},
-		{name: "not prepped", yaml: engineYAML, missing: []string{"archives"}, want: "localllm prep"},
+		{name: "no base disk", yaml: engineYAML, missing: []string{"base"}, want: "kota build"},
+		{name: "not prepped", yaml: engineYAML, missing: []string{"archives"}, want: "kota prep"},
 		{name: "new image not prepped", yaml: "engine:\n  images: [postgres:16-alpine, redis:7]\n", want: "redis:7"},
 		{name: "broken config of an engine project", yaml: "engine: [\n", want: "can't start"},
 	}
@@ -403,7 +403,7 @@ func TestEngineSessionRefusals(t *testing.T) {
 				t.Fatalf("err = %v, want it to mention %q", err, c.want)
 			}
 			cache, _ := os.UserCacheDir()
-			if entries, _ := os.ReadDir(filepath.Join(cache, "localllm", "sessions")); len(entries) > 0 {
+			if entries, _ := os.ReadDir(filepath.Join(cache, "kota", "sessions")); len(entries) > 0 {
 				t.Errorf("session dir left: %v", entries)
 			}
 		})
@@ -411,8 +411,8 @@ func TestEngineSessionRefusals(t *testing.T) {
 }
 
 func TestCheckShowsEngine(t *testing.T) {
-	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
-	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	check := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, engine: true, engineOptional: true}
 	cases := []struct {
 		name, yaml string
@@ -422,8 +422,8 @@ func TestCheckShowsEngine(t *testing.T) {
 	}{
 		{name: "no engine", yaml: "prep:\n  dirs: [.venv]\n", want: []string{"engine: none (no engine section"}},
 		{name: "ready to start", yaml: engineYAML, want: []string{"image postgres:16-alpine (sha256:aaaa"}},
-		{name: "no base disk", yaml: engineYAML, missing: []string{"base"}, want: []string{"image postgres:16-alpine\n", "status: can't start", "localllm build"}, wantErr: true},
-		{name: "not prepped", yaml: engineYAML, missing: []string{"archives"}, want: []string{"status: can't start", "localllm prep"}, wantErr: true},
+		{name: "no base disk", yaml: engineYAML, missing: []string{"base"}, want: []string{"image postgres:16-alpine\n", "status: can't start", "kota build"}, wantErr: true},
+		{name: "not prepped", yaml: engineYAML, missing: []string{"archives"}, want: []string{"status: can't start", "kota prep"}, wantErr: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -484,7 +484,7 @@ func TestPrepGateEngineImages(t *testing.T) {
 			name:   "added and removed",
 			images: engine.Plan([]string{"postgres:16", "nginx"}, last, map[string]string{"postgres:16": digestA, "redis:7": digestA}, all),
 			d:      prepgate.Decision{Inputs: []changereport.Change{{Path: engine.ConfigFile, Kind: changereport.Modified}}},
-			want:   []string{"modified  localllm.yaml", "new      nginx", "removed  redis:7", "git -C /p diff"},
+			want:   []string{"modified  kota.yaml", "new      nginx", "removed  redis:7", "git -C /p diff"},
 		},
 	}
 	for _, c := range cases {

@@ -19,20 +19,20 @@ import (
 
 const (
 	// File is the project's Dockerfile at the project root.
-	File = "localllm.Dockerfile"
+	File = "kota.Dockerfile"
 
 	// LabelDockerfile holds the sha256 of the Dockerfile an image was built
 	// from.
-	LabelDockerfile = "localllm.dockerfile-sha256"
+	LabelDockerfile = "kota.dockerfile-sha256"
 	// LabelBase holds the ID of the base image when the image was built.
-	LabelBase = "localllm.base-id"
+	LabelBase = "kota.base-id"
 )
 
 // Tag returns the image tag of a project directory. It is stable for a
 // path and differs across paths.
 func Tag(projectDir string) string {
 	sum := sha256.Sum256([]byte(projectDir))
-	return fmt.Sprintf("localllm-project-%s:latest", hex.EncodeToString(sum[:])[:32])
+	return fmt.Sprintf("kota-project-%s:latest", hex.EncodeToString(sum[:])[:32])
 }
 
 // Read returns the project's Dockerfile, or nil when there is none. A file
@@ -95,7 +95,7 @@ func Choose(projectDir, base string, dockerfile []byte, built Image, baseID stri
 	if dockerfile == nil {
 		return Choice{Image: base}
 	}
-	fix := fmt.Sprintf("run 'localllm build %s'", projectDir)
+	fix := fmt.Sprintf("run 'kota build %s'", projectDir)
 	if !built.Exists {
 		return Choice{Image: base, Warning: fmt.Sprintf("%s has no image yet, so this session uses the base image; %s", File, fix)}
 	}

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"localllm/internal/deps"
-	"localllm/internal/projectimage"
-	"localllm/internal/sandbox"
+	"kota/internal/deps"
+	"kota/internal/projectimage"
+	"kota/internal/sandbox"
 )
 
 // isolateGit keeps the user's global and system git config out of the tests.
@@ -403,7 +403,7 @@ func TestPlanMasks(t *testing.T) {
 	tests := []struct {
 		name   string
 		files  []string // created empty; a trailing "/" makes a directory
-		ignore string   // .localllmignore content, if any
+		ignore string   // .kotaignore content, if any
 		want   []string
 	}{
 		{
@@ -587,7 +587,7 @@ func TestPlanRefusesBadIgnoreFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Plan(dir, DefaultRules); err == nil {
-		t.Error("symlinked .localllmignore accepted")
+		t.Error("symlinked .kotaignore accepted")
 	}
 }
 

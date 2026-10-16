@@ -140,7 +140,7 @@ func TestSimultaneousModelPublication(t *testing.T) {
 func TestCrashedProcessRecovery(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRegistryProcessHelper$")
-	cmd.Env = append(os.Environ(), "LOCALLLM_REGISTRY_HELPER="+dir)
+	cmd.Env = append(os.Environ(), "KOTA_REGISTRY_HELPER="+dir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestCrashedProcessRecovery(t *testing.T) {
 }
 
 func TestRegistryProcessHelper(t *testing.T) {
-	dir := os.Getenv("LOCALLLM_REGISTRY_HELPER")
+	dir := os.Getenv("KOTA_REGISTRY_HELPER")
 	if dir == "" {
 		return
 	}
