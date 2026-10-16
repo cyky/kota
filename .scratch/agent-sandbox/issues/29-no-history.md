@@ -1,0 +1,58 @@
+# 29 — `--no-history`: run the agent on a copy without git history
+
+Status: needs-triage
+
+## Parent
+
+`.scratch/agent-sandbox/PRD.md`
+
+## What to build
+
+Today the agent sees the project's whole git history. `.git` is mounted in place so git works, and masks don't reach it, so anything ever committed can be read with `git log -p`, including a secret that is masked or deleted now. `.localllmignore` can't help, because `.git` is never searched for mask rules.
+
+`localllm run --no-history [dir]` (and `shell`) runs the **Session** on a shallow copy of the project instead: a working git repository with only the current commit, and no link to the original's history, remotes or config. When the **Session** ends, the agent's commits are brought back into the original repository as a branch, for the user to review and merge.
+
+The manual version works today (see Comments). This issue makes it one flag.
+
+Sketch:
+
+1. **Make the copy.** Use `git clone --depth 1 --single-branch file://<project> <copy>` (the `file://` URL makes `--depth` take effect), then remove the `origin` remote. The agent's git then has one commit and nothing that points back to the original.
+2. **Run the Session on the copy,** with the usual masks, protections, probes and **Engine VM**.
+3. **Bring the work back.** Fetch the copy's new commits into the original as `localllm/<name>-<timestamp>`, and list them in the change report. The copy's working tree may hold uncommitted changes; report them, and say where the copy is.
+
+## Decisions for triage
+
+- **Where the copy lives.** Options: the user cache dir (as the integration tests do; Rancher Desktop shares it), or a sibling under the allowed root. The copy must pass the same path policy as a project, and must never be inside the original.
+- **Kept or throwaway.** A kept copy (one per project, refreshed from `HEAD` at each start) lets the agent resume its own sessions and keeps `prep` results. A throwaway copy is simpler, but every session needs `prep` first.
+- **Volumes and Engine VM data.** Both are keyed by the project path today, so the copy would get its own state and dependency volumes and its own image archives. Options: key them by the original project, so `prep` of the original is reused; or treat the copy as its own project, with its own `prep` and `clean`.
+- **Uncommitted changes in the original.** The clone takes only `HEAD`. Options: refuse with the list of changes (as the full-auto check does), or carry them over as an uncommitted diff.
+- **Fetching back safely.** localllm never runs git on the host against a repository the agent controlled. The copy's config, hooks and objects were all writable by the agent, and local fetch from untrusted repositories has had CVEs. Do the fetch in a throwaway container of the base image, as the uncommitted-changes check does: no network, read-only copy, original's git dir writable only for the new ref. Or ask the user to fetch by hand, with the command printed.
+- **Leases.** Hold the leases of both the original and the copy for the whole session, so `prep`, `clean` or another session can't interleave.
+
+## Acceptance criteria
+
+- [ ] `run --no-history` and `shell --no-history` start a Session on a copy where `git log` shows one commit and `git remote` shows none
+- [ ] Nothing from the original `.git` (older objects, config, remotes, hooks) is readable in the Session
+- [ ] Commits the agent makes are available in the original repository as a branch afterwards, without git running on the host against the copy
+- [ ] The change report lists those commits, and any uncommitted changes left in the copy, with its path
+- [ ] The behaviour for uncommitted changes in the original, the copy's location and lifetime, and how volumes are keyed are decided and documented in the README
+- [ ] Integration test: a project with a secret in an earlier commit; inside a `--no-history` Session, `git log -p` doesn't show it; a commit made there arrives as a branch in the original
+
+## Blocked by
+
+None - can start immediately. Related: `26-agent-commits-capture-masks.md` (commits made in the sandbox can include mask placeholders; the fetched-back branch would carry them too).
+
+## Comments
+
+### 2026-10-16
+
+Asked for after discussing how to keep history from the agent. The manual workaround today:
+
+```sh
+git clone --depth 1 file://$HOME/Projects/app ~/Projects/app-agent
+localllm prep ~/Projects/app-agent
+localllm run ~/Projects/app-agent
+git -C ~/Projects/app fetch ~/Projects/app-agent HEAD:agent-work
+```
+
+The last step runs host git against a repository the agent controlled, which is what this issue should avoid.
