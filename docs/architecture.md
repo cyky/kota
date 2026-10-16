@@ -145,6 +145,7 @@ flowchart TD
 
     subgraph eng["Engine VM"]
         enginesession["enginesession<br/>a session's Engine VM:<br/>prepare, start, ready, probes, stop"]
+        engineimages["engineimages<br/>a project's image archive cache:<br/>plan, fetch with crane"]
         engine["engine<br/>config, QEMU command, certs,<br/>image plan, base disk"]
         enginevm["enginevm<br/>QEMU adapter"]
     end
@@ -167,6 +168,7 @@ flowchart TD
     enginevm --> engine & interrupt
     enginesession --> engine & enginevm & check & docker
     lifecycle --> interrupt
+    engineimages --> engine
 ```
 
 ## Where data lives

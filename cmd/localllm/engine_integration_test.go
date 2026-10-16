@@ -219,7 +219,11 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 	if err != nil || cfg == nil {
 		t.Fatalf("engine config = %+v, %v", cfg, err)
 	}
-	images, err := planEngineImages(project, cfg)
+	cache, err := engineImages(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	images, err := cache.Plan(cfg.Images)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +234,7 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 	defer sess.cleanup()
 	caches(&sess.spec)
 	caches(&sess.fetchSpec)
-	if err := runPrep(sess, images); err != nil {
+	if err := runPrep(sess, cache, images); err != nil {
 		t.Fatal(err)
 	}
 	return images
@@ -583,14 +587,18 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		p, err := planEngineImages(project, cfg)
+		cache, err := engineImages(project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := cache.Plan(cfg.Images)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(p.Added) != 1 || p.Added[0] != bad || len(p.Downloads) != 1 || len(p.Keep) != 1 {
 			t.Fatalf("plan = %+v", p)
 		}
-		err = fetchEngineImages(project, p)
+		err = cache.Fetch(p)
 		if err == nil || !strings.Contains(err.Error(), "download engine image "+bad) {
 			t.Fatalf("err = %v, want it to name %s", err, bad)
 		}
@@ -598,7 +606,7 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 		if err != nil || after == nil || len(after.Archives) != 1 || after.Archives[0] != rec.Archives[0] {
 			t.Errorf("record after a failed download = %+v, %v", after, err)
 		}
-		if err := regularFile(filepath.Join(layout.ArchiveDir(project), rec.Archives[0].File)); err != nil {
+		if info, err := os.Lstat(filepath.Join(layout.ArchiveDir(project), rec.Archives[0].File)); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 			t.Errorf("previous archive: %v", err)
 		}
 	})

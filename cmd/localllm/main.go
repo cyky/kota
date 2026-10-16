@@ -28,6 +28,7 @@ import (
 	"localllm/internal/deps"
 	"localllm/internal/docker"
 	"localllm/internal/engine"
+	"localllm/internal/engineimages"
 	"localllm/internal/enginesession"
 	"localllm/internal/enginevm"
 	"localllm/internal/gatewaykey"
@@ -1154,7 +1155,15 @@ func cmdPrep(args []string) error {
 	if len(depPlan.Steps) == 0 && engineCfg == nil {
 		return fmt.Errorf("nothing to install in %s: no package.json or go.mod; set prep.command in %s", project, deps.ConfigFile)
 	}
-	images, err := planEngineImages(project, engineCfg)
+	cache, err := engineImages(project)
+	if err != nil {
+		return err
+	}
+	var declared []string
+	if engineCfg != nil {
+		declared = engineCfg.Images
+	}
+	images, err := cache.Plan(declared)
 	if err != nil {
 		return err
 	}
@@ -1170,7 +1179,7 @@ func cmdPrep(args []string) error {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
-	err = runPrep(sess, images)
+	err = runPrep(sess, cache, images)
 	sess.cleanup()
 	reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
 	if err != nil {
@@ -1468,7 +1477,7 @@ func readYes(r io.Reader) bool {
 // runPrep runs the install steps with network access, without an agent,
 // the gateway or its key, and carries out the Engine images' plan if set.
 // The containers are gone when it returns.
-func runPrep(sess *session, images *engine.ImagePlan) error {
+func runPrep(sess *session, cache engineimages.Cache, images *engine.ImagePlan) error {
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.mounts.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); install scripts can't read them\n", n)
@@ -1494,7 +1503,7 @@ func runPrep(sess *session, images *engine.ImagePlan) error {
 		return err
 	}
 	if images != nil {
-		if err := fetchEngineImages(sess.project, images); err != nil {
+		if err := cache.Fetch(images); err != nil {
 			return err
 		}
 	}
@@ -1511,160 +1520,26 @@ func runPrep(sess *session, images *engine.ImagePlan) error {
 	return nil
 }
 
-// planEngineImages works out what prep does with the project's Engine
-// images: nil for a project that declares none and has none prepped.
-// Before the user confirms, only the images in the last prep's record are
-// looked up, so a reference an agent wrote into localllm.yaml reaches the
-// network only after the user approved it.
-func planEngineImages(project string, cfg *engine.Config) (*engine.ImagePlan, error) {
+// engineImages is project's Engine image cache. crane runs in a throwaway
+// container of the base image.
+func engineImages(project string) (engineimages.Cache, error) {
 	layout, err := engineLayout()
 	if err != nil {
-		return nil, err
+		return engineimages.Cache{}, err
 	}
-	dir := layout.ArchiveDir(project)
-	last, err := engine.LoadRecord(dir)
-	if err != nil {
-		return nil, err
+	c := engineimages.Cache{
+		Dir: layout.ArchiveDir(project),
+		Run: func(work, script string) error {
+			return docker.RunOnline(baseImage, os.Getuid(), os.Getgid(), work, "sh", "-c", script)
+		},
+		Out: os.Stderr,
 	}
-	if cfg == nil && last == nil {
-		return nil, nil
+	// A host the Engine VM doesn't support can still prep a project
+	// without images; Fetch refuses downloads.
+	if m, err := engine.MachineFor(engineHost()); err == nil {
+		c.Platform = m.Platform
 	}
-	var declared []string
-	if cfg != nil {
-		declared = cfg.Images
-	}
-	var resolved map[string]string
-	if last != nil && len(last.Archives) > 0 {
-		var recorded []string
-		for _, a := range last.Archives {
-			recorded = append(recorded, a.Ref)
-		}
-		fmt.Fprintf(os.Stderr, "looking up the %d engine image tag(s) of the last prep\n", len(recorded))
-		if resolved, err = resolveEngineImages(dir, recorded); err != nil {
-			return nil, err
-		}
-	}
-	have := func(a engine.Archive) bool { return regularFile(filepath.Join(dir, a.File)) == nil }
-	p := engine.Plan(declared, last, resolved, have)
-	return &p, nil
-}
-
-// resolveEngineImages looks up the digests images' tags point to now, with
-// crane in a throwaway container of the base image that has only an empty
-// work directory next to dir mounted.
-func resolveEngineImages(dir string, images []string) (map[string]string, error) {
-	work := dir + ".resolve"
-	if err := os.RemoveAll(work); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(work, 0o700); err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(work)
-	if err := docker.RunOnline(baseImage, os.Getuid(), os.Getgid(), work, "sh", "-c", engine.ResolveScript(images)); err != nil {
-		return nil, engineScriptErr(work, "look up", images, err)
-	}
-	return readEngineDigests(work, images)
-}
-
-// readEngineDigests reads the digests a script wrote into dir for images.
-// The directory was written by a container: only regular files are taken,
-// so a symlink can't point the host at its own files.
-func readEngineDigests(dir string, images []string) (map[string]string, error) {
-	file := filepath.Join(dir, engine.DigestsFile)
-	if err := regularFile(file); err != nil {
-		return nil, fmt.Errorf("engine image digests: %w", err)
-	}
-	content, err := os.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
-	return engine.ParseDigests(images, string(content))
-}
-
-// engineScriptErr is err from a failed engine image script in dir, naming
-// the image it stopped on when that is one of images.
-func engineScriptErr(dir, what string, images []string, err error) error {
-	file := filepath.Join(dir, engine.FailedFile)
-	if regularFile(file) == nil {
-		if content, rerr := os.ReadFile(file); rerr == nil {
-			if ref := strings.TrimSpace(string(content)); slices.Contains(images, ref) {
-				return fmt.Errorf("%s engine image %s: crane failed (its output is above); check the reference in %s: %w", what, ref, engine.ConfigFile, err)
-			}
-		}
-	}
-	return fmt.Errorf("%s engine images: %w", what, err)
-}
-
-// fetchEngineImages carries out the plan p in the project's archive cache.
-// crane runs in a throwaway container of the base image that has only a
-// new archive directory mounted: no project files, so no project code.
-// Only p.Downloads are downloaded; the archives p keeps are linked into
-// the new directory, which replaces the previous one only after every
-// download succeeded.
-func fetchEngineImages(project string, p *engine.ImagePlan) error {
-	if len(p.Downloads) == 0 && !p.Changed() {
-		fmt.Fprintf(os.Stderr, "engine images up to date: %d, as at the last prep\n", len(p.Keep))
-		return nil
-	}
-	layout, err := engineLayout()
-	if err != nil {
-		return err
-	}
-	m, err := engine.MachineFor(engineHost())
-	if err != nil {
-		return err
-	}
-	dir := layout.ArchiveDir(project)
-	staging := dir + ".new"
-	if err := os.RemoveAll(staging); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(staging, 0o700); err != nil {
-		return err
-	}
-	defer os.RemoveAll(staging)
-	digests := map[string]string{}
-	if len(p.Downloads) > 0 {
-		var refs []string
-		for _, a := range p.Downloads {
-			refs = append(refs, a.Ref)
-		}
-		fmt.Fprintf(os.Stderr, "downloading %d engine image(s) for %s (no project code runs); %d unchanged\n", len(refs), m.Platform, len(p.Keep))
-		if err := docker.RunOnline(baseImage, os.Getuid(), os.Getgid(), staging, "sh", "-c", engine.FetchScript(p.Downloads, m.Platform)); err != nil {
-			return engineScriptErr(staging, "download", refs, err)
-		}
-		if digests, err = readEngineDigests(staging, refs); err != nil {
-			return err
-		}
-		for _, a := range p.Downloads {
-			if err := regularFile(filepath.Join(staging, a.File)); err != nil {
-				return fmt.Errorf("download engine image %s: %w", a.Ref, err)
-			}
-		}
-		if err := os.Remove(filepath.Join(staging, engine.DigestsFile)); err != nil {
-			return err
-		}
-	}
-	for _, a := range p.Keep {
-		if err := os.Link(filepath.Join(dir, a.File), filepath.Join(staging, a.File)); err != nil {
-			return fmt.Errorf("keep engine image %s: %w", a.Ref, err)
-		}
-	}
-	rec, err := p.Record(digests)
-	if err != nil {
-		return err
-	}
-	if len(rec.Archives) == 0 {
-		return os.RemoveAll(dir)
-	}
-	if err := rec.Save(staging); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(dir); err != nil {
-		return err
-	}
-	return os.Rename(staging, dir)
+	return c, nil
 }
 
 // runAttached starts spec and runs its agent service attached to the
@@ -1676,19 +1551,6 @@ func runAttached(spec sandbox.Compose, sessionDir string) error {
 	}
 	defer ds.Close()
 	return ds.Interactive()
-}
-
-// regularFile returns an error unless file is a non-empty regular file,
-// not a symlink.
-func regularFile(file string) error {
-	info, err := os.Lstat(file)
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() || info.Size() == 0 {
-		return fmt.Errorf("%s is not a non-empty regular file", file)
-	}
-	return nil
 }
 
 // printEmptyDeps hints at prep for each dependency volume that is empty.
