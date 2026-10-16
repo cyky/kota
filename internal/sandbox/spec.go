@@ -222,8 +222,12 @@ type Inputs struct {
 	Mode Mode
 	// ProjectDir is the resolved absolute host path mounted at Workspace.
 	ProjectDir string
-	UID, GID   int
-	Gateway    Gateway
+	// Key is the project the session belongs to, which names the compose
+	// project: the original project of a No-history copy. Empty means
+	// ProjectDir.
+	Key      string
+	UID, GID int
+	Gateway  Gateway
 	// GatewayKey reports that a gateway API key is configured. The agent
 	// container then takes GatewayKeyEnv from docker compose's environment,
 	// so the key itself is never in the spec. Only ModeRun uses it.
@@ -276,6 +280,11 @@ func ProjectName(projectDir string) string {
 	}
 	return fmt.Sprintf("kota-%s-%s", base, hex.EncodeToString(sum[:])[:8])
 }
+
+// NoHistoryState is the suffix of an agent's state volume name in
+// --no-history Sessions, which keeps them apart from the agent's state in
+// normal Sessions: transcripts there may hold the history.
+const NoHistoryState = "-nohistory"
 
 // StateVolume returns the name of the state volume for an agent in a
 // project directory. It is stable for a path and differs across paths; the
@@ -419,7 +428,11 @@ func Build(in Inputs) Compose {
 		agent.Command = in.Command
 	}
 
-	spec := Compose{Name: ProjectName(in.ProjectDir), Volumes: named, Services: services}
+	key := in.Key
+	if key == "" {
+		key = in.ProjectDir
+	}
+	spec := Compose{Name: ProjectName(key), Volumes: named, Services: services}
 	if prep {
 		agent.Networks = map[string]*NetworkAttach{egressNetwork: {}}
 		spec.Networks = map[string]Network{egressNetwork: {}}

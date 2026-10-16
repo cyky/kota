@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"kota/internal/engine"
 	"kota/internal/hostdata"
@@ -233,6 +234,45 @@ func TestCleanEngineData(t *testing.T) {
 	out.Reset()
 	if err := cleanProject(project, false, strings.NewReader(""), &out); err != nil || !strings.Contains(out.String(), "nothing to clean") {
 		t.Errorf("second clean = %v:\n%s", err, out.String())
+	}
+}
+
+func TestCleanNoHistoryCopies(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "test"})
+	state := sandbox.StateVolume(project, "pi"+sandbox.NoHistoryState)
+	log := fakeVolumeDocker(t, []string{state})
+	dirs, err := hostdata.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	kept := dirs.CopyDir(project, start)
+	other := dirs.CopyDir(project+"-other", start)
+	for _, dir := range []string{kept, other} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out strings.Builder
+	if err := cleanProject(project, false, strings.NewReader("y\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Kept --no-history copies", kept, state} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("confirmation lacks %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), other) {
+		t.Errorf("confirmation lists another project's copy:\n%s", out.String())
+	}
+	if _, err := os.Stat(kept); !os.IsNotExist(err) {
+		t.Errorf("kept copy remains: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("another project's copy removed: %v", err)
+	}
+	if calls, _ := os.ReadFile(log); !strings.Contains(string(calls), "volume rm -f "+state+"\n") {
+		t.Errorf("no-history state volume not removed: %s", calls)
 	}
 }
 

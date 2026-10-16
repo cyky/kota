@@ -94,7 +94,7 @@ kota reduces risk; it isn't a guarantee. Know these before you point it at a pro
 **What the agent can still read or use**
 
 - **Everything in the project that isn't masked.** Masks are found by name. A secret in an unusual file, or one created during the session, isn't masked. Dependency and build directories aren't searched.
-- **Git history.** Masks don't reach `.git`. A secret that is or ever was committed can be read with `git log -p`. kota warns about tracked masked files but doesn't check history.
+- **Git history.** Masks don't reach `.git`. A secret that is or ever was committed can be read with `git log -p`. kota warns about tracked masked files but doesn't check history. `--no-history` runs the session on a copy of the last commit, without the older history; a secret tracked in that commit is still readable.
 - **`--ro` paths** are mounted as they are, without masks.
 - **The gateway key**, if you set one, is readable by the agent. Use a key meant only for the gateway.
 - **The model.** The agent can use the gateway freely, including other models it serves.

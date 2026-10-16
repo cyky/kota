@@ -227,7 +227,7 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, depPlan)
+	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, lease.paths.Project, depPlan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,11 +263,19 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 		t.Fatal(err)
 	}
 	defer releaseProject(lease)
-	depPlan, err := sessionDeps(lease.paths.Project)
+	// Only --no-history goes through offlinePaths: it would also ask the
+	// full-auto question, which these sessions never answer.
+	paths, key := lease.paths, lease.paths.Project
+	if sa.noHistory {
+		if paths, key, err = offlinePaths(sa, lease, sa.agent, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	depPlan, err := sessionDeps(paths.Project, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, depPlan)
+	sess, err := prepareSession(sa, sandbox.ModeRun, paths, key, depPlan)
 	if err != nil {
 		t.Fatal(err)
 	}

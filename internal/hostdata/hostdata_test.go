@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"kota/internal/engine"
 	"kota/internal/sandbox"
@@ -21,7 +22,7 @@ func TestDefaultHasNoFallback(t *testing.T) {
 
 func TestPathsStayUnderRoot(t *testing.T) {
 	d := Dirs{Root: "/data/kota"}
-	for _, p := range []string{d.Engine().Root, d.Registry(), d.Sessions(), d.PrepRecord("/p/app")} {
+	for _, p := range []string{d.Engine().Root, d.Registry(), d.Sessions(), d.PrepRecord("/p/app"), d.CopyDir("/p/app", time.Now())} {
 		if !strings.HasPrefix(p, d.Root+"/") {
 			t.Errorf("%s outside %s", p, d.Root)
 		}
@@ -91,18 +92,29 @@ func TestProjectData(t *testing.T) {
 	if err := os.MkdirAll(layout.ProjectDir(project+"-other"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	start := time.Date(2026, 10, 16, 14, 32, 5, 0, time.Local)
+	copyDir := d.CopyDir(project, start)
+	if want := sandbox.ProjectName(project) + "-2026-10-16-143205"; filepath.Base(copyDir) != want {
+		t.Errorf("copy dir = %s, want %s", copyDir, want)
+	}
+	for _, dir := range []string{copyDir, d.CopyDir(project+"-other", start), copyDir + "-other"} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	data, err = d.ProjectData(project)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if data.Empty() || data.PrepRecord != record || data.EngineDir != layout.ProjectDir(project) ||
-		!slices.Equal(data.Images, []string{"postgres:16-alpine"}) || !slices.Equal(data.Sessions, []string{session}) {
+		!slices.Equal(data.Images, []string{"postgres:16-alpine"}) || !slices.Equal(data.Sessions, []string{session}) ||
+		!slices.Equal(data.Copies, []string{copyDir}) {
 		t.Errorf("data = %+v", data)
 	}
 	// The prep record goes last, so a failed removal keeps the next prep's
 	// confirmation.
-	if want := []string{layout.ProjectDir(project), session, record}; !slices.Equal(data.Paths(), want) {
+	if want := []string{layout.ProjectDir(project), session, copyDir, record}; !slices.Equal(data.Paths(), want) {
 		t.Errorf("paths = %q, want %q", data.Paths(), want)
 	}
 }

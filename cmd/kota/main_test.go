@@ -198,7 +198,7 @@ func prepareTestSession(sa sessionArgs, mode sandbox.Mode) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return prepareSession(sa, mode, paths, depPlan)
+	return prepareSession(sa, mode, paths, paths.Project, depPlan)
 }
 
 // TestPrepSession checks prep gets the same protections as run, the
@@ -322,7 +322,7 @@ func TestBrokenManifestSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	depPlan, err := sessionDeps(project)
+	depPlan, err := sessionDeps(project, project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestBrokenManifestSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := prepareSession(sa, sandbox.ModeRun, paths, depPlan)
+	sess, err := prepareSession(sa, sandbox.ModeRun, paths, paths.Project, depPlan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +813,7 @@ func TestLockedSessionKeepsResolvedPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer releaseProject(otherLease)
-	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, deps.Plan{})
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, lease.paths.Project, deps.Plan{})
 	if err != nil {
 		t.Fatal(err)
 	}

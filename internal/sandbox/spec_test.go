@@ -159,6 +159,19 @@ func TestProjectName(t *testing.T) {
 	}
 }
 
+func TestKeyNamesComposeProject(t *testing.T) {
+	in := testInputs()
+	in.ProjectDir = "/cache/kota/copies/foo-copy"
+	in.Key = "/Users/me/Projects/foo"
+	spec := Build(in)
+	if spec.Name != ProjectName(in.Key) {
+		t.Errorf("compose project = %q, want the key's %q", spec.Name, ProjectName(in.Key))
+	}
+	if v := spec.Services[AgentService].Volumes[0]; v.Source != in.ProjectDir || v.Target != Workspace {
+		t.Errorf("workspace mount = %+v, want %s", v, in.ProjectDir)
+	}
+}
+
 func TestParseGateway(t *testing.T) {
 	tests := []struct {
 		raw     string
@@ -508,6 +521,7 @@ func TestProjectVolumes(t *testing.T) {
 	const project = "/projects/app"
 	want := []string{
 		StateVolume(project, "opencode"), StateVolume(project, "pi"), StateVolume(project, "retired-agent"),
+		StateVolume(project, "pi"+NoHistoryState),
 		DepVolume(project, "node_modules"), DepVolume(project, "old-package/node_modules"),
 	}
 	slices.Sort(want)

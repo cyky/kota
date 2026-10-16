@@ -170,13 +170,13 @@ func Confirm(in io.Reader, out io.Writer, agent string, s Status) bool {
 		fmt.Fprintln(out, "  "+c)
 	}
 	fmt.Fprint(out, "Type y to start anyway: ")
-	answer := strings.TrimSpace(readLine(in))
+	answer := strings.TrimSpace(ReadLine(in))
 	return answer == "y" || answer == "Y"
 }
 
-// readLine reads up to a newline one byte at a time, so nothing after the
+// ReadLine reads up to a newline one byte at a time, so nothing after the
 // answer is consumed: the rest of stdin belongs to the agent.
-func readLine(in io.Reader) string {
+func ReadLine(in io.Reader) string {
 	var line []byte
 	b := make([]byte, 1)
 	for {

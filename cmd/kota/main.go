@@ -36,6 +36,7 @@ import (
 	"kota/internal/lifecycle"
 	"kota/internal/mask"
 	"kota/internal/models"
+	"kota/internal/nohistory"
 	"kota/internal/opencode"
 	"kota/internal/pathpolicy"
 	"kota/internal/pi"
@@ -105,6 +106,9 @@ flags:
   --unsafe-skip-check   run only: start without the containment probes
   --no-engine           run and shell: start without the project's Engine VM;
                         the agent is told tests needing containers can't run
+  --no-history          run and shell: run on a copy of the last commit, with
+                        no older git history, remotes or git config; the copy
+                        is kept, and its path printed, after the session
   --shared-caches       clean only: also reset shared caches; all sessions
                         must be idle
 
@@ -342,9 +346,14 @@ type session struct {
 	fetchSpec  sandbox.Compose
 	gateway    sandbox.Gateway
 	sessionDir string
-	project    string
-	layout     mask.Layout
-	agent      agentSetup
+	// project is the directory mounted at the workspace.
+	project string
+	// key is the project the session belongs to, which its volumes, prep,
+	// image, Engine VM and lease are keyed by: project, or the original
+	// project of a No-history copy.
+	key    string
+	layout mask.Layout
+	agent  agentSetup
 	// gatewayKey is the gateway API key, empty when none is configured. It
 	// only reaches the sandbox through docker compose's environment.
 	gatewayKey string
@@ -444,12 +453,14 @@ type sessionArgs struct {
 	// engineOptional keeps the session going when the Engine VM can't be
 	// set up, recording why in session.engineErr, so check can report it.
 	engineOptional bool
-	agent          string
-	gatewayURL     string
-	model          string
-	dir            string
-	ro             []string
-	command        []string
+	// noHistory runs the session on a No-history copy of the project.
+	noHistory  bool
+	agent      string
+	gatewayURL string
+	model      string
+	dir        string
+	ro         []string
+	command    []string
 }
 
 // stringList is a repeatable string flag.
@@ -518,13 +529,13 @@ func detectDeps(project string) (deps.Plan, error) {
 // sessionDeps is detectDeps for run, shell and check. When detection fails,
 // e.g. on a manifest an agent left broken, the session still starts so the
 // file can be fixed, with the fallback volumes of deps.Fallback. Only prep
-// refuses.
-func sessionDeps(project string) (deps.Plan, error) {
+// refuses. key is the project the session belongs to (see session.key).
+func sessionDeps(project, key string) (deps.Plan, error) {
 	plan, err := detectDeps(project)
 	if err == nil {
 		return plan, nil
 	}
-	file, lerr := prepRecordFile(project)
+	file, lerr := prepRecordFile(key)
 	var last *prepgate.Record
 	if lerr == nil {
 		last, lerr = prepgate.Load(file)
@@ -544,8 +555,9 @@ func sessionDeps(project string) (deps.Plan, error) {
 // to the host (the session dir, seeded protections), so confirmations come
 // first. The agent config is written later by configure. The caller removes
 // sessionDir when done. Prep has no agent, gateway or key and runs the
-// dependency install.
-func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, depPlan deps.Plan) (*session, error) {
+// dependency install. key is the project the session belongs to: paths.Project,
+// or the original project of a No-history copy.
+func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, key string, depPlan deps.Plan) (*session, error) {
 	prep := mode == sandbox.ModePrep
 	var agent agentSetup
 	var err error
@@ -556,12 +568,12 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 	}
 	project := paths.Project
 	var gw sandbox.Gateway
-	var key string
+	var apiKey string
 	if !prep {
 		if gw, err = sandbox.ParseGateway(sa.gatewayURL); err != nil {
 			return nil, err
 		}
-		if key, err = gatewaykey.Load(os.Getenv); err != nil {
+		if apiKey, err = gatewaykey.Load(os.Getenv); err != nil {
 			return nil, err
 		}
 	}
@@ -569,7 +581,9 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 	if err != nil {
 		return nil, err
 	}
-	image, err := chooseImage(project)
+	// The copy's kota.Dockerfile is the original's (nohistory.TakeConfig),
+	// and the image is the original's.
+	image, err := chooseImage(key)
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +599,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 		return nil, err
 	}
 
-	sessionDir, err := newSessionDir(project)
+	sessionDir, err := newSessionDir(key)
 	if err != nil {
 		return nil, err
 	}
@@ -607,17 +621,17 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 		return nil, err
 	}
 
-	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, layout: layout, agent: agent, gatewayKey: key, cfgFiles: cfgFiles, deps: depPlan, image: image}
+	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: agent, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image}
 	var engineRoute *sandbox.EngineRoute
 	if !prep {
 		opts, err := engineOptions()
 		if err == nil && sa.engine {
-			sess.engine, err = enginesession.Prepare(opts, project, sessionDir)
+			sess.engine, err = enginesession.Prepare(opts, key, sessionDir)
 			if err != nil && sa.engineOptional {
 				sess.engine, sess.engineErr, err = nil, err, nil
 			}
 		} else if err == nil {
-			sess.engineOff = enginesession.Declared(opts.Layout, project)
+			sess.engineOff = enginesession.Declared(opts.Layout, key)
 		}
 		if err != nil {
 			os.RemoveAll(sessionDir)
@@ -644,7 +658,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {
 		sess.mountPoints = append(sess.mountPoints, missingDirs(project, d.Path)...)
-		depMounts = append(depMounts, sandbox.Mount{Source: sandbox.DepVolume(project, d.Path), Target: sandbox.Workspace + "/" + d.Path})
+		depMounts = append(depMounts, sandbox.Mount{Source: sandbox.DepVolume(key, d.Path), Target: sandbox.Workspace + "/" + d.Path})
 	}
 	pinned, protectedMounts, err := layout.Bind(project, sessionDir)
 	if err == nil {
@@ -674,7 +688,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 
 	env := map[string]string{}
 	maps.Copy(env, agent.env)
-	maps.Copy(env, gitEnv(project))
+	maps.Copy(env, gitEnv(key))
 	command := sa.command
 	if len(command) == 0 {
 		command = agent.command
@@ -686,15 +700,20 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 	if prep {
 		command = []string{"sh", "-c", depPlan.Script()}
 	} else {
-		stateVolume = sandbox.StateVolume(project, agent.name)
+		state := agent.name
+		if sa.noHistory {
+			state += sandbox.NoHistoryState
+		}
+		stateVolume = sandbox.StateVolume(key, state)
 	}
 	in := sandbox.Inputs{
 		ProjectDir:     project,
+		Key:            key,
 		UID:            os.Getuid(),
 		GID:            os.Getgid(),
 		Mode:           mode,
 		Gateway:        gw,
-		GatewayKey:     key != "",
+		GatewayKey:     apiKey != "",
 		AgentImage:     image.Image,
 		ForwarderImage: forwarderImage,
 		HelperImage:    baseImage,
@@ -758,14 +777,16 @@ func gitEnv(project string) map[string]string {
 // parseOfflineArgs is parseSessionArgs for run and shell, which start the
 // project's Engine VM unless --no-engine.
 func parseOfflineArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
-	var noEngine bool
+	var noEngine, noHistory bool
 	sa, err := parseSessionArgs(name, args, func(f *flag.FlagSet) {
 		f.BoolVar(&noEngine, "no-engine", false, "start without the project's Engine VM")
+		f.BoolVar(&noHistory, "no-history", false, "run on a copy of the last commit, without the git history")
 		if register != nil {
 			register(f)
 		}
 	})
 	sa.engine = !noEngine
+	sa.noHistory = noHistory
 	return sa, err
 }
 
@@ -863,17 +884,24 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	if _, err := models.ParseFile(assets.Models); err != nil {
 		return err
 	}
-	depPlan, err := sessionDeps(lease.paths.Project)
+	paths, key, err := offlinePaths(sa, lease, agent.name, auto)
 	if err != nil {
 		return err
 	}
-	if !sa.shell {
-		if err := confirmFullAuto(lease.paths.Project, agent.name, auto); err != nil {
-			return err
+	// discard removes the copy while no Session has used it yet.
+	discard := func() {
+		if sa.noHistory {
+			os.RemoveAll(paths.Project)
 		}
 	}
-	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, depPlan)
+	depPlan, err := sessionDeps(paths.Project, key)
 	if err != nil {
+		discard()
+		return err
+	}
+	sess, err := prepareSession(sa, sandbox.ModeRun, paths, key, depPlan)
+	if err != nil {
+		discard()
 		return err
 	}
 	// Snapshot before Docker creates any mount points, and compare after
@@ -881,6 +909,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	before, err := changereport.SnapshotWith(sess.project, sess.layout.Watch)
 	if err != nil {
 		sess.cleanup()
+		discard()
 		return fmt.Errorf("snapshot watched files: %w", err)
 	}
 	commits := startCommitCheck(os.Stderr, sess.project)
@@ -889,7 +918,84 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	sess.cleanup()
 	reported := reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
 	commits.report(os.Stderr, sess.layout, reported)
+	if sa.noHistory {
+		fmt.Fprintf(os.Stderr, "no-history: the copy is kept at %s; commits made in it are not brought back to %s yet.\n", sess.project, key)
+		fmt.Fprintln(os.Stderr, "  git in the copy reads config and hooks the agent could write: review its files before running git there.")
+	}
 	return err
+}
+
+// offlinePaths returns the paths a run or shell session mounts and the
+// project it belongs to, after the full-auto prompt or, with --no-history,
+// after making the No-history copy.
+func offlinePaths(sa sessionArgs, lease *lockedProject, agent string, auto bool) (pathpolicy.Paths, string, error) {
+	paths, key := lease.paths, lease.paths.Project
+	if sa.noHistory {
+		// The agent works on the copy, so the original's uncommitted
+		// changes are out of its reach, and the full-auto prompt has
+		// nothing to protect.
+		var err error
+		paths.Project, err = makeNoHistoryCopy(key)
+		return paths, key, err
+	}
+	if !sa.shell {
+		if err := confirmFullAuto(key, agent, auto); err != nil {
+			return paths, key, err
+		}
+	}
+	return paths, key, nil
+}
+
+// makeNoHistoryCopy checks that project can be copied, asks about what
+// the copy leaves out, and makes the No-history copy. It returns the copy's
+// validated path. Call it under project's lease.
+func makeNoHistoryCopy(project string) (string, error) {
+	missing, err := nohistory.Inspect(project, offlineRunner)
+	if err != nil {
+		return "", err
+	}
+	if !missing.Empty() && !interrupt.Ask(func() bool { return nohistory.Confirm(os.Stdin, os.Stderr, missing) }) {
+		return "", errors.New("not started; commit or stash your changes first (git stash -u), or run without --no-history")
+	}
+	dirs, err := hostdata.Default()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dirs.Copies(), 0o700); err != nil {
+		return "", err
+	}
+	dest := dirs.CopyDir(project, time.Now())
+	if _, err := os.Lstat(dest); err == nil {
+		return "", fmt.Errorf("%s already exists; start again in a second", dest)
+	}
+	copied, err := func() (string, error) {
+		if err := nohistory.Clone(project, dest, writableRunner(dirs.Copies())); err != nil {
+			return "", err
+		}
+		if err := nohistory.TakeConfig(project, dest); err != nil {
+			return "", err
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		// The copy passes the same policy as a project, with the copies
+		// dir as its allowed root.
+		paths, err := pathpolicy.Validate(dest, nil, pathpolicy.Default(home, dirs.Copies()))
+		if err != nil {
+			return "", err
+		}
+		if rel, err := filepath.Rel(project, paths.Project); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+			return "", fmt.Errorf("the copy %s would be inside the project", paths.Project)
+		}
+		return paths.Project, nil
+	}()
+	if err != nil {
+		os.RemoveAll(dest)
+		return "", err
+	}
+	fmt.Fprintf(os.Stderr, "no-history: the session runs on a copy of the last commit, without git history, at %s\n", copied)
+	return copied, nil
 }
 
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
@@ -1168,11 +1274,11 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	defer releaseProject(lease)
-	depPlan, err := sessionDeps(lease.paths.Project)
+	depPlan, err := sessionDeps(lease.paths.Project, lease.paths.Project)
 	if err != nil {
 		return err
 	}
-	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, depPlan)
+	sess, err := prepareSession(sa, sandbox.ModeRun, lease.paths, lease.paths.Project, depPlan)
 	if err != nil {
 		return err
 	}
@@ -1330,7 +1436,7 @@ func cmdPrep(args []string) error {
 	if err := confirmPrep(project, depPlan, images); err != nil {
 		return err
 	}
-	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, depPlan)
+	sess, err := prepareSession(sa, sandbox.ModePrep, lease.paths, lease.paths.Project, depPlan)
 	if err != nil {
 		return err
 	}
@@ -1438,6 +1544,12 @@ func cleanProject(project string, shared bool, in io.Reader, out io.Writer) erro
 	if len(data.Sessions) > 0 {
 		fmt.Fprintln(out, "Leftover session directories to remove (from sessions that didn't end cleanly; they may hold Engine VM TLS certificates):")
 		for _, dir := range data.Sessions {
+			fmt.Fprintln(out, "  "+dir)
+		}
+	}
+	if len(data.Copies) > 0 {
+		fmt.Fprintln(out, "Kept --no-history copies to remove (commits or changes made in them that weren't brought back are lost):")
+		for _, dir := range data.Copies {
 			fmt.Fprintln(out, "  "+dir)
 		}
 	}
@@ -1666,7 +1778,7 @@ func runAttached(spec sandbox.Compose, sessionDir string) error {
 func printEmptyDeps(w io.Writer, sess *session, empty []string) {
 	for _, d := range sess.deps.Dirs {
 		if slices.Contains(empty, sandbox.Workspace+"/"+d.Path) {
-			fmt.Fprintf(w, "hint: %s is empty although %s exists; run 'kota prep %s' to install dependencies\n", d.Path, d.Manifest, sess.project)
+			fmt.Fprintf(w, "hint: %s is empty although %s exists; run 'kota prep %s' to install dependencies\n", d.Path, d.Manifest, sess.key)
 		}
 	}
 }
@@ -1753,6 +1865,27 @@ func offlineRunner(mounts []string, dir string, cmd ...string) (string, error) {
 		}
 	}
 	return docker.RunOffline(baseImage, os.Getuid(), os.Getgid(), mounts, dir, cmd...)
+}
+
+// writableRunner is offlineRunner with dir, kota's own, mounted writable
+// for the clone.
+func writableRunner(dir string) nohistory.WritableRunner {
+	return func(mounts []string, writable, wd string, cmd ...string) (string, error) {
+		if writable != dir {
+			return "", fmt.Errorf("refusing to mount %s writable", writable)
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		policy := pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT"))
+		for _, m := range mounts {
+			if err := policy.CheckReadOnly(m); err != nil {
+				return "", err
+			}
+		}
+		return docker.RunOfflineWritable(baseImage, os.Getuid(), os.Getgid(), mounts, writable, wd, cmd...)
+	}
 }
 
 func printModels(w io.Writer, c models.Catalog, err error) {

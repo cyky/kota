@@ -30,12 +30,13 @@ kota run --agent pi [dir] -- pi -c # continue the project's last pi session
 kota shell [dir]                   # interactive Bash in the same offline sandbox
 kota shell --ro ../specs [dir]     # shell with a read-only reference mount
 kota run --no-engine [dir]         # without the project's Engine VM (also for shell)
+kota run --no-history [dir]        # on a copy of the last commit, without git history (also for shell)
 kota check [dir]                   # show mounts, the Engine VM and run the containment probes
 kota clean [dir]                   # remove project state/dependency volumes and engine data after confirmation
 kota clean --shared-caches [dir]   # also reset shared caches; requires all sessions idle
 ```
 
-`kota shell [dir]` opens interactive Bash in `/workspace` as your UID, without starting an agent. It shares `run`'s project image, mounts, secret masks, dependency volumes, gateway access and containment probes. The probes must pass before the shell opens. Use `--agent pi` to select pi's config and state volume (opencode is the default); `--model`, `--gateway`, `--ro` and `--no-engine` work as for `run`. Agent configuration is rendered from the gateway's model list as usual, so the gateway must be available. Shell startup skips Bash profile and rc files. On exit, changed files that can run code on the host are reported, as for `run`. `--auto`, `--unsafe-skip-check` and command overrides are only available on `run`.
+`kota shell [dir]` opens interactive Bash in `/workspace` as your UID, without starting an agent. It shares `run`'s project image, mounts, secret masks, dependency volumes, gateway access and containment probes. The probes must pass before the shell opens. Use `--agent pi` to select pi's config and state volume (opencode is the default); `--model`, `--gateway`, `--ro`, `--no-engine` and `--no-history` work as for `run`. Agent configuration is rendered from the gateway's model list as usual, so the gateway must be available. Shell startup skips Bash profile and rc files. On exit, changed files that can run code on the host are reported, as for `run`. `--auto`, `--unsafe-skip-check` and command overrides are only available on `run`.
 
 Set the gateway with `--gateway URL` or `KOTA_GATEWAY` (default `http://host.docker.internal:8686`).
 
@@ -72,7 +73,7 @@ Models not listed there get conservative values from its `unknown` entry. `--mod
 
 The agent's config is versioned in this repo (`assets/agents/opencode/opencode.json`: permissions and defaults). Each session gets that config plus the gateway provider and model, mounted read-only at `/etc/kota/opencode.json`. Your host `~/.config/opencode`, and any other host agent config, is never mounted. The agent's `HOME` is an empty tmpfs that is discarded when the session ends. opencode ignores the project's `opencode.json` and `.opencode/` directory inside the sandbox, because the agent could write them to change its own permissions. pi's config is versioned the same way (`assets/agents/pi/settings.json`). Each session renders `settings.json` (default model) and `models.json` (the gateway provider and its models), mounted read-only into pi's config directory `~/.pi/agent`. That directory is its own tmpfs, writable because pi creates lock files there, and discarded after the session. The base settings set `defaultProjectTrust` to `never`, so pi doesn't load the project's `.pi/` (settings, extensions, skills, system prompt), which the agent could write for a later session; a `.pi/` of your own isn't used in the sandbox either. `AGENTS.md` and other context files still load. pi's sessions are stored in its state volume via `PI_CODING_AGENT_SESSION_DIR`, which also outranks a `sessionDir` in the project's settings.
 
-Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `kota-state-<agent>-<hash of the project path>`, mounted at `/var/lib/kota/state`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them with `kota clean [dir]`. If the "state writable" probe fails after upgrading, run `kota build` and remove the project's state volume, which an older image created owned by root.
+Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `kota-state-<agent>-<hash of the project path>`, mounted at `/var/lib/kota/state`. `--no-history` sessions have their own, `kota-state-<agent>-nohistory-<hash>`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them with `kota clean [dir]`. If the "state writable" probe fails after upgrading, run `kota build` and remove the project's state volume, which an older image created owned by root.
 
 Only one `run`, `shell`, `prep`, `check` or `clean` can use a project at a time. The registry validates the project and read-only mount paths once, locks that resolved project before creating mount placeholders or touching dependency volumes, and uses those same validated paths for preparation. It holds the lease through confirmations, startup, teardown and the change report. A second command is refused with the running operation, agent, host PID and start time. Symlink aliases share the same lock. Different projects can run concurrently.
 
@@ -95,7 +96,7 @@ Secrets are masked: inside the sandbox they read as an empty file or directory a
 
 - Masks are computed at launch. A secret created on the host during a session isn't masked until the next one.
 - Dependency and build directories (`node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`, ...) aren't searched, to keep launch fast.
-- Masks don't reach git. A secret that is tracked, or was ever committed, can be read from `.git` inside the sandbox (`git log -p -- .env`), and a commit made there would record a tracked one emptied. `run`, `shell`, `check` and `prep` warn about masked files that are tracked now, but history isn't checked. A commit that empties one is reported after the session (see below). To fix it, remove the file from the index (`git rm --cached`) and from history (for example with `git filter-repo`), and rotate the secret, since earlier clones and pushes still have it.
+- Masks don't reach git. A secret that is tracked, or was ever committed, can be read from `.git` inside the sandbox (`git log -p -- .env`), and a commit made there would record a tracked one emptied. `run`, `shell`, `check` and `prep` warn about masked files that are tracked now, but history isn't checked. A commit that empties one is reported after the session (see below). To fix it, remove the file from the index (`git rm --cached`) and from history (for example with `git filter-repo`), and rotate the secret, since earlier clones and pushes still have it. To keep the history out of a session, use `--no-history` (see [Sessions without git history](#sessions-without-git-history)).
 - `--ro` paths aren't masked.
 
 Other files that run things can't be locked without breaking normal work, so `run` reports them instead. It records them before the session and, when it ends, lists any that were added, modified or deleted. The list covers, at any depth, `package.json`, `Makefile`, `*.nix`, `flake.lock`, `.envrc`, mise's `mise.toml`, `.mise.toml`, `mise.local.toml` and `.tool-versions`, `.gitattributes`, `.gitmodules`, `build.rs`, `justfile` and `Justfile`, `Taskfile.yml`, `.pre-commit-config.yaml`, and the `.cargo/` and `.idea/` directories. It also covers the `.github/workflows/`, `.vscode/`, `.devcontainer/`, `.husky/` and `.githooks/` directories (`changereport.Watched`). Content is compared by hash, so restoring a timestamp doesn't hide an edit. Permission changes and symlink targets count too. Review the listed files before you build, install or open the project in an editor. Limits:
@@ -111,6 +112,31 @@ Commits are reported too, after `run`, `shell` and `prep` (a dependency install 
 - a watched file (the list above) changed in a commit when the working tree doesn't show it, for example a workflow edited, committed and then put back. The change runs once the commit is checked out, merged or pushed. Watched files the working tree report already lists aren't repeated.
 
 None of this changes kota's exit status, and kota never amends, reverts or blocks a commit. Git doesn't run on the host against the project for this: the refs and commits are read in a throwaway container of the base image, offline and read-only, with textconv, external diff drivers and fsmonitor off. Remote-tracking refs and stashes aren't checked, and merge commits list no files of their own.
+
+## Sessions without git history
+
+Inside a normal session the agent can read the project's whole git history, including a secret that was committed once and is masked or deleted now. `kota run --no-history [dir]` (or `shell --no-history`) runs the session on a copy of the project's last commit instead: a working git repository with that one commit, and no older commits, remotes, git config, hooks or reflog of the original. The project must be the top of a git repository with at least one commit.
+
+The copy is made by `git clone --depth 1` in a throwaway container of the base image, offline, with the project mounted read-only, so git never runs on the host against the project. It lives in `copies/` in kota's data dir (`~/Library/Caches/kota/copies/<project>-<YYYY-MM-DD-HHMMSS>` on macOS) and must pass the same path rules as a project, with that directory as its allowed root. The session runs on the copy with the usual masks, protections, probes and Engine VM.
+
+The copy holds only what is committed. Before it is made, kota lists what won't be in it, and asks you to type `y`:
+- uncommitted changes (modified, staged, or untracked and not ignored), as the full-auto check lists them. With `--auto` this replaces the full-auto question: the agent works on the copy, so it can't overwrite your changes.
+- submodules, which are empty directories in the copy;
+- files stored in Git LFS, which are pointer files in the copy.
+
+Ignored files (`.env`, local overrides) aren't listed, and aren't in the copy either.
+
+Everything else belongs to the original project: `.kotaignore`, `kota.yaml` and `kota.Dockerfile` are taken from it, even when they aren't committed, so an untracked `.kotaignore` still masks a tracked secret in the copy. They are read-only in the copy, as in a normal session. `prep` runs on the original as usual, and the session uses its dependency volumes, prep record, project image and Engine VM, and its git identity. Only the agent's state is separate (see above), so transcripts from normal sessions, which may hold `git log -p` output, don't reach the copy. The project's lease is held for the whole session.
+
+What the copy doesn't hide: the last commit itself, so a secret that is tracked now is still readable through git (kota warns about tracked masked files as usual), and anything the agent learned in an earlier normal session and wrote into the project.
+
+After the session the change report runs on the copy, and the copy is kept: kota prints its path. Commits made there aren't brought back to the project yet. To fetch them by hand:
+
+```sh
+git -C ~/Projects/app fetch <copy> HEAD:agent-work
+```
+
+That runs git against the copy, whose config the agent could change: look at `<copy>/.git/config` first. `kota clean [dir]` removes the project's kept copies, after listing them.
 
 ## Dependencies
 
@@ -157,7 +183,7 @@ Limits:
 
 ## Cleanup
 
-`kota clean [dir]` lists the project's existing agent state and dependency volumes, then asks you to type `y`. Declining or reaching end of input leaves them in place. It removes state for both agents and dependency volumes for directories no longer mentioned in the current configuration. The selected volume names must match the exact hash of the resolved project path. It also resets the host's prep confirmation record, so the next `prep` asks for approval again, and removes the project's Engine VM data (see [Engine VM](#engine-vm)). When there are no volumes, prep record or engine data, it reports that there is nothing to clean.
+`kota clean [dir]` lists the project's existing agent state and dependency volumes, then asks you to type `y`. Declining or reaching end of input leaves them in place. It removes state for both agents and dependency volumes for directories no longer mentioned in the current configuration. The selected volume names must match the exact hash of the resolved project path. It also resets the host's prep confirmation record, so the next `prep` asks for approval again, removes the project's Engine VM data (see [Engine VM](#engine-vm)) and the copies kept after `--no-history` sessions, with any work in them that wasn't brought back. When there are no volumes, prep record or engine data, it reports that there is nothing to clean.
 
 Cleanup holds the project's session lease through listing, confirmation and removal. It refuses while a run, shell, prep or check is using that project. It works without a model gateway and without parsing the project's dependency configuration, so it can clean up after manifests or configuration have been removed or broken. After cleanup, `run` creates fresh state and empty dependency volumes; run `prep` again to restore dependencies. Project images and source files are preserved.
 

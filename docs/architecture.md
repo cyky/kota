@@ -125,6 +125,7 @@ flowchart TD
         mask["mask<br/>secret masks, git and .envrc protections"]
         deps["deps<br/>dependency plan, kota.yaml prep"]
         projectimage["projectimage<br/>kota.Dockerfile"]
+        nohistory["nohistory<br/>No-history copy: inspect, clone,<br/>kota config from the original"]
     end
 
     subgraph spec["Sandbox definition"]
@@ -161,6 +162,7 @@ flowchart TD
     main --> policy & spec & verify & eng & runtime
     mask --> deps & projectimage & sandbox
     pathpolicy --> sandbox
+    nohistory --> approval & mask & deps & projectimage
     opencode & pi --> models
     check --> docker & probe & sandbox
     probe --> sandbox
@@ -186,5 +188,6 @@ Everything under `kota/` in the user cache dir comes from `internal/hostdata`, w
 | Session lease records | `kota/registry/` in the user cache dir | kept (lock files) |
 | Prep confirmation record | `kota/prep/` | `clean` |
 | Session dir (agent config, engine certs, console log) | `kota/sessions/` | end of session, `clean` for leftovers |
+| No-history copies | `kota/copies/` | `clean` |
 | Engine base disk, kernel, initrd | `kota/engine/base/` | replaced by `build` |
 | Engine image archives, VM pidfile | `kota/engine/projects/<hash>/` | `clean` |

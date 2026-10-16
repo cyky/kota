@@ -77,11 +77,11 @@ func prepareShellSession(sa sessionArgs) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	depPlan, err := sessionDeps(paths.Project)
+	depPlan, err := sessionDeps(paths.Project, paths.Project)
 	if err != nil {
 		return nil, err
 	}
-	return prepareSession(sa, sandbox.ModeRun, paths, depPlan)
+	return prepareSession(sa, sandbox.ModeRun, paths, paths.Project, depPlan)
 }
 
 func TestShellEngineSession(t *testing.T) {
@@ -295,9 +295,18 @@ func TestParseOfflineArgs(t *testing.T) {
 		if err != nil || sa.engine || sa.dir != "app" {
 			t.Errorf("%s --no-engine: engine = %v, dir = %q, err = %v", cmd, sa.engine, sa.dir, err)
 		}
+		if sa.noHistory {
+			t.Errorf("%s: no-history without --no-history", cmd)
+		}
+		sa, err = parseOfflineArgs(cmd, []string{"--no-history", "app"}, nil)
+		if err != nil || !sa.noHistory || sa.dir != "app" {
+			t.Errorf("%s --no-history: noHistory = %v, dir = %q, err = %v", cmd, sa.noHistory, sa.dir, err)
+		}
 	}
-	if _, err := parseSessionArgs("check", []string{"--no-engine"}, nil); err == nil {
-		t.Error("check accepted --no-engine")
+	for _, flag := range []string{"--no-engine", "--no-history"} {
+		if _, err := parseSessionArgs("check", []string{flag}, nil); err == nil {
+			t.Errorf("check accepted %s", flag)
+		}
 	}
 }
 

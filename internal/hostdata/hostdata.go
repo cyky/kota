@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"time"
 
 	"kota/internal/engine"
 	"kota/internal/sandbox"
@@ -60,6 +61,36 @@ func (d Dirs) NewSessionDir(project string) (string, error) {
 	return os.MkdirTemp(d.Sessions(), sandbox.ProjectName(project)+"-"+strconv.Itoa(os.Getpid())+"-")
 }
 
+// Copies holds the No-history copies.
+func (d Dirs) Copies() string { return filepath.Join(d.Root, "copies") }
+
+// copyTime is the timestamp format of a No-history copy's name.
+const copyTime = "2006-01-02-150405"
+
+// CopyDir is where the No-history copy of project for a Session started at
+// start goes, named <project name>-<YYYY-MM-DD-HHMMSS>, as CopyDirs
+// expects. It isn't created.
+func (d Dirs) CopyDir(project string, start time.Time) string {
+	return filepath.Join(d.Copies(), sandbox.ProjectName(project)+"-"+start.Format(copyTime))
+}
+
+// CopyDirs lists project's kept No-history copies. Under the project's
+// lease none of them belongs to a running Session.
+func (d Dirs) CopyDirs(project string) ([]string, error) {
+	entries, err := os.ReadDir(d.Copies())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("list No-history copies: %w", err)
+	}
+	own := regexp.MustCompile(`^` + regexp.QuoteMeta(sandbox.ProjectName(project)) + `-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$`)
+	var dirs []string
+	for _, e := range entries {
+		if own.MatchString(e.Name()) {
+			dirs = append(dirs, filepath.Join(d.Copies(), e.Name()))
+		}
+	}
+	return dirs, nil
+}
+
 // SessionDirs lists project's session directories. Under the project's
 // lease none of them belongs to a running session: they were left by
 // sessions that didn't end cleanly.
@@ -92,11 +123,14 @@ type ProjectData struct {
 	// Sessions are session directories left by sessions that didn't end
 	// cleanly. They may still hold that session's TLS certificates.
 	Sessions []string
+	// Copies are kept No-history copies, which may hold work that wasn't
+	// brought back.
+	Copies []string
 }
 
 // Empty reports whether there is nothing to remove.
 func (p ProjectData) Empty() bool {
-	return p.PrepRecord == "" && p.EngineDir == "" && len(p.Sessions) == 0
+	return p.PrepRecord == "" && p.EngineDir == "" && len(p.Sessions) == 0 && len(p.Copies) == 0
 }
 
 // Paths are the files and directories to remove, in that order: the prep
@@ -107,6 +141,7 @@ func (p ProjectData) Paths() []string {
 		paths = append(paths, p.EngineDir)
 	}
 	paths = append(paths, p.Sessions...)
+	paths = append(paths, p.Copies...)
 	if p.PrepRecord != "" {
 		paths = append(paths, p.PrepRecord)
 	}
@@ -138,6 +173,9 @@ func (d Dirs) ProjectData(project string) (ProjectData, error) {
 	}
 	var err error
 	if p.Sessions, err = d.SessionDirs(project); err != nil {
+		return p, err
+	}
+	if p.Copies, err = d.CopyDirs(project); err != nil {
 		return p, err
 	}
 	return p, nil

@@ -134,12 +134,25 @@ func RecoverProject(projectName string) error {
 // and only mounts, each bind-mounted read-only at its own host path. It
 // returns stdout; a non-zero exit is an error carrying stderr.
 func RunOffline(image string, uid, gid int, mounts []string, dir string, cmd ...string) (string, error) {
+	return RunOfflineWritable(image, uid, gid, mounts, "", dir, cmd...)
+}
+
+// RunOfflineWritable is RunOffline with writable, unless empty, also
+// bind-mounted at its own host path, and writable there.
+func RunOfflineWritable(image string, uid, gid int, mounts []string, writable, dir string, cmd ...string) (string, error) {
 	args := []string{"run", "--rm", "--pull", "never", "--network", "none",
 		"--read-only", "--tmpfs", "/tmp", "-e", "HOME=/tmp",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--user", fmt.Sprintf("%d:%d", uid, gid), "--workdir", dir}
 	for _, m := range mounts {
 		arg, err := bindArg(m)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, "--mount", arg)
+	}
+	if writable != "" {
+		arg, err := mountArg(writable, writable, false)
 		if err != nil {
 			return "", err
 		}
