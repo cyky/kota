@@ -379,9 +379,13 @@ type session struct {
 func (s *session) engineNote() string {
 	switch {
 	case s.engine != nil:
-		return sandbox.EngineNote(true)
+		var images []string
+		for _, a := range s.engine.archives {
+			images = append(images, a.Ref)
+		}
+		return sandbox.EngineNote(true, images)
 	case s.engineOff:
-		return sandbox.EngineNote(false)
+		return sandbox.EngineNote(false, nil)
 	}
 	return ""
 }

@@ -87,8 +87,14 @@ func TestEngineAvailabilitySignal(t *testing.T) {
 }
 
 func TestEngineNote(t *testing.T) {
-	on, off := EngineNote(true), EngineNote(false)
-	for _, want := range []string{EngineEnv + "=" + EngineAvailable, "DOCKER_HOST", "testcontainers", "engine.images"} {
+	on, off := EngineNote(true, []string{"postgres:16-alpine", "redis:7"}), EngineNote(false, nil)
+	for _, want := range []string{
+		EngineEnv + "=" + EngineAvailable, "DOCKER_HOST", "testcontainers",
+		// The declared images, how an undeclared one fails, and the fix.
+		"which you can't change: postgres:16-alpine, redis:7.", "never downloads images",
+		"Unable to find image", "Temporary failure in name resolution", "find it in the failing test's code", "Don't retry",
+		"under engine.images in localllm.yaml and run 'localllm prep' on the host",
+	} {
 		if !strings.Contains(on, want) {
 			t.Errorf("available note lacks %q:\n%s", want, on)
 		}

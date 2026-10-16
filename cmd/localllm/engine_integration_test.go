@@ -116,6 +116,20 @@ func TestPostgres(t *testing.T) {
 	t.Logf("POSTGRES-QUERY-OK via %s", dsn)
 }
 `,
+		"undeclared_test.go": `package app
+
+import (
+	"context"
+	"testing"
+
+	"github.com/testcontainers/testcontainers-go"
+)
+
+func TestUndeclared(t *testing.T) {
+	_, err := testcontainers.Run(context.Background(), "redis:7.4-alpine")
+	t.Logf("UNDECLARED-ERR: %v", err)
+}
+`,
 	}
 	for rel, content := range files {
 		p := filepath.Join(project, rel)
@@ -339,11 +353,34 @@ func TestEngineInShell(t *testing.T) {
 		out := shellSession(t, project, gateway, caches, `
 env | grep -E '^(DOCKER_|TESTCONTAINERS_)' | sort
 docker images --format '{{.Repository}}:{{.Tag}}'
-go test -count=1 -v ./... && echo GO-TEST-PASSED`)
+go test -count=1 -v -run TestPostgres ./... && echo GO-TEST-PASSED`)
 		for _, want := range []string{"DOCKER_HOST=tcp://engine:2376", "TESTCONTAINERS_RYUK_DISABLED=true", "postgres:16-alpine", "POSTGRES-QUERY-OK", "GO-TEST-PASSED"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output lacks %q:\n%s", want, out)
 			}
+		}
+	})
+
+	t.Run("an undeclared image fails without a download, and the note explains it", func(t *testing.T) {
+		start := time.Now()
+		out := shellSession(t, project, gateway, caches, `
+docker run --rm redis:7.4-alpine true; echo "cli=$?"
+go test -count=1 -v -run TestUndeclared ./... 2>&1 | grep UNDECLARED-ERR
+cat `+opencodeInstructionsPath)
+		t.Logf("took %s:\n%s", time.Since(start), out)
+		for _, want := range []string{
+			"Unable to find image 'redis:7.4-alpine' locally", "cli=125",
+			// testcontainers' error names only the registry it couldn't
+			// reach, so the note tells the agent to find the image in the test.
+			"UNDECLARED-ERR: generic container: create container: Error response from daemon: Get \"https://registry-1.docker.io/v2/\"",
+			"which you can't change: postgres:16-alpine.", "run 'localllm prep' on the host",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q", want)
+			}
+		}
+		if strings.Contains(out, "UNDECLARED-ERR: <nil>") {
+			t.Error("the undeclared image started")
 		}
 	})
 

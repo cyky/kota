@@ -190,14 +190,22 @@ type PortForward struct {
 
 // EngineNote is the agent's instruction about its Engine VM, which matches
 // EngineEnv: whether it can run the tests that need containers, and, when it
-// can't, that it must report them as not run instead of passed.
-func EngineNote(available bool) string {
+// can't, that it must report them as not run instead of passed. images are
+// the declared Engine images of an available Engine VM. The VM can't
+// download any other image, and the pull fails with Docker's own network
+// error, so the note says how to read that error and what to tell the user.
+func EngineNote(available bool, images []string) string {
 	if available {
 		return "# Containers\n\n" +
 			"This session has a container engine, the project's Engine VM (" + EngineEnv + "=" + EngineAvailable + "). " +
-			"Docker and testcontainers use it through DOCKER_HOST, so run the project's tests that need containers as part of your checks. " +
-			"It has no network: it runs only the images declared under engine.images in localllm.yaml, which you can't change. " +
-			"If a test needs an image that isn't declared, say which image the user should add.\n"
+			"Docker and testcontainers use it through DOCKER_HOST, so run the project's tests that need containers as part of your checks.\n\n" +
+			"It has no network and never downloads images. It has only the images declared under engine.images in localllm.yaml, which you can't change: " +
+			strings.Join(images, ", ") + ". " +
+			"A test or docker command that needs any other image fails when Docker tries to pull it, with an error such as " +
+			`"Unable to find image", "lookup registry-1.docker.io", "Temporary failure in name resolution", "no such host", "i/o timeout" or another failure to reach a registry. ` +
+			"That means the image isn't declared. testcontainers' error often doesn't name the image: find it in the failing test's code, or the default image of the testcontainers module it uses. " +
+			"Don't retry, switch registries or rewrite the test to avoid the image. " +
+			"Say which tests couldn't run because of it, and tell the user to add the image (with its tag) under engine.images in localllm.yaml and run 'localllm prep' on the host.\n"
 	}
 	return "# Containers\n\n" +
 		"This session has no container engine (" + EngineEnv + "=" + EngineUnavailable + "). " +
