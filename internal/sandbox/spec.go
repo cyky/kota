@@ -60,6 +60,12 @@ const (
 	EngineService = "engine"
 	// EngineCertDir holds the session's Docker client certificate, read-only.
 	EngineCertDir = "/etc/localllm/engine"
+	// EngineEnv tells the agent of a project with an Engine VM whether this
+	// session has it: EngineAvailable, or EngineUnavailable with --no-engine.
+	// It is unset in projects without one.
+	EngineEnv         = "LOCALLLM_ENGINE"
+	EngineAvailable   = "available"
+	EngineUnavailable = "unavailable"
 
 	stateKey = "state"
 
@@ -182,6 +188,24 @@ type PortForward struct {
 	Listen, Target int
 }
 
+// EngineNote is the agent's instruction about its Engine VM, which matches
+// EngineEnv: whether it can run the tests that need containers, and, when it
+// can't, that it must report them as not run instead of passed.
+func EngineNote(available bool) string {
+	if available {
+		return "# Containers\n\n" +
+			"This session has a container engine, the project's Engine VM (" + EngineEnv + "=" + EngineAvailable + "). " +
+			"Docker and testcontainers use it through DOCKER_HOST, so run the project's tests that need containers as part of your checks. " +
+			"It has no network: it runs only the images declared under engine.images in localllm.yaml, which you can't change. " +
+			"If a test needs an image that isn't declared, say which image the user should add.\n"
+	}
+	return "# Containers\n\n" +
+		"This session has no container engine (" + EngineEnv + "=" + EngineUnavailable + "). " +
+		"It was started with --no-engine, so the project's Engine VM is off, and Docker and testcontainers don't work. " +
+		"Tests and checks that need containers can't run in this session. " +
+		"Never report them as passed: when you report your work, list them as not run, and say they need a session with the Engine VM.\n"
+}
+
 // Inputs describes one sandbox session.
 type Inputs struct {
 	Mode Mode
@@ -225,6 +249,9 @@ type Inputs struct {
 	Command []string
 	// Engine, when set, gives a ModeRun session its Engine VM.
 	Engine *EngineRoute
+	// EngineOff marks a ModeRun session of a project with an Engine VM that
+	// runs without it (--no-engine).
+	EngineOff bool
 }
 
 // ProjectName returns a stable compose project name for a project directory.
@@ -332,7 +359,11 @@ func Build(in Inputs) Compose {
 	if prep {
 		engine = nil
 	}
+	if !prep && in.EngineOff && engine == nil {
+		env[EngineEnv] = EngineUnavailable
+	}
 	if engine != nil {
+		env[EngineEnv] = EngineAvailable
 		// Docker and testcontainers use the Engine VM, with the session's
 		// client certificate. Ryuk would need the Docker socket mounted
 		// into a container; the Engine VM is reset every session instead.

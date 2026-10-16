@@ -27,12 +27,13 @@ localllm run --agent pi [dir]          # pi instead of opencode (always full aut
 localllm run --agent pi [dir] -- pi -c # continue the project's last pi session
 localllm shell [dir]                   # interactive Bash in the same offline sandbox
 localllm shell --ro ../specs [dir]     # shell with a read-only reference mount
+localllm run --no-engine [dir]         # without the project's Engine VM (also for shell)
 localllm check [dir]                   # show mounts, the Engine VM and run the containment probes
 localllm clean [dir]                   # remove project state/dependency volumes after confirmation
 localllm clean --shared-caches [dir]   # also reset shared caches; requires all sessions idle
 ```
 
-`localllm shell [dir]` opens interactive Bash in `/workspace` as your UID, without starting an agent. It shares `run`'s project image, mounts, secret masks, dependency volumes, gateway access and containment probes. The probes must pass before the shell opens. Use `--agent pi` to select pi's config and state volume (opencode is the default); `--model`, `--gateway` and `--ro` work as for `run`. Agent configuration is rendered from the gateway's model list as usual, so the gateway must be available. Shell startup skips Bash profile and rc files. On exit, changed files that can run code on the host are reported, as for `run`. `--auto`, `--unsafe-skip-check` and command overrides are only available on `run`.
+`localllm shell [dir]` opens interactive Bash in `/workspace` as your UID, without starting an agent. It shares `run`'s project image, mounts, secret masks, dependency volumes, gateway access and containment probes. The probes must pass before the shell opens. Use `--agent pi` to select pi's config and state volume (opencode is the default); `--model`, `--gateway`, `--ro` and `--no-engine` work as for `run`. Agent configuration is rendered from the gateway's model list as usual, so the gateway must be available. Shell startup skips Bash profile and rc files. On exit, changed files that can run code on the host are reported, as for `run`. `--auto`, `--unsafe-skip-check` and command overrides are only available on `run`.
 
 Set the gateway with `--gateway URL` or `LOCALLLM_GATEWAY` (default `http://host.docker.internal:8080`).
 
@@ -151,13 +152,17 @@ engine:
 
 `localllm prep` downloads the images with crane, after the dependency fetch and with no project code running: crane runs in a throwaway container of the base image that has only the project's new archive directory mounted, not the project. Each tag is resolved to its digest and the image pulled by that digest, so every manifest and layer is checked against it. The archives and their digests are kept in `localllm/engine/projects/<hash of the project path>/images/` under the user cache dir, outside the project and the sandbox. A failed download keeps the previous archives. The first `prep` lists the images in its confirmation, and a change to `localllm.yaml` asks again, as for any prep input.
 
-`localllm shell` starts the project's Engine VM, waits for its Docker API, loads the archives, and points the sandbox at it:
+`localllm run` and `localllm shell` start the project's Engine VM, for opencode and pi alike, wait for its Docker API, load the archives, and point the sandbox at it:
 
 - `DOCKER_HOST=tcp://engine:2376`, `DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/etc/localllm/engine`, so the Docker CLI (in the base image) and testcontainers use it;
 - `TESTCONTAINERS_HOST_OVERRIDE=engine`, so tests connect to their containers' published ports through the same route;
 - `TESTCONTAINERS_RYUK_DISABLED=true`. Ryuk would need the Docker socket mounted into a container, and the VM is reset every session anyway.
 
-The tests need no changes. The VM stops when the shell exits, including on Ctrl-C, SIGTERM or a closed terminal. If localllm itself is killed outright, the next command for the project stops the VM, found through its pidfile. `run` doesn't start the Engine VM yet. `localllm check` does: it lists the declared images with the digests prep recorded, says why the VM can't start if it can't, and shows the Engine VM probes after the sandbox's. Projects without an `engine:` section start no VM and behave as before.
+The tests need no changes. The VM stops when the session ends, including on Ctrl-C, SIGTERM or a closed terminal. If localllm itself is killed outright, the next command for the project stops the VM, found through its pidfile. `localllm check` starts it too: it lists the declared images with the digests prep recorded, says why the VM can't start if it can't, and shows the Engine VM probes after the sandbox's. Projects without an `engine:` section start no VM and behave as before.
+
+The agent is told whether it has the Engine VM, so it doesn't claim its container tests passed when they couldn't run. In an engine project, `LOCALLLM_ENGINE` is `available` or `unavailable`, and a matching note is added to the agent's instructions: a global `~/.config/opencode/AGENTS.md` for opencode, `APPEND_SYSTEM.md` in pi's agent directory for pi, both mounted read-only. pi reads a project's `.pi/APPEND_SYSTEM.md` instead only in trusted projects, and localllm trusts none.
+
+`--no-engine` on `run` or `shell` starts the session without the Engine VM on purpose, for work that doesn't need containers, or when the VM can't start (no QEMU, no base disk, images not prepped). No VM, engine forwarder, certificates or `DOCKER_HOST` are set up, startup says so, and the agent is told that tests needing containers can't run and must be reported as not run, never as passed. In a project without an `engine:` section, `--no-engine` changes nothing, and no variable or note is added.
 
 Containment, set from outside the VM, since the agent has root inside it:
 
@@ -174,14 +179,14 @@ The VM boots its kernel directly, without firmware or a boot loader. With `postg
 
 `localllm build` also builds the Engine base disk, once, in `localllm/engine/base/` under the user cache dir. It downloads the Debian 13 cloud image and checks it against its pinned SHA-512, then runs one online boot that installs Docker from Debian, sets up the port range and the TLS service, disables cloud-init and powers off (about 1.5 minutes). That boot gets its cloud-init seed from a server on the host's loopback, which also receives the kernel, initrd and root partition for the direct boot. It runs no project code and isn't any project's Engine VM. Later builds skip it while it is up to date; sessions warn when the disk is from an older definition. Without QEMU, `build` skips the disk with a note.
 
-Before every `shell`, after the sandbox's probes, the Engine VM is probed too:
+Before every `run` and `shell` with the Engine VM, after the sandbox's probes, the VM is probed too:
 
 - From a probe container inside the VM, on the VM's own network, so with everything root in the VM could reach: the internet over IPv4 and IPv6, DNS (the VM's resolver, QEMU's DNS relay `10.0.2.3` and `1.1.1.1`), and the host through QEMU's host alias `10.0.2.2`, the host's own addresses and the LAN gateway, on the gateway's port, the usual service ports and the host side of the VM's own forwards. All must fail. A connection to the VM itself must succeed, so a broken probe container can't pass for a contained VM. A must-fail probe whose command is missing counts as failed, here and in the sandbox's probes.
 - From the sandbox: the Docker API must answer with the session's certificate and refuse a client without one, and a port published by a probe container in the VM must answer through the engine route.
 
 The VM can't download anything, so the probe image is the forwarder image (alpine with socat), saved from the host's Docker and loaded for the probes only; it and the probe container are removed afterwards. A failed probe blocks the session like a sandbox probe.
 
-A `shell` of an engine project refuses to start, with the fix, when QEMU isn't installed, the Engine base disk isn't built (`localllm build`), a declared image hasn't been prepped (`localllm prep`), the VM doesn't boot to a ready Docker API within 60 seconds, or an Engine VM probe fails. If `localllm.yaml` can't be parsed, a project that was prepped with an engine refuses too, since its images aren't known; other projects start as before.
+A `run` or `shell` of an engine project refuses to start, with the fix, when QEMU isn't installed, the Engine base disk isn't built (`localllm build`), a declared image hasn't been prepped (`localllm prep`), the VM doesn't boot to a ready Docker API within 60 seconds, or an Engine VM probe fails. `--no-engine` starts it anyway, without the VM; `--unsafe-skip-check` skips the Engine VM probes along with the sandbox's. If `localllm.yaml` can't be parsed, a project that was prepped with an engine refuses too, since its images aren't known; other projects start as before.
 
 Requirements: QEMU (`brew install qemu` on macOS; it ships the UEFI firmware the base disk build uses). The setup uses only QEMU features that Linux has too, with KVM instead of macOS's HVF, but it is so far only tested on macOS on Apple silicon.
 

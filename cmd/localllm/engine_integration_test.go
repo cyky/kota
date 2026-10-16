@@ -26,6 +26,8 @@ import (
 	"localllm/internal/engine"
 	"localllm/internal/enginevm"
 	"localllm/internal/models"
+	"localllm/internal/opencode"
+	"localllm/internal/pi"
 	"localllm/internal/probe"
 	"localllm/internal/sandbox"
 )
@@ -221,13 +223,24 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 // returns.
 func withShellSession(t *testing.T, project, gateway string, caches func(*sandbox.Compose), fn func(*session, *docker.Session)) {
 	t.Helper()
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: gateway, dir: project, shell: true, engine: true}
-	lease, err := lockProject(sa, "shell")
+	withSession(t, sessionArgs{agent: defaultAgent, gatewayURL: gateway, dir: project, shell: true, engine: true}, caches, fn)
+}
+
+// withSession is withShellSession for any session args, e.g. a run of an
+// agent, which starts as cmdOffline starts it. Without sa.engine, no
+// Engine VM may start.
+func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn func(*session, *docker.Session)) {
+	t.Helper()
+	operation := "run"
+	if sa.shell {
+		operation = "shell"
+	}
+	lease, err := lockProject(sa, operation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer releaseProject(lease)
-	depPlan, err := sessionDeps(project)
+	depPlan, err := sessionDeps(lease.paths.Project)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,20 +249,23 @@ func withShellSession(t *testing.T, project, gateway string, caches func(*sandbo
 		t.Fatal(err)
 	}
 	defer sess.cleanup()
-	if sess.engine == nil {
-		t.Fatal("no Engine VM in the shell session")
+	if (sess.engine != nil) != sa.engine {
+		t.Fatalf("Engine VM in the session: %v, want %v", sess.engine != nil, sa.engine)
 	}
 	caches(&sess.spec)
 	ds, stop, err := startSession(sess, lease.Lease, "", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vm := sess.engine.running
+	var vm *enginevm.VM
+	if sess.engine != nil {
+		vm = sess.engine.running
+	}
 	func() {
 		defer stop()
 		fn(sess, ds)
 	}()
-	if qemuRunning(vm) {
+	if vm != nil && qemuRunning(vm) {
 		t.Error("the Engine VM still runs after the session")
 	}
 }
@@ -302,6 +318,57 @@ go test -count=1 -v ./... && echo GO-TEST-PASSED`)
 				t.Errorf("output lacks %q:\n%s", want, out)
 			}
 		}
+	})
+
+	notes := map[string]string{opencode.Agent: opencodeInstructionsPath, pi.Agent: piAgentDir + "/" + pi.AppendSystem}
+	for _, agent := range []string{opencode.Agent, pi.Agent} {
+		t.Run("run starts the Engine VM for "+agent, func(t *testing.T) {
+			sa, err := parseOfflineArgs("run", []string{"--agent", agent, "--gateway", gateway, project}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			withSession(t, sa, caches, func(_ *session, ds *docker.Session) {
+				out, err := ds.Capture("bash", "-c", `exec 2>&1
+echo "engine=$LOCALLLM_ENGINE"
+docker image inspect postgres:16-alpine >/dev/null && echo IMAGE-LOADED
+cat `+notes[agent]+`
+echo x > `+notes[agent]+` || echo NOTE-READ-ONLY
+touch "$(dirname `+notes[agent]+`)/state" && echo DIR-WRITABLE`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{"engine=available", "IMAGE-LOADED", "LOCALLLM_ENGINE=available", "DOCKER_HOST", "NOTE-READ-ONLY", "DIR-WRITABLE"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("output lacks %q:\n%s", want, out)
+					}
+				}
+			})
+		})
+	}
+
+	// shell --no-engine takes the same path; TestNoEngine covers it.
+	t.Run("run --no-engine", func(t *testing.T) {
+		sa, err := parseOfflineArgs("run", []string{"--no-engine", "--gateway", gateway, project}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withSession(t, sa, caches, func(_ *session, ds *docker.Session) {
+			if _, err := os.Stat(layout.Pidfile(project)); !os.IsNotExist(err) {
+				t.Errorf("Engine VM pidfile with --no-engine: %v", err)
+			}
+			out, err := ds.Capture("bash", "-c", `exec 2>&1
+echo "engine=$LOCALLLM_ENGINE docker_host=$DOCKER_HOST"
+getent hosts engine || echo NO-ENGINE-ROUTE
+cat `+opencodeInstructionsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"engine=unavailable docker_host=\n", "NO-ENGINE-ROUTE", "not run"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+		})
 	})
 
 	t.Run("only the session's client certificate", func(t *testing.T) {

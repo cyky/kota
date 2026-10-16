@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"localllm/internal/engine"
+	"localllm/internal/opencode"
+	"localllm/internal/pi"
 	"localllm/internal/sandbox"
 )
 
@@ -121,7 +124,7 @@ func TestShellEngineSession(t *testing.T) {
 func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
 	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
-	t.Run("run", func(t *testing.T) {
+	t.Run("not wanted", func(t *testing.T) {
 		project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
 		fakeEngine(t, project, []string{"postgres:16-alpine"})
 		sess, err := prepareTestSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
@@ -158,6 +161,220 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 			t.Error("engine from a broken config")
 		}
 	})
+}
+
+func TestRunEngineSession(t *testing.T) {
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	for _, agent := range []string{opencode.Agent, pi.Agent} {
+		t.Run(agent, func(t *testing.T) {
+			project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
+			fakeEngine(t, project, []string{"postgres:16-alpine"})
+			sa, err := parseOfflineArgs("run", []string{"--agent", agent, project}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess, err := prepareTestSession(sa, sandbox.ModeRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(sess.cleanup)
+			if sess.engine == nil || sess.engineOff {
+				t.Fatalf("run of an engine project: engine %v, off %v", sess.engine != nil, sess.engineOff)
+			}
+			env := sess.spec.Services[sandbox.AgentService].Environment
+			if env["DOCKER_HOST"] != "tcp://engine:2376" || env[sandbox.EngineEnv] != sandbox.EngineAvailable {
+				t.Errorf("env = %v", env)
+			}
+			if _, ok := sess.spec.Services[sandbox.EngineService]; !ok {
+				t.Error("no engine forwarder")
+			}
+			if sess.spec.Services[sandbox.AgentService].Command[0] != agent {
+				t.Errorf("command = %q", sess.spec.Services[sandbox.AgentService].Command)
+			}
+		})
+	}
+}
+
+// TestNoEngine checks --no-engine starts run and shell of an engine project
+// without the VM, even when it couldn't start, and tells the agent; and
+// that it changes nothing for a project without an engine.
+func TestNoEngine(t *testing.T) {
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	for _, cmd := range []string{"run", "shell"} {
+		t.Run(cmd, func(t *testing.T) {
+			// No base disk and nothing prepped: the VM couldn't start.
+			project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
+			fakeEngine(t, project, nil, "base", "archives")
+			sa, err := parseOfflineArgs(cmd, []string{"--no-engine", project}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sa.shell = cmd == "shell"
+			sess, err := prepareShellSession(sa)
+			if err != nil {
+				t.Fatalf("--no-engine refused: %v", err)
+			}
+			t.Cleanup(sess.cleanup)
+			if sess.engine != nil || !sess.engineOff {
+				t.Fatalf("engine %v, off %v", sess.engine != nil, sess.engineOff)
+			}
+			env := sess.spec.Services[sandbox.AgentService].Environment
+			if env[sandbox.EngineEnv] != sandbox.EngineUnavailable {
+				t.Errorf("%s = %q", sandbox.EngineEnv, env[sandbox.EngineEnv])
+			}
+			if _, ok := env["DOCKER_HOST"]; ok {
+				t.Error("DOCKER_HOST with --no-engine")
+			}
+			if _, ok := sess.spec.Services[sandbox.EngineService]; ok {
+				t.Error("engine forwarder with --no-engine")
+			}
+			var out strings.Builder
+			sess.printWarnings(&out)
+			if !strings.Contains(out.String(), "--no-engine: the Engine VM is off") {
+				t.Errorf("warnings = %q", out.String())
+			}
+		})
+	}
+	t.Run("broken config of an engine project", func(t *testing.T) {
+		project := fakeHome(t, map[string]string{engine.ConfigFile: "engine: [\n"})
+		fakeEngine(t, project, []string{"postgres:16-alpine"})
+		sa, err := parseOfflineArgs("run", []string{"--no-engine", project}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sess, err := prepareShellSession(sa)
+		if err != nil {
+			t.Fatalf("--no-engine refused: %v", err)
+		}
+		t.Cleanup(sess.cleanup)
+		if !sess.engineOff {
+			t.Error("a prepped engine project with a broken config isn't marked off")
+		}
+	})
+	t.Run("no engine section", func(t *testing.T) {
+		project := fakeHome(t, map[string]string{"README.md": "x"})
+		specs := map[bool]string{}
+		for _, noEngine := range []bool{false, true} {
+			args := []string{project}
+			if noEngine {
+				args = append(args, "--no-engine")
+			}
+			sa, err := parseOfflineArgs("run", args, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess, err := prepareTestSession(sa, sandbox.ModeRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sess.engineOff || sess.engineNote() != "" {
+				t.Errorf("--no-engine=%v: off %v, note %q", noEngine, sess.engineOff, sess.engineNote())
+			}
+			data, _ := json.Marshal(sess.spec)
+			specs[noEngine] = strings.ReplaceAll(string(data), sess.sessionDir, "SESSION")
+			sess.cleanup()
+		}
+		if specs[false] != specs[true] {
+			t.Errorf("--no-engine changed the spec of a project without an engine:\n%s\n%s", specs[false], specs[true])
+		}
+	})
+}
+
+func TestParseOfflineArgs(t *testing.T) {
+	for _, cmd := range []string{"run", "shell"} {
+		sa, err := parseOfflineArgs(cmd, []string{"app"}, nil)
+		if err != nil || !sa.engine {
+			t.Errorf("%s: engine = %v, err = %v; want the Engine VM by default", cmd, sa.engine, err)
+		}
+		sa, err = parseOfflineArgs(cmd, []string{"app", "--no-engine"}, nil)
+		if err != nil || sa.engine || sa.dir != "app" {
+			t.Errorf("%s --no-engine: engine = %v, dir = %q, err = %v", cmd, sa.engine, sa.dir, err)
+		}
+	}
+	if _, err := parseSessionArgs("check", []string{"--no-engine"}, nil); err == nil {
+		t.Error("check accepted --no-engine")
+	}
+}
+
+// TestAgentEngineInstructions prepares a run of each agent in each engine
+// state and checks what the agent is told, in the file it reads
+// instructions from: opencode's global AGENTS.md, pi's APPEND_SYSTEM.md.
+// Without an engine, nothing is mounted there.
+func TestAgentEngineInstructions(t *testing.T) {
+	t.Setenv("LOCALLLM_GATEWAY_KEY", "")
+	t.Setenv("LOCALLLM_GATEWAY_KEY_FILE", "")
+	notes := map[string]string{
+		opencode.Agent: opencodeInstructionsPath,
+		pi.Agent:       piAgentDir + "/" + pi.AppendSystem,
+	}
+	states := []struct {
+		name string
+		yaml string
+		args []string
+		want string // "" means no instructions
+	}{
+		{name: "available", yaml: engineYAML, want: sandbox.EngineAvailable},
+		{name: "--no-engine", yaml: engineYAML, args: []string{"--no-engine"}, want: sandbox.EngineUnavailable},
+		{name: "no engine section", yaml: "prep:\n  dirs: [.venv]\n"},
+	}
+	for _, name := range []string{opencode.Agent, pi.Agent} {
+		for _, st := range states {
+			t.Run(name+"/"+st.name, func(t *testing.T) {
+				project := fakeHome(t, map[string]string{engine.ConfigFile: st.yaml})
+				fakeEngine(t, project, []string{"postgres:16-alpine"})
+				sa, err := parseOfflineArgs("run", append([]string{"--agent", name, project}, st.args...), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sess, err := prepareTestSession(sa, sandbox.ModeRun)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(sess.cleanup)
+				agent := sess.spec.Services[sandbox.AgentService]
+				var v sandbox.Volume
+				var mounted bool
+				for _, vol := range agent.Volumes {
+					if vol.Target == notes[name] {
+						v, mounted = vol, true
+					}
+				}
+				if st.want == "" {
+					if mounted {
+						t.Errorf("note mounted without an engine: %+v", v)
+					}
+					if name == opencode.Agent && len(agent.Tmpfs) != 1 {
+						t.Errorf("tmpfs = %q, want only HOME", agent.Tmpfs)
+					}
+					return
+				}
+				if !mounted || !v.ReadOnly || !strings.HasPrefix(v.Source, sess.sessionDir+"/") {
+					t.Fatalf("note mount = %+v (found %v), want read-only from the session dir", v, mounted)
+				}
+				if !slices.Contains(sess.mounts.ReadOnly, notes[name]) {
+					t.Error("probes don't check the note is read-only")
+				}
+				// The agent still writes its own state next to the note.
+				dir := path.Dir(notes[name])
+				if !slices.ContainsFunc(agent.Tmpfs, func(s string) bool { return strings.HasPrefix(s, dir+":") }) {
+					t.Errorf("tmpfs = %q, want %s writable", agent.Tmpfs, dir)
+				}
+				data, err := os.ReadFile(v.Source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				note := string(data)
+				if !strings.Contains(note, sandbox.EngineEnv+"="+st.want) || agent.Environment[sandbox.EngineEnv] != st.want {
+					t.Errorf("note = %q, env %s = %q; want %s", note, sandbox.EngineEnv, agent.Environment[sandbox.EngineEnv], st.want)
+				}
+				if st.want == sandbox.EngineUnavailable && !strings.Contains(note, "not run") {
+					t.Errorf("note doesn't say to report container tests as not run: %q", note)
+				}
+			})
+		}
+	}
 }
 
 func TestEngineSessionRefusals(t *testing.T) {

@@ -57,10 +57,18 @@ const (
 	engineProbeImage = "localllm-engine-probe:latest"
 
 	opencodeConfigPath = "/etc/localllm/opencode.json"
+	// opencodeConfigDir is opencode's global config directory. opencode
+	// writes its service state there, so it and ~/.config stay writable on
+	// their own tmpfs, around the read-only opencodeInstructionsPath.
+	opencodeConfigDir = sandbox.Home + "/.config/opencode"
+	// opencodeInstructionsPath holds localllm's instructions to opencode,
+	// empty when there are none. opencode reads the global AGENTS.md as
+	// well as the project's; its config's instructions setting is ignored.
+	opencodeInstructionsPath = opencodeConfigDir + "/AGENTS.md"
 	// piAgentDir is pi's config directory. It is writable, because pi
 	// creates lock files next to its settings, and discarded after the
-	// session; the rendered settings.json and models.json in it are
-	// read-only.
+	// session; the rendered settings.json, models.json and APPEND_SYSTEM.md
+	// in it are read-only.
 	piAgentDir   = sandbox.Home + "/.pi/agent"
 	piSessionDir = sandbox.StateDir + "/pi/sessions"
 )
@@ -94,6 +102,8 @@ flags:
   --auto                run only: opencode approves edits and commands without
                         asking; on uncommitted changes, asks you to type y
   --unsafe-skip-check   run only: start without the containment probes
+  --no-engine           run and shell: start without the project's Engine VM;
+                        the agent is told tests needing containers can't run
   --shared-caches       clean only: also reset shared caches; all sessions
                         must be idle
 
@@ -262,6 +272,10 @@ type agentSetup struct {
 	// render returns the content of each of configs, in order. keyEnv,
 	// when set, names the variable holding the gateway key.
 	render func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error)
+	// notePath is where the agent reads localllm's instructions, mounted
+	// read-only only when there are any, with noteScratch around it.
+	notePath    string
+	noteScratch []string
 	// approval describes, for the startup message, whether the agent asks
 	// before it acts.
 	approval func(auto bool) string
@@ -271,10 +285,12 @@ func agentFor(name string) (agentSetup, error) {
 	switch name {
 	case opencode.Agent:
 		return agentSetup{
-			name:    opencode.Agent,
-			configs: []string{opencodeConfigPath},
-			env:     opencode.Env(opencodeConfigPath),
-			command: []string{"opencode"},
+			name:        opencode.Agent,
+			configs:     []string{opencodeConfigPath},
+			notePath:    opencodeInstructionsPath,
+			noteScratch: []string{path.Dir(opencodeConfigDir), opencodeConfigDir},
+			env:         opencode.Env(opencodeConfigPath),
+			command:     []string{"opencode"},
 			render: func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(opencode.BaseConfig)
 				if err != nil {
@@ -292,11 +308,12 @@ func agentFor(name string) (agentSetup, error) {
 		}, nil
 	case pi.Agent:
 		return agentSetup{
-			name:    pi.Agent,
-			configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json"},
-			scratch: []string{piAgentDir},
-			env:     pi.Env(piAgentDir, piSessionDir),
-			command: []string{"pi"},
+			name:     pi.Agent,
+			configs:  []string{piAgentDir + "/settings.json", piAgentDir + "/models.json"},
+			scratch:  []string{piAgentDir},
+			notePath: piAgentDir + "/" + pi.AppendSystem,
+			env:      pi.Env(piAgentDir, piSessionDir),
+			command:  []string{"pi"},
 			render: func(c models.Catalog, _ bool, keyEnv string) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(pi.BaseSettings)
 				if err != nil {
@@ -351,6 +368,21 @@ type session struct {
 	// engineErr is why the Engine VM can't start, with
 	// sessionArgs.engineOptional.
 	engineErr error
+	// engineOff is set when the project has an Engine VM, but the session
+	// runs without it (--no-engine).
+	engineOff bool
+}
+
+// engineNote is the agent's instruction about the Engine VM: none for a
+// project without one.
+func (s *session) engineNote() string {
+	switch {
+	case s.engine != nil:
+		return sandbox.EngineNote(true)
+	case s.engineOff:
+		return sandbox.EngineNote(false)
+	}
+	return ""
 }
 
 // engineSession is a session's Engine VM: worked out by prepareEngine,
@@ -378,17 +410,9 @@ func prepareEngine(project, sessionDir string) (*engineSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := engine.Read(project)
-	if err != nil {
-		// A broken localllm.yaml shouldn't block a project that never used
-		// an engine, but an engine project can't tell which images to load.
-		if rec, rerr := engine.LoadRecord(layout.ArchiveDir(project)); rerr == nil && rec == nil {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("%w; the Engine VM can't start without knowing its images", err)
-	}
-	if cfg == nil {
-		return nil, nil
+	cfg, err := engineConfig(layout, project)
+	if cfg == nil || err != nil {
+		return nil, err
 	}
 	host := engineHost()
 	m, err := engine.MachineFor(host)
@@ -439,6 +463,33 @@ func prepareEngine(project, sessionDir string) (*engineSession, error) {
 	}
 	return &engineSession{vm: vm, cmd: cmd, certs: certs, archiveDir: layout.ArchiveDir(project), archives: archives, warning: warning,
 		probeTar: filepath.Join(sessionDir, "engine-probe.tar")}, nil
+}
+
+// engineConfig reads project's engine section: nil for a project without
+// an Engine VM.
+func engineConfig(layout engine.Layout, project string) (*engine.Config, error) {
+	cfg, err := engine.Read(project)
+	if err != nil {
+		// A broken localllm.yaml shouldn't block a project that never used
+		// an engine, but an engine project can't tell which images to load.
+		if rec, rerr := engine.LoadRecord(layout.ArchiveDir(project)); rerr == nil && rec == nil {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w; the Engine VM can't start without knowing its images", err)
+	}
+	return cfg, nil
+}
+
+// hasEngine reports whether project has an Engine VM, which a session
+// without it tells the agent about. A broken localllm.yaml of a project
+// that was prepped with an engine counts.
+func hasEngine(project string) (bool, error) {
+	layout, err := engineLayout()
+	if err != nil {
+		return false, err
+	}
+	cfg, err := engineConfig(layout, project)
+	return cfg != nil || err != nil, nil
 }
 
 // route writes the client certificate into dir and returns the sandbox's
@@ -534,6 +585,13 @@ func (s *session) printWarnings(w io.Writer) {
 	if s.engine != nil && s.engine.warning != "" {
 		fmt.Fprintln(w, "WARNING:", s.engine.warning)
 	}
+	if s.engineOff {
+		told := "the agent is told to report them as not run"
+		if s.shell {
+			told = sandbox.EngineEnv + "=" + sandbox.EngineUnavailable
+		}
+		fmt.Fprintf(w, "note: --no-engine: the Engine VM is off, so tests that need containers can't run (%s)\n", told)
+	}
 }
 
 // cleanup removes what the session left on the host. Call it after the
@@ -551,7 +609,8 @@ func (s *session) cleanup() {
 type sessionArgs struct {
 	exclusiveCaches bool
 	shell           bool
-	// engine starts the project's Engine VM, if it declares one.
+	// engine starts the project's Engine VM, if it declares one. Without
+	// it, a run session of such a project tells the agent the VM is off.
 	engine bool
 	// engineOptional keeps the session going when the Engine VM can't be
 	// set up, recording why in session.engineErr, so check can report it.
@@ -729,6 +788,25 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 			os.RemoveAll(sessionDir)
 			return nil, err
 		}
+	} else if !prep {
+		if sess.engineOff, err = hasEngine(project); err != nil {
+			os.RemoveAll(sessionDir)
+			return nil, err
+		}
+	}
+	// The note is mounted only when there is one, so a project without an
+	// Engine VM gives the agent exactly what it did before.
+	readOnlyTargets := agent.configs
+	scratch := agent.scratch
+	if note := sess.engineNote(); note != "" {
+		file := filepath.Join(sessionDir, "agent", path.Base(agent.notePath))
+		if err := os.WriteFile(file, []byte(note), 0o644); err != nil {
+			os.RemoveAll(sessionDir)
+			return nil, err
+		}
+		cfgMounts = append(cfgMounts, sandbox.Mount{Source: file, Target: agent.notePath})
+		readOnlyTargets = append(slices.Clip(readOnlyTargets), agent.notePath)
+		scratch = append(slices.Clip(scratch), agent.noteScratch...)
 	}
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {
@@ -744,7 +822,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 		return nil, err
 	}
 	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
-	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, agent.configs...)
+	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, readOnlyTargets...)
 	if !prep {
 		sess.mounts.State = sandbox.StateDir
 	}
@@ -783,12 +861,13 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, d
 		HelperImage:    baseImage,
 		Pinned:         pinned,
 		ReadOnly:       append(append(cfgMounts, protectedMounts...), paths.ReadOnly...),
-		Scratch:        agent.scratch,
+		Scratch:        scratch,
 		StateVolume:    stateVolume,
 		Deps:           depMounts,
 		Env:            env,
 		Command:        command,
 		Engine:         engineRoute,
+		EngineOff:      sess.engineOff,
 	}
 	sess.spec = sandbox.Build(in)
 	if prep {
@@ -836,9 +915,23 @@ func gitEnv(project string) map[string]string {
 	return env
 }
 
+// parseOfflineArgs is parseSessionArgs for run and shell, which start the
+// project's Engine VM unless --no-engine.
+func parseOfflineArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
+	var noEngine bool
+	sa, err := parseSessionArgs(name, args, func(f *flag.FlagSet) {
+		f.BoolVar(&noEngine, "no-engine", false, "start without the project's Engine VM")
+		if register != nil {
+			register(f)
+		}
+	})
+	sa.engine = !noEngine
+	return sa, err
+}
+
 func cmdRun(args []string) error {
 	var skipCheck, auto bool
-	sa, err := parseSessionArgs("run", args, func(f *flag.FlagSet) {
+	sa, err := parseOfflineArgs("run", args, func(f *flag.FlagSet) {
 		f.BoolVar(&skipCheck, "unsafe-skip-check", false, "start without running the containment probes")
 		f.BoolVar(&auto, "auto", false, "approve edits and commands without asking")
 	})
@@ -849,7 +942,7 @@ func cmdRun(args []string) error {
 }
 
 func cmdShell(args []string) error {
-	sa, err := parseSessionArgs("shell", args, nil)
+	sa, err := parseOfflineArgs("shell", args, nil)
 	if err != nil {
 		return err
 	}
@@ -857,7 +950,6 @@ func cmdShell(args []string) error {
 		return errors.New("shell does not take a command; use 'localllm run [dir] -- cmd...' instead")
 	}
 	sa.shell = true
-	sa.engine = true
 	return cmdOffline(sa, false, false)
 }
 

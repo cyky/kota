@@ -20,6 +20,12 @@ const ProviderID = "localllm"
 // BaseSettings is the path of the base settings in assets.Agents.
 const BaseSettings = "agents/pi/settings.json"
 
+// AppendSystem is the file in pi's agent directory whose content pi adds
+// to its system prompt. A project's .pi/APPEND_SYSTEM.md would replace it,
+// but pi reads that only in trusted projects, and the base settings trust
+// none.
+const AppendSystem = "APPEND_SYSTEM.md"
+
 // placeholderKey is used without a gateway key: pi only offers a
 // provider's models when it has a key, and the gateway doesn't check it.
 const placeholderKey = "localllm"

@@ -45,6 +45,64 @@ func TestEngineEnvOnlyForEngineProjects(t *testing.T) {
 	}
 }
 
+func TestEngineAvailabilitySignal(t *testing.T) {
+	off := testInputs()
+	off.EngineOff = true
+	// EngineOff alongside a route is a caller bug; the route wins.
+	both := engineInputs()
+	both.EngineOff = true
+	cases := []struct {
+		name string
+		in   Inputs
+		want string // "" means unset
+	}{
+		{name: "engine", in: engineInputs(), want: EngineAvailable},
+		{name: "no engine section", in: testInputs()},
+		{name: "--no-engine", in: off, want: EngineUnavailable},
+		{name: "route and off", in: both, want: EngineAvailable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := Build(c.in)
+			env := spec.Services[AgentService].Environment
+			got, ok := env[EngineEnv]
+			if got != c.want || ok != (c.want != "") {
+				t.Errorf("%s = %q (set %v), want %q", EngineEnv, got, ok, c.want)
+			}
+			if c.want == EngineUnavailable {
+				for k := range engineEnv {
+					if _, ok := env[k]; ok {
+						t.Errorf("%s set with --no-engine", k)
+					}
+				}
+				if _, ok := spec.Services[EngineService]; ok {
+					t.Error("engine forwarder with --no-engine")
+				}
+				if _, _, ok := volumeAt(spec, AgentService, EngineCertDir); ok {
+					t.Error("client certs mounted with --no-engine")
+				}
+			}
+		})
+	}
+}
+
+func TestEngineNote(t *testing.T) {
+	on, off := EngineNote(true), EngineNote(false)
+	for _, want := range []string{EngineEnv + "=" + EngineAvailable, "DOCKER_HOST", "testcontainers", "engine.images"} {
+		if !strings.Contains(on, want) {
+			t.Errorf("available note lacks %q:\n%s", want, on)
+		}
+	}
+	for _, want := range []string{EngineEnv + "=" + EngineUnavailable, "--no-engine", "not run", "Never report them as passed"} {
+		if !strings.Contains(off, want) {
+			t.Errorf("unavailable note lacks %q:\n%s", want, off)
+		}
+	}
+	if strings.Contains(on, "not run") || strings.Contains(off, "DOCKER_HOST") {
+		t.Error("notes mix up the two states")
+	}
+}
+
 func TestEngineEnvWinsOverInputs(t *testing.T) {
 	in := engineInputs()
 	in.Env = map[string]string{"DOCKER_HOST": "unix:///var/run/docker.sock", "TESTCONTAINERS_RYUK_DISABLED": "false"}
@@ -143,6 +201,10 @@ func TestEngineIgnoredInPrep(t *testing.T) {
 			in := engineInputs()
 			in.Mode = mode
 			spec := Build(in)
+			in.Engine, in.EngineOff = nil, true
+			if _, ok := Build(in).Services[AgentService].Environment[EngineEnv]; ok {
+				t.Errorf("%s in prep", EngineEnv)
+			}
 			if _, ok := spec.Services[EngineService]; ok {
 				t.Error("engine forwarder in prep")
 			}
