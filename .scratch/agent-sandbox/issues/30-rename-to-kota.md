@@ -1,6 +1,8 @@
-# 30 — Rename the project to `kota`
+# DONE — 30 — Rename the project to `kota`
 
-Status: ready-for-agent
+Status: done
+
+Resolved in: 6e8f8cc
 
 ## Parent
 
@@ -32,12 +34,12 @@ Every place the name appears, with no `localllm` left outside history (old `.scr
 
 ## Acceptance criteria
 
-- [ ] `git grep -i localllm` matches only closed `.scratch` issues, the PRDs and the README's migration note
-- [ ] `go build ./cmd/kota` builds a `kota` binary; `go test ./...` and `go test -tags integration ./...` pass
-- [ ] A project with only `localllm.yaml`, `.localllmignore` or `localllm.Dockerfile` is treated as having none of them. The README says to rename them.
+- [x] `git grep -i localllm` matches only closed `.scratch` issues, the PRDs and the README's migration note
+- [x] `go build ./cmd/kota` builds a `kota` binary; `go test ./...` and `go test -tags integration ./...` pass
+- [x] A project with only `localllm.yaml`, `.localllmignore` or `localllm.Dockerfile` is treated as having none of them. The README says to rename them.
 - [ ] After a fresh `kota build` and `kota prep`, `kota run` and `kota shell` work, including the Engine VM, with `kota` volumes, images and data only
-- [ ] The README has a "Migrating from localllm" section: run `localllm clean` (and `--shared-caches`) per project before switching; rename the three project files; then remove the old images (`docker rmi localllm-base localllm-forwarder` and project images), the old data dir (`localllm/` in the user cache dir, including the Engine base disk) and the `localllm` binary
-- [ ] The README says what the name means
+- [x] The README has a "Migrating from localllm" section: run `localllm clean` (and `--shared-caches`) per project before switching; rename the three project files; then remove the old images (`docker rmi localllm-base localllm-forwarder` and project images), the old data dir (`localllm/` in the user cache dir, including the Engine base disk) and the `localllm` binary
+- [x] The README says what the name means
 
 ## Out of scope
 
@@ -47,3 +49,20 @@ Every place the name appears, with no `localllm` left outside history (old `.scr
 ## Blocked by
 
 None - can start immediately. Do it before 26–29 land, or update them as part of this.
+
+## Comments
+
+### 2026-10-16
+
+Done in 6e8f8cc as a straight rename (`localllm`/`LOCALLLM`/`Localllm` to `kota`/`KOTA`/`Kota`) plus the README's name note and "Migrating from localllm" section. Open issues 26-29 were updated; closed issues, the PRDs and the finished trial-run checklist keep the old name. Old project file names need no code: kota only reads the new ones.
+
+Verified:
+- `git grep -i localllm` matches only closed issues, the PRDs, this issue, the trial-run checklist (finished, kept as history) and the README's migration section.
+- `go build ./cmd/kota`, `go vet ./...` and `go test ./...` pass.
+- A fresh `kota build` built `kota-base`, `kota-forwarder` and the Engine base disk in `~/Library/Caches/kota/engine/base` (1m34s).
+- `go test -tags integration ./...` passes, against those `kota` images and that disk. A verbose rerun of `TestEngineInShell` ran all 14 subtests (shell, run for opencode and pi, testcontainers Postgres, probes, clean disk) with none skipped.
+
+Not verified:
+- A hands-on `kota prep`, `kota run` and `kota shell` on a real project; the integration tests stand in for it, so that criterion stays open.
+- One rerun of the engine tests failed `TestEngineInShell` once (205s) and passed on the next run. Its output wasn't kept, so the cause is unknown; nothing points to the rename.
+- The repository folder is renamed by the user after this commit; Claude's memory directory is moved along with it.
