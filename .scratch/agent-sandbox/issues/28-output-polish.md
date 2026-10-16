@@ -1,7 +1,9 @@
-# 28 — Output polish from the trial run
+# DONE — 28 — Output polish from the trial run
 
-Status: ready-for-agent
+Status: done
 Category: bug
+
+Resolved in: 24b56c9
 
 ## Parent
 
@@ -17,10 +19,10 @@ Small output problems found in the issue 17 trial run, done together:
 
 ## Acceptance criteria
 
-- [ ] Probe output lines up for all current probe names
-- [ ] No garbled progress lines from `prep` or `run`
-- [ ] A failed prep ends with a summary naming the command that failed
-- [ ] Tests updated
+- [x] Probe output lines up for all current probe names
+- [x] No garbled progress lines from `prep` or `run`
+- [x] A failed prep ends with a summary naming the command that failed
+- [x] Tests updated
 
 ## Blocked by
 
@@ -53,12 +55,23 @@ None - can start immediately
 - The prep install step and the `deps.Plan` steps it runs
 
 **Acceptance criteria:**
-- [ ] Probe rows line up for all current probe names, including `internet [2606:4700:4700::1111]:443` and `read-only /etc/kota/opencode.json`
-- [ ] `prep` and `run` print no Compose progress lines
-- [ ] A failed prep install ends with a summary naming the failed command, and the first error line when one is found
-- [ ] Unit tests for probe table alignment and for picking the first error line; existing tests updated
+- [x] Probe rows line up for all current probe names, including `internet [2606:4700:4700::1111]:443` and `read-only /etc/kota/opencode.json`
+- [x] `prep` and `run` print no Compose progress lines
+- [x] A failed prep install ends with a summary naming the failed command (first error line dropped, see below)
+- [x] Unit tests for probe table alignment and for the failure summary; existing tests updated
 
 **Out of scope:**
 - Changing which probes run or what they check
 - Hiding or truncating the install output itself
 - Other output changes not listed here
+
+**2026-10-16 — Done.**
+1. The probe table's name column is as wide as the longest name in the table being printed.
+2. The garbled line is a Compose v5.3.1 bug: under a TTY it draws `[+] start 1/1`, then moves the cursor up and writes `[+]  1/1` over it without clearing the line, leaving `[+]  1/1t 1/1`. Every kota `docker compose` call now passes `--progress quiet`. Container output and Compose errors still come through.
+3. A failed fetch or install step ends with `kota: install step <name> failed (exit N): <command>`, printed by an EXIT trap in the generated script after the package manager's output. It also stops at a failure inside a multi-line step.
+
+Changed from the brief: the summary doesn't include the first error line. Finding it means capturing the install output, and when kota's stdout is a pipe, Compose gives the container no TTY, which changes npm's output and Ctrl-C handling during prep. The user chose to keep the TTY and drop the first error line.
+
+README: one sentence on the failure summary in the `prep` section.
+
+Verified: `TestPrintResultsAligned` (built from `probe.Suite` with the long names from the trial run) and `TestScriptFailureSummary` (runs a generated script whose second step fails part way). The generated script was also run in `kota-base` (dash) and `alpine:3` (busybox). The Compose redraw and the `--progress quiet` fix were reproduced under a PTY in a throwaway Compose project, which was then removed. No automated test covers the progress flag. `go vet`, the unit suite and the integration tests for `internal/check`, `cmd/kota` and `internal/docker` pass; the full integration suite wasn't run.
