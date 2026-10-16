@@ -55,7 +55,7 @@ kota was called localllm. It starts fresh: it doesn't read localllm's volumes, i
 
 ## How it works
 
-Diagrams of the runtime, the command flows, the packages and where data lives are in [docs/architecture.md](docs/architecture.md).
+Diagrams of the runtime, the command flows, the packages and where data lives are in [docs/architecture.md](docs/architecture.md). An overview of how the sandbox protects the host, and its limits, is in [docs/sandbox.md](docs/sandbox.md).
 
 The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway. Inside the sandbox the gateway is `http://gateway:8080`. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
 
