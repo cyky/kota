@@ -29,7 +29,7 @@ localllm shell [dir]                   # interactive Bash in the same offline sa
 localllm shell --ro ../specs [dir]     # shell with a read-only reference mount
 localllm run --no-engine [dir]         # without the project's Engine VM (also for shell)
 localllm check [dir]                   # show mounts, the Engine VM and run the containment probes
-localllm clean [dir]                   # remove project state/dependency volumes after confirmation
+localllm clean [dir]                   # remove project state/dependency volumes and engine data after confirmation
 localllm clean --shared-caches [dir]   # also reset shared caches; requires all sessions idle
 ```
 
@@ -135,7 +135,7 @@ Limits:
 
 ## Cleanup
 
-`localllm clean [dir]` lists the project's existing agent state and dependency volumes, then asks you to type `y`. Declining or reaching end of input leaves them in place. It removes state for both agents and dependency volumes for directories no longer mentioned in the current configuration. The selected volume names must match the exact hash of the resolved project path. It also resets the host's prep confirmation record, so the next `prep` asks for approval again. When there are no volumes or prep record, it reports that there is nothing to clean.
+`localllm clean [dir]` lists the project's existing agent state and dependency volumes, then asks you to type `y`. Declining or reaching end of input leaves them in place. It removes state for both agents and dependency volumes for directories no longer mentioned in the current configuration. The selected volume names must match the exact hash of the resolved project path. It also resets the host's prep confirmation record, so the next `prep` asks for approval again, and removes the project's Engine VM data (see [Engine VM](#engine-vm)). When there are no volumes, prep record or engine data, it reports that there is nothing to clean.
 
 Cleanup holds the project's session lease through listing, confirmation and removal. It refuses while a run, shell, prep or check is using that project. It works without a model gateway and without parsing the project's dependency configuration, so it can clean up after manifests or configuration have been removed or broken. After cleanup, `run` creates fresh state and empty dependency volumes; run `prep` again to restore dependencies. Project images and source files are preserved.
 
@@ -190,7 +190,7 @@ Containment, set from outside the VM, since the agent has root inside it:
 - **Nothing carries over.** Every session boots from the **Engine base disk** through `-snapshot`, a throwaway layer, so files, containers and images from the last session are gone. The VM has no host directories mounted.
 - **The sandbox stays as it was.** The agent container is still unprivileged with all capabilities dropped, on the internal network only, and without the host's Docker socket.
 
-The VM boots its kernel directly, without firmware or a boot loader. With `postgres:16-alpine` it is ready in about 5 seconds, booting while the sandbox starts. It has 2 CPUs and 2 GB of memory.
+The VM boots its kernel directly, without firmware or a boot loader. With `postgres:16-alpine` it is ready in about 5 seconds, booting while the sandbox starts. It has the `cpus` and `memory` of the engine section, 2 CPUs and 2 GB by default.
 
 `localllm build` also builds the Engine base disk, once, in `localllm/engine/base/` under the user cache dir. It downloads the Debian 13 cloud image and checks it against its pinned SHA-512, then runs one online boot that installs Docker from Debian, sets up the port range and the TLS service, disables cloud-init and powers off (about 1.5 minutes). That boot gets its cloud-init seed from a server on the host's loopback, which also receives the kernel, initrd and root partition for the direct boot. It runs no project code and isn't any project's Engine VM. Later builds skip it while it is up to date; sessions warn when the disk is from an older definition. Without QEMU, `build` skips the disk with a note.
 
@@ -202,6 +202,8 @@ Before every `run` and `shell` with the Engine VM, after the sandbox's probes, t
 The VM can't download anything, so the probe image is the forwarder image (alpine with socat), saved from the host's Docker and loaded for the probes only; it and the probe container are removed afterwards. A failed probe blocks the session like a sandbox probe.
 
 A `run` or `shell` of an engine project refuses to start, with the fix, when QEMU isn't installed, the Engine base disk isn't built (`localllm build`), a declared image hasn't been prepped (`localllm prep`), the VM doesn't boot to a ready Docker API within 60 seconds, or an Engine VM probe fails. `--no-engine` starts it anyway, without the VM; `--unsafe-skip-check` skips the Engine VM probes along with the sandbox's. If `localllm.yaml` can't be parsed, a project that was prepped with an engine refuses too, since its images aren't known; other projects start as before.
+
+All engine data lives under `localllm/` in the user cache dir, never in the project: the shared Engine base disk in `engine/base/`, and each project's image archives in `engine/projects/<hash>/`, next to the running VM's pidfile. A VM leaves no disk behind: `-snapshot` keeps its writes in a temporary file QEMU deletes. Its certificates and console log are in the session directory under `sessions/`, removed when the session ends. `localllm clean [dir]` lists the project's engine directory with its archived images, and any session directories left by sessions that didn't end cleanly (they may still hold certificates), and removes them with the volumes after you type `y`. The next `prep` then downloads the images again. The shared base disk is kept; `localllm build` replaces it when its definition changes.
 
 Requirements: QEMU (`brew install qemu` on macOS; it ships the UEFI firmware the base disk build uses). The setup uses only QEMU features that Linux has too, with KVM instead of macOS's HVF, but it is so far only tested on macOS on Apple silicon.
 

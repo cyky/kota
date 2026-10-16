@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"localllm/internal/engine"
 	"localllm/internal/prepgate"
 	"localllm/internal/sandbox"
 	"localllm/internal/sessionregistry"
@@ -141,6 +142,85 @@ func TestCleanEmptyAndRecordOnly(t *testing.T) {
 	calls, _ := os.ReadFile(log)
 	if strings.Contains(string(calls), "volume rm") {
 		t.Errorf("empty volume removal attempted: %s", calls)
+	}
+}
+
+func TestCleanEngineData(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "test"})
+	log := fakeVolumeDocker(t, nil)
+	layout, err := engineLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.ArchiveDir(project), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archive := engine.Archive{Ref: "postgres:16-alpine", Digest: "sha256:" + strings.Repeat("a", 64), File: engine.ArchiveFile("postgres:16-alpine")}
+	if err := (engine.Record{Archives: []engine.Archive{archive}}).Save(layout.ArchiveDir(project)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.ArchiveDir(project), archive.File), []byte("tar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := sessionsRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := sandbox.ProjectName(project)
+	// A session that didn't end cleanly, with its certificates; another
+	// project's, whose name extends this one's; and the shared base disk.
+	leftover := filepath.Join(root, name+"-4242-123456")
+	other := filepath.Join(root, name+"-12345678-4242-123456")
+	otherProject := layout.ProjectDir(project + "-other")
+	base := filepath.Join(layout.BaseDir(), "disk.qcow2")
+	for _, f := range []string{filepath.Join(leftover, "engine-client", "key.pem"), filepath.Join(other, "engine-client", "key.pem"), filepath.Join(otherProject, "images", "x.tar"), base} {
+		if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out strings.Builder
+	if err := cleanProject(project, false, strings.NewReader("n\n"), &out); err == nil {
+		t.Fatal("clean ran without confirmation")
+	}
+	for _, want := range []string{layout.ProjectDir(project), "image archive postgres:16-alpine", leftover, "TLS certificates", "Type y to clean:"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("confirmation lacks %q:\n%s", want, out.String())
+		}
+	}
+	for _, unrelated := range []string{other, otherProject, layout.BaseDir()} {
+		if strings.Contains(out.String(), unrelated) {
+			t.Errorf("confirmation lists %s:\n%s", unrelated, out.String())
+		}
+	}
+	if _, err := os.Stat(layout.ArchiveDir(project)); err != nil {
+		t.Errorf("declined clean removed the archives: %v", err)
+	}
+
+	out.Reset()
+	if err := cleanProject(project, false, strings.NewReader("y\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{layout.ProjectDir(project), leftover} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Errorf("%s remains: %v", gone, err)
+		}
+	}
+	for _, kept := range []string{other, otherProject, base} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s removed: %v", kept, err)
+		}
+	}
+	if calls, _ := os.ReadFile(log); strings.Contains(string(calls), "volume rm") {
+		t.Errorf("empty volume removal attempted: %s", calls)
+	}
+
+	out.Reset()
+	if err := cleanProject(project, false, strings.NewReader(""), &out); err != nil || !strings.Contains(out.String(), "nothing to clean") {
+		t.Errorf("second clean = %v:\n%s", err, out.String())
 	}
 }
 
