@@ -1,0 +1,17 @@
+# Build output (go build ./cmd/kota)
+/kota
+*.test
+*.out
+coverage.*
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local secrets and environment
+.env
+.env.*
+.envrc
+*.pem
+*.key
