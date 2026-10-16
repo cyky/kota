@@ -37,8 +37,16 @@ A container image a project declares in `kota.yaml` for its **Engine VM**, downl
 _Avoid_: test image, service image
 
 **Change report**:
-What kota prints after a command that ran project code in a container (`run`, `shell`, `prep`): watched files the command changed in the working tree, and branches, tags and commits it created or changed, with warnings for commits that touch masked, placeholder or globally ignored paths, or hide changes to watched files.
+What kota prints after a command that ran project code in a container (`run`, `shell`, `prep`): watched files the command changed in the working tree, and branches, tags and commits it created or changed, with warnings for commits that touch masked, placeholder or globally ignored paths, or hide changes to watched files. After a `--no-history` **Session** it reports on the **No-history copy** instead: the **Returned branch** and its commits, refs that were not returned, and uncommitted changes left in the copy.
 _Avoid_: diff, summary, session report
+
+**No-history copy**:
+A throwaway clone of a project's current commit, with no older history, remotes or config, that a `--no-history` **Session** runs on instead of the project.
+_Avoid_: shallow clone, workspace copy, mirror
+
+**Returned branch**:
+The branch `kota/<agent>-<YYYY-MM-DD-HHMMSS>` that brings the **No-history copy**'s `HEAD` back into the original project after the **Session**. It is never checked out.
+_Avoid_: agent branch, result branch
 
 ## Relationships
 
@@ -53,6 +61,9 @@ _Avoid_: diff, summary, session report
 - If a project's **Engine VM** can't start or fails a probe, its **Session** refuses to start, unless the user explicitly starts it without the engine. The agent is then told that container **Gates** can't run
 - A **Gate** can only use **Engine images** the project declares; an undeclared image fails in the **Session** instead of being downloaded
 - A **Change report** never runs git on the host. Commits are read in an offline container
+- A **No-history copy** belongs to exactly one **Session**. It takes its project's **Prep**, dependency volumes, **Engine VM** and kota config, but has its own agent state, so transcripts from normal **Sessions** never reach it
+- A **No-history copy** is deleted after its **Session**, unless it has uncommitted changes, refs that were not returned, or its **Returned branch** could not be made
+- Only the **No-history copy**'s `HEAD` becomes a **Returned branch**. The clone and the return run in offline containers, and the return never runs git in the copy with the original writable
 
 ## Example dialogue
 
