@@ -154,6 +154,7 @@ flowchart TD
         lifecycle["lifecycle<br/>start and stop order,<br/>teardown on failure or signal"]
         docker["docker<br/>Docker CLI adapter"]
         sessionregistry["sessionregistry<br/>per-project lease"]
+        hostdata["hostdata<br/>localllm's directory on the host"]
         interrupt["interrupt<br/>signals"]
     end
 
@@ -169,9 +170,12 @@ flowchart TD
     enginesession --> engine & enginevm & check & docker
     lifecycle --> interrupt
     engineimages --> engine
+    hostdata --> engine & sandbox
 ```
 
 ## Where data lives
+
+Everything under `localllm/` in the user cache dir comes from `internal/hostdata`, which also lists what `clean` removes for a project.
 
 | What | Where | Removed by |
 | --- | --- | --- |

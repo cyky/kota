@@ -9,10 +9,21 @@ import (
 	"testing"
 
 	"localllm/internal/engine"
+	"localllm/internal/hostdata"
 	"localllm/internal/prepgate"
 	"localllm/internal/sandbox"
 	"localllm/internal/sessionregistry"
 )
+
+// testPrepRecord is project's prep record file.
+func testPrepRecord(t *testing.T, project string) string {
+	t.Helper()
+	file, err := prepRecordFile(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
 
 func fakeVolumeDocker(t *testing.T, volumes []string) string {
 	t.Helper()
@@ -69,7 +80,7 @@ func TestCleanProject(t *testing.T) {
 			if c.removeError {
 				t.Setenv("TEST_VOLUME_REMOVE_ERROR", "1")
 			}
-			record := prepRecordFile(project)
+			record := testPrepRecord(t, project)
 			if err := (prepgate.Record{}).Save(record); err != nil {
 				t.Fatal(err)
 			}
@@ -125,7 +136,7 @@ func TestCleanEmptyAndRecordOnly(t *testing.T) {
 	if !strings.Contains(out.String(), "nothing to clean") || strings.Contains(out.String(), "Type y") {
 		t.Errorf("empty cleanup = %s", out.String())
 	}
-	record := prepRecordFile(project)
+	record := testPrepRecord(t, project)
 	if err := (prepgate.Record{}).Save(record); err != nil {
 		t.Fatal(err)
 	}
@@ -162,10 +173,11 @@ func TestCleanEngineData(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(layout.ArchiveDir(project), archive.File), []byte("tar"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	root, err := sessionsRoot()
+	dirs, err := hostdata.Default()
 	if err != nil {
 		t.Fatal(err)
 	}
+	root := dirs.Sessions()
 	name := sandbox.ProjectName(project)
 	// A session that didn't end cleanly, with its certificates; another
 	// project's, whose name extends this one's; and the shared base disk.

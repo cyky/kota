@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -32,6 +31,7 @@ import (
 	"localllm/internal/enginesession"
 	"localllm/internal/enginevm"
 	"localllm/internal/gatewaykey"
+	"localllm/internal/hostdata"
 	"localllm/internal/interrupt"
 	"localllm/internal/lifecycle"
 	"localllm/internal/mask"
@@ -196,11 +196,8 @@ func buildBase() error {
 // project's image archives, in the user cache dir with localllm's other
 // host state, outside every project and sandbox.
 func engineLayout() (engine.Layout, error) {
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return engine.Layout{}, err
-	}
-	return engine.Layout{Root: filepath.Join(cache, "localllm", "engine")}, nil
+	dirs, err := hostdata.Default()
+	return dirs.Engine(), err
 }
 
 func engineHost() engine.Host { return engine.Host{OS: runtime.GOOS, Arch: runtime.GOARCH} }
@@ -527,7 +524,11 @@ func sessionDeps(project string) (deps.Plan, error) {
 	if err == nil {
 		return plan, nil
 	}
-	last, lerr := prepgate.Load(prepRecordFile(project))
+	file, lerr := prepRecordFile(project)
+	var last *prepgate.Record
+	if lerr == nil {
+		last, lerr = prepgate.Load(file)
+	}
 	if lerr != nil {
 		return deps.Plan{}, fmt.Errorf("%w; read prep record: %v", err, lerr)
 	}
@@ -799,12 +800,12 @@ func lockProject(sa sessionArgs, operation string) (*lockedProject, error) {
 	if err != nil {
 		return nil, err
 	}
-	cache, err := os.UserCacheDir()
+	dirs, err := hostdata.Default()
 	if err != nil {
 		return nil, err
 	}
 	r := &sessionregistry.Registry{
-		Dir: filepath.Join(cache, "localllm", "registry"),
+		Dir: dirs.Registry(),
 		Recover: func(project string) error {
 			layout, err := engineLayout()
 			if err != nil {
@@ -1188,8 +1189,12 @@ func cmdPrep(args []string) error {
 	// The next prep asks about changes made after this point.
 	record, err := prepgate.Snapshot(sess.project)
 	record.Dirs = sess.deps.Dirs
+	var file string
 	if err == nil {
-		err = record.Save(prepRecordFile(sess.project))
+		file, err = prepRecordFile(sess.project)
+	}
+	if err == nil {
+		err = record.Save(file)
 	}
 	if err != nil {
 		return fmt.Errorf("record prepped state: %w", err)
@@ -1243,17 +1248,15 @@ func cleanProject(project string, shared bool, in io.Reader, out io.Writer) erro
 		}
 		slices.Sort(volumes)
 	}
-	record := prepRecordFile(project)
-	_, err = os.Lstat(record)
-	hasRecord := err == nil
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("inspect prep record: %w", err)
-	}
-	eng, err := findEngineData(project)
+	dirs, err := hostdata.Default()
 	if err != nil {
 		return err
 	}
-	if len(volumes) == 0 && !hasRecord && eng.empty() {
+	data, err := dirs.ProjectData(project)
+	if err != nil {
+		return err
+	}
+	if len(volumes) == 0 && data.Empty() {
 		fmt.Fprintf(out, "nothing to clean for %s\n", project)
 		return nil
 	}
@@ -1264,22 +1267,22 @@ func cleanProject(project string, shared bool, in io.Reader, out io.Writer) erro
 			fmt.Fprintln(out, "  "+name)
 		}
 	}
-	if eng.dir != "" {
-		fmt.Fprintf(out, "Engine VM data to remove: %s\n", eng.dir)
-		for _, ref := range eng.images {
+	if data.EngineDir != "" {
+		fmt.Fprintf(out, "Engine VM data to remove: %s\n", data.EngineDir)
+		for _, ref := range data.Images {
 			fmt.Fprintln(out, "  image archive "+ref)
 		}
 	}
-	if len(eng.sessions) > 0 {
+	if len(data.Sessions) > 0 {
 		fmt.Fprintln(out, "Leftover session directories to remove (from sessions that didn't end cleanly; they may hold Engine VM TLS certificates):")
-		for _, dir := range eng.sessions {
+		for _, dir := range data.Sessions {
 			fmt.Fprintln(out, "  "+dir)
 		}
 	}
 	if shared {
 		fmt.Fprintln(out, "Shared caches are included; other projects will need to fetch dependencies again.")
 	}
-	if hasRecord {
+	if data.PrepRecord != "" {
 		fmt.Fprintln(out, "The project's prep confirmation record will also be reset.")
 	}
 	fmt.Fprint(out, "Type y to clean: ")
@@ -1289,83 +1292,23 @@ func cleanProject(project string, shared bool, in io.Reader, out io.Writer) erro
 	if err := docker.RemoveVolumes(volumes...); err != nil {
 		return err
 	}
-	for _, dir := range append([]string{eng.dir}, eng.sessions...) {
-		if dir == "" {
-			continue
+	for _, path := range data.Paths() {
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove %s: %w", path, err)
 		}
-		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("remove %s: %w", dir, err)
-		}
-	}
-	if err := os.Remove(record); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("reset prep record: %w", err)
 	}
 	fmt.Fprintln(out, "project cleaned; run 'localllm prep' before the next session if dependencies or Engine images are needed")
 	return nil
 }
 
-// engineData is what localllm keeps for a project's Engine VM: its engine
-// directory, with the image archives prep downloaded, and the directories
-// of the project's sessions that didn't end cleanly, which may still hold
-// that session's TLS certificates. The shared Engine base disk isn't part
-// of it.
-type engineData struct {
-	// dir is the project's engine directory, or "" when there is none.
-	dir string
-	// images are the archived images its record lists, if it can be read.
-	images   []string
-	sessions []string
-}
-
-func (d engineData) empty() bool { return d.dir == "" && len(d.sessions) == 0 }
-
-// findEngineData lists project's engine data. It runs under the project's
-// lease, so none of its session directories belongs to a running session.
-// It doesn't parse localllm.yaml, so it works when that is broken or gone.
-func findEngineData(project string) (engineData, error) {
-	var d engineData
-	layout, err := engineLayout()
-	if err != nil {
-		return d, err
-	}
-	dir := layout.ProjectDir(project)
-	if _, err := os.Lstat(dir); err == nil {
-		d.dir = dir
-		if rec, err := engine.LoadRecord(layout.ArchiveDir(project)); err == nil && rec != nil {
-			for _, a := range rec.Archives {
-				d.images = append(d.images, a.Ref)
-			}
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return d, fmt.Errorf("inspect engine data: %w", err)
-	}
-	root, err := sessionsRoot()
-	if err != nil {
-		return d, err
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return d, fmt.Errorf("list session directories: %w", err)
-	}
-	// newSessionDir names them <project name>-<pid>-<random digits>. The
-	// exact pattern keeps out a project whose name extends this one's.
-	own := regexp.MustCompile(`^` + regexp.QuoteMeta(sandbox.ProjectName(project)) + `-[0-9]+-[0-9]+$`)
-	for _, e := range entries {
-		if own.MatchString(e.Name()) {
-			d.sessions = append(d.sessions, filepath.Join(root, e.Name()))
-		}
-	}
-	return d, nil
-}
-
 // prepRecordFile is where the project's state after its last prep is kept,
 // on the host and out of the sandbox's reach.
-func prepRecordFile(project string) string {
-	cache, err := os.UserCacheDir()
+func prepRecordFile(project string) (string, error) {
+	dirs, err := hostdata.Default()
 	if err != nil {
-		cache = os.TempDir()
+		return "", err
 	}
-	return filepath.Join(cache, "localllm", "prep", sandbox.ProjectName(project)+".json")
+	return dirs.PrepRecord(project), nil
 }
 
 // confirmPrep asks the user to type y before a prep whose inputs or Engine
@@ -1391,7 +1334,11 @@ func confirmPrep(project string, plan deps.Plan, images *engine.ImagePlan) error
 // prepDecision compares project with its last prep's record. Other changed
 // files count when plan runs project code.
 func prepDecision(project string, plan deps.Plan) (prepgate.Decision, error) {
-	last, err := prepgate.Load(prepRecordFile(project))
+	file, err := prepRecordFile(project)
+	if err != nil {
+		return prepgate.Decision{}, err
+	}
+	last, err := prepgate.Load(file)
 	if err != nil {
 		return prepgate.Decision{}, fmt.Errorf("read the last prep's record: %w", err)
 	}
@@ -1734,26 +1681,14 @@ func printResults(w io.Writer, results []probe.Result) {
 	}
 }
 
-// newSessionDir creates a per-session directory under the user cache dir,
-// which lives under $HOME and is therefore shared into the Docker VM.
+// newSessionDir creates a per-session directory in localllm's data
+// directory, which the Docker VM shares.
 func newSessionDir(project string) (string, error) {
-	root, err := sessionsRoot()
+	dirs, err := hostdata.Default()
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return "", err
-	}
-	return os.MkdirTemp(root, sandbox.ProjectName(project)+"-"+strconv.Itoa(os.Getpid())+"-")
-}
-
-// sessionsRoot holds the session directories.
-func sessionsRoot() (string, error) {
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(cache, "localllm", "sessions"), nil
+	return dirs.NewSessionDir(project)
 }
 
 func envOr(key, def string) string {

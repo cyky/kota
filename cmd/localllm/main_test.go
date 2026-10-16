@@ -317,7 +317,7 @@ func TestBrokenManifestSession(t *testing.T) {
 		{Path: "node_modules", Manifest: "package.json"},
 		{Path: "packages/b/node_modules", Manifest: "packages/b/package.json"},
 	}}
-	if err := record.Save(prepRecordFile(project)); err != nil {
+	if err := record.Save(testPrepRecord(t, project)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -413,7 +413,7 @@ func TestPrepGateLocalDependency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := record.Save(prepRecordFile(project)); err != nil {
+	if err := record.Save(testPrepRecord(t, project)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(project, "tools/tool/build.js"), []byte("// changed\n"), 0o644); err != nil {
