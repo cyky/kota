@@ -313,7 +313,8 @@ func TestParseOfflineArgs(t *testing.T) {
 // TestAgentEngineInstructions prepares a run of each agent in each engine
 // state and checks what the agent is told, in the file it reads
 // instructions from: opencode's global AGENTS.md, pi's APPEND_SYSTEM.md.
-// Without an engine, nothing is mounted there.
+// It always gets the working style and the Sandbox facts; the Engine VM
+// note follows them when the project has an Engine VM.
 func TestAgentEngineInstructions(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
@@ -353,15 +354,6 @@ func TestAgentEngineInstructions(t *testing.T) {
 						v, mounted = vol, true
 					}
 				}
-				if st.want == "" {
-					if mounted {
-						t.Errorf("note mounted without an engine: %+v", v)
-					}
-					if name == opencode.Agent && len(agent.Tmpfs) != 1 {
-						t.Errorf("tmpfs = %q, want only HOME", agent.Tmpfs)
-					}
-					return
-				}
 				if !mounted || !v.ReadOnly || !strings.HasPrefix(v.Source, sess.sessionDir+"/") {
 					t.Fatalf("note mount = %+v (found %v), want read-only from the session dir", v, mounted)
 				}
@@ -378,6 +370,19 @@ func TestAgentEngineInstructions(t *testing.T) {
 					t.Fatal(err)
 				}
 				note := string(data)
+				style, facts := strings.Index(note, "# Working on tasks"), strings.Index(note, "# This sandbox")
+				if style != 0 || facts < 0 || !strings.Contains(note, "# Working unattended") {
+					t.Errorf("note lacks the working style or Sandbox facts, in order:\n%s", note)
+				}
+				if st.want == "" {
+					if strings.Contains(note, "# Containers") {
+						t.Errorf("Engine VM note without an engine:\n%s", note)
+					}
+					return
+				}
+				if c := strings.Index(note, "# Containers"); c < facts {
+					t.Errorf("Engine VM note not after the Sandbox facts:\n%s", note)
+				}
 				if !strings.Contains(note, sandbox.EngineEnv+"="+st.want) || agent.Environment[sandbox.EngineEnv] != st.want {
 					t.Errorf("note = %q, env %s = %q; want %s", note, sandbox.EngineEnv, agent.Environment[sandbox.EngineEnv], st.want)
 				}

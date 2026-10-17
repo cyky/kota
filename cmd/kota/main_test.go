@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,9 +13,11 @@ import (
 	"strings"
 	"testing"
 
+	"kota/assets"
 	"kota/internal/changereport"
 	"kota/internal/deps"
 	"kota/internal/docker"
+	"kota/internal/instructions"
 	"kota/internal/opencode"
 	"kota/internal/pi"
 	"kota/internal/prepgate"
@@ -127,6 +130,7 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("KOTA_ALLOWED_ROOT", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	const secret = "sk-unit-test-secret"
@@ -170,6 +174,7 @@ func fakeHome(t *testing.T, files map[string]string) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("KOTA_ALLOWED_ROOT", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	project := filepath.Join(home, "Projects/app")
@@ -395,6 +400,106 @@ func TestPrepGateOutput(t *testing.T) {
 	}
 	if strings.Contains(changed.String(), "src/f20.js") {
 		t.Errorf("output not truncated:\n%s", changed.String())
+	}
+}
+
+// noteOf returns the content of the agent's note in sess.
+func noteOf(t *testing.T, sess *session) string {
+	t.Helper()
+	for _, v := range sess.spec.Services[sandbox.AgentService].Volumes {
+		if v.Target == sess.agent.notePath {
+			if !v.ReadOnly {
+				t.Errorf("note mounted writable: %+v", v)
+			}
+			data, err := os.ReadFile(v.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+	}
+	t.Fatalf("no note mounted at %s", sess.agent.notePath)
+	return ""
+}
+
+// TestInstructionsOverride checks the user's override replaces the working
+// style in each agent's note and keeps the Sandbox facts, and that
+// 'kota instructions' prints it and names its source.
+func TestInstructionsOverride(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	home := os.Getenv("HOME")
+
+	var out, info strings.Builder
+	if err := cmdInstructions(nil, &out, &info); err != nil {
+		t.Fatal(err)
+	}
+	builtin, _ := assets.Agents.ReadFile(instructions.Default)
+	if out.String() != string(builtin) || info.String() != "instructions: built-in default\n" {
+		t.Errorf("default: stdout %q, stderr %q", out.String(), info.String())
+	}
+
+	// XDG_CONFIG_HOME is honored.
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	override := filepath.Join(xdg, "kota", "instructions.md")
+	if err := os.MkdirAll(filepath.Dir(override), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(override, []byte("# My style\n\nAlways write haiku.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	info.Reset()
+	if err := cmdInstructions(nil, &out, &info); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "# My style\n\nAlways write haiku.\n" || info.String() != "instructions: override: "+override+"\n" {
+		t.Errorf("override: stdout %q, stderr %q", out.String(), info.String())
+	}
+
+	for _, agent := range []string{opencode.Agent, pi.Agent} {
+		sa, err := parseOfflineArgs("run", []string{"--agent", agent, project}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sess, err := prepareTestSession(sa, sandbox.ModeRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		note := noteOf(t, sess)
+		sess.cleanup()
+		if !strings.HasPrefix(note, "# My style\n\nAlways write haiku.\n\n# This sandbox\n") || strings.Contains(note, "# Working on tasks") {
+			t.Errorf("%s: note doesn't start with the override, then the Sandbox facts:\n%s", agent, note)
+		}
+	}
+}
+
+// TestInstructionsOverrideRefused checks a bad override stops startup with
+// its path, before anything is created.
+func TestInstructionsOverrideRefused(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	override := filepath.Join(os.Getenv("HOME"), ".config", "kota", "instructions.md")
+	if err := os.MkdirAll(override, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sa, err := parseOfflineArgs("shell", []string{project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa.shell = true
+	if _, err := prepareTestSession(sa, sandbox.ModeRun); err == nil || !strings.Contains(err.Error(), override) {
+		t.Errorf("err = %v, want it to name %s", err, override)
+	}
+	if err := cmdInstructions(nil, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), override) {
+		t.Errorf("kota instructions: err = %v, want it to name %s", err, override)
+	}
+	cache, _ := os.UserCacheDir()
+	if entries, _ := os.ReadDir(filepath.Join(cache, "kota", "sessions")); len(entries) > 0 {
+		t.Errorf("session dir left: %v", entries)
 	}
 }
 

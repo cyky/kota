@@ -32,6 +32,7 @@ import (
 	"kota/internal/enginevm"
 	"kota/internal/gatewaykey"
 	"kota/internal/hostdata"
+	"kota/internal/instructions"
 	"kota/internal/interrupt"
 	"kota/internal/lifecycle"
 	"kota/internal/mask"
@@ -63,8 +64,8 @@ const (
 	// writes its service state there, so it and ~/.config stay writable on
 	// their own tmpfs, around the read-only opencodeInstructionsPath.
 	opencodeConfigDir = sandbox.Home + "/.config/opencode"
-	// opencodeInstructionsPath holds kota's instructions to opencode,
-	// empty when there are none. opencode reads the global AGENTS.md as
+	// opencodeInstructionsPath holds kota's instructions to opencode.
+	// opencode reads the global AGENTS.md as
 	// well as the project's; its config's instructions setting is ignored.
 	opencodeInstructionsPath = opencodeConfigDir + "/AGENTS.md"
 	// piAgentDir is pi's config directory. It is writable, because pi
@@ -93,6 +94,9 @@ commands:
                         probes
   clean [flags] [dir]   remove project state and dependency volumes after
                         confirmation
+  instructions          print the working style the agent is told to follow,
+                        and say whether it is the built-in default or your
+                        override
 
 flags:
   --agent NAME          opencode (default) or pi; pi has no permission
@@ -113,6 +117,8 @@ flags:
                         must be idle
 
 dir must be inside the allowed root ($KOTA_ALLOWED_ROOT, default ~/Projects).
+$XDG_CONFIG_HOME/kota/instructions.md (default ~/.config/kota/instructions.md),
+when present, replaces the built-in working style for every project.
 A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
 the file named by $KOTA_GATEWAY_KEY_FILE.
 `
@@ -139,6 +145,8 @@ func main() {
 		err = cmdCheck(os.Args[2:])
 	case "clean":
 		err = cmdClean(os.Args[2:])
+	case "instructions":
+		err = cmdInstructions(os.Args[2:], os.Stdout, os.Stderr)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -155,6 +163,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, "kota:", err)
 		os.Exit(1)
 	}
+}
+
+// cmdInstructions prints the working style in effect to out, so that
+// 'kota instructions > ~/.config/kota/instructions.md' starts an override,
+// and its source to info.
+func cmdInstructions(args []string, out, info io.Writer) error {
+	fset := flag.NewFlagSet("instructions", flag.ContinueOnError)
+	if err := fset.Parse(args); err != nil {
+		return err
+	}
+	if fset.NArg() > 0 {
+		return errors.New("instructions takes no arguments")
+	}
+	style, err := loadStyle()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(info, "instructions:", style.Source)
+	_, err = io.WriteString(out, style.Text)
+	return err
 }
 
 func cmdBuild(args []string) error {
@@ -275,7 +303,7 @@ type agentSetup struct {
 	// when set, names the variable holding the gateway key.
 	render func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error)
 	// notePath is where the agent reads kota's instructions, mounted
-	// read-only only when there are any, with noteScratch around it.
+	// read-only, with noteScratch around it.
 	notePath    string
 	noteScratch []string
 	// approval describes, for the startup message, whether the agent asks
@@ -378,6 +406,23 @@ type session struct {
 	// engineOff is set when the project has an Engine VM, but the session
 	// runs without it (--no-engine).
 	engineOff bool
+	// style is the working style the agent's note starts with; unset for
+	// prep.
+	style instructions.Style
+}
+
+// loadStyle reads the user's working style override, or returns the
+// built-in one.
+func loadStyle() (instructions.Style, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return instructions.Style{}, err
+	}
+	builtin, err := assets.Agents.ReadFile(instructions.Default)
+	if err != nil {
+		return instructions.Style{}, err
+	}
+	return instructions.Load(instructions.OverridePath(os.Getenv, home), builtin)
 }
 
 // engineNote is the agent's instruction about the Engine VM: none for a
@@ -560,9 +605,13 @@ func sessionDeps(project, key string) (deps.Plan, error) {
 func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, key string, depPlan deps.Plan) (*session, error) {
 	prep := mode == sandbox.ModePrep
 	var agent agentSetup
+	var style instructions.Style
 	var err error
 	if !prep {
 		if agent, err = agentFor(sa.agent); err != nil {
+			return nil, err
+		}
+		if style, err = loadStyle(); err != nil {
 			return nil, err
 		}
 	}
@@ -621,7 +670,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		return nil, err
 	}
 
-	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: agent, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image}
+	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: agent, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image, style: style}
 	var engineRoute *sandbox.EngineRoute
 	if !prep {
 		opts, err := engineOptions()
@@ -641,11 +690,11 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 			engineRoute = sess.engine.Route()
 		}
 	}
-	// The note is mounted only when there is one, so a project without an
-	// Engine VM gives the agent exactly what it did before.
+	// Every agent gets the note; prep runs none.
 	readOnlyTargets := agent.configs
 	scratch := agent.scratch
-	if note := sess.engineNote(); note != "" {
+	if !prep {
+		note := instructions.Note(style, sess.engineNote())
 		file := filepath.Join(sessionDir, "agent", path.Base(agent.notePath))
 		if err := os.WriteFile(file, []byte(note), 0o644); err != nil {
 			os.RemoveAll(sessionDir)
@@ -1366,11 +1415,7 @@ func globalExcludes() (func(rel string) bool, error) {
 	}
 	file := strings.TrimSpace(string(out))
 	if file == "" {
-		config := os.Getenv("XDG_CONFIG_HOME")
-		if !filepath.IsAbs(config) {
-			config = filepath.Join(home, ".config")
-		}
-		file = filepath.Join(config, "git", "ignore")
+		file = filepath.Join(instructions.ConfigHome(os.Getenv, home), "git", "ignore")
 	}
 	info, err := os.Stat(file)
 	switch {
@@ -1418,6 +1463,7 @@ func cmdCheck(args []string) error {
 
 	printMounts(os.Stdout, sess.spec)
 	printMasks(os.Stdout, sess.layout)
+	fmt.Fprintf(os.Stdout, "instructions: %s ('kota instructions' prints them)\n", sess.style.Source)
 	sess.printWarnings(os.Stdout)
 	engineErr := printEngine(os.Stdout, sess)
 
