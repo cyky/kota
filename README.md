@@ -335,7 +335,7 @@ prep:
   dirs: [.cargo-home, target]
 ```
 
-Pin the `rust` tag to a version for reproducible builds. `cargo fetch` needs a `Cargo.lock`. In `run`, `cargo build` and `cargo test` then work offline; add `--offline` if Cargo tries the network anyway.
+Pin the `rust` tag to a version for reproducible builds. Add `.cargo-home/` and `target/` to `.gitignore`. `cargo fetch` needs a `Cargo.toml`. Without a `Cargo.lock` it resolves the dependencies and writes one, so commit the lockfile after `prep`. Don't skip the fetch when the lockfile is missing: the sandbox can't create one, so an agent that adds the first crates gets no dependencies until the next `prep`. Run `prep` again whenever dependencies change. In `run`, `cargo build` and `cargo test` then work offline; add `--offline` if Cargo tries the network anyway.
 
 To make Rust available to every project instead, add the same `COPY` and `ENV` lines to `assets/images/base/Dockerfile`, and, for a registry cache shared across projects like the Go module cache, a `CARGO_HOME` entry in `sandbox.sharedCaches` with `cargo fetch` in the fetch phase.
 
