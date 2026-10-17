@@ -1,7 +1,9 @@
-# 32 — Default agent instructions for task handling and unattended work, with a user override
+# DONE — 32 — Default agent instructions for task handling and unattended work, with a user override
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
+
+Resolved in: a9a099e
 
 ## Parent
 
@@ -80,15 +82,15 @@ This issue gives every **Session**, for both pi and opencode, kota-wide instruct
 - `assets`: the embedded default
 
 **Acceptance criteria:**
-- [ ] Every `run` and `shell` **Session**, with or without an Engine VM, mounts the note read-only for pi and opencode, with parts 1, 2 and 3 in order
-- [ ] Without an override, parts 1 and 2 are the built-in text; with `~/.config/kota/instructions.md` present, they're its content, and part 3 is still appended
-- [ ] `XDG_CONFIG_HOME` is honored; a relative value falls back to `~/.config`
-- [ ] An override that is a directory, a non-regular file or too large stops startup with a message naming the path
-- [ ] The Engine VM note (available and `--no-engine`) still reaches the agent, unchanged
-- [ ] `kota instructions` prints the text in effect and names its source; `check` shows the source
-- [ ] Unit tests: note assembly (default, override, with and without Engine note), override lookup and errors
-- [ ] Integration test (fake HOME): a `shell` **Session** reads the note at the agent's path, can't write it, and sees the override's text when one is set
-- [ ] README: what the agent is told, the override path, `kota instructions`
+- [x] Every `run` and `shell` **Session**, with or without an Engine VM, mounts the note read-only for pi and opencode, with parts 1, 2 and 3 in order
+- [x] Without an override, parts 1 and 2 are the built-in text; with `~/.config/kota/instructions.md` present, they're its content, and part 3 is still appended
+- [x] `XDG_CONFIG_HOME` is honored; a relative value falls back to `~/.config`
+- [x] An override that is a directory, a non-regular file or too large stops startup with a message naming the path
+- [x] The Engine VM note (available and `--no-engine`) still reaches the agent, unchanged
+- [x] `kota instructions` prints the text in effect and names its source; `check` shows the source
+- [x] Unit tests: note assembly (default, override, with and without Engine note), override lookup and errors
+- [x] Integration test (fake HOME): a `shell` **Session** reads the note at the agent's path, can't write it, and sees the override's text when one is set
+- [x] README: what the agent is told, the override path, `kota instructions`
 
 **Out of scope:**
 - A per-project override (`kota.yaml`) or a `--instructions` flag; project specifics go in the project's `AGENTS.md`
@@ -116,3 +118,18 @@ Decisions:
 - Both agents get the same text.
 
 Related change in the same session: `qwen3.5-2b-instruct`'s window was raised to 65536 (llama-swap `-c` and `assets/models.yaml`), because pi's fixed reserve of 16384 made its compaction threshold 0. The `unknown` fallback (8192) still has that problem for unlisted models; not addressed here.
+
+### 2026-10-17
+
+Implemented in a9a099e.
+
+Verified:
+- Unit tests (`internal/instructions`): note assembly with the default, an override, an empty override, and with and without the Engine VM note; `XDG_CONFIG_HOME` handling (absolute, relative, unset); a directory, FIFO, unreadable or oversized override is refused with its path.
+- Command-level tests: the override replaces the working style in both agents' notes and keeps the Sandbox facts; a bad override stops startup before a session dir is created; `kota instructions` prints the text and names its source. `TestAgentEngineInstructions` now expects the note in every engine state, with parts in order.
+- Integration test `TestInstructionsInShell` (test-only `XDG_CONFIG_HOME`): for opencode and pi, a `shell` Session reads the override plus the Sandbox facts at the agent's path, and writing, removing or moving the note fails. The probes now include the note as a read-only target. Full unit and Docker integration suites pass.
+
+Changes from the brief:
+- The Sandbox facts also say, at the user's request: for a missing package, name it with its version and reason, ask the user to add it on the host and run `kota prep`, and don't edit the manifest or lockfile (an out-of-date lockfile breaks the next prep, as in issue 17). Unattended, write the request in the ticket and park it.
+- The default text was tightened slightly from the draft.
+
+Not verified: the `check` output line naming the source has no assertion; it runs in the existing check integration tests only.
