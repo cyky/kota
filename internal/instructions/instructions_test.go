@@ -88,7 +88,7 @@ func TestLoadRefuses(t *testing.T) {
 
 func TestNote(t *testing.T) {
 	style := Style{Text: "# Working on tasks\n\n- one\n"}
-	got := Note(style, "")
+	got := Note(style, nil, "")
 	if !strings.HasPrefix(got, "# Working on tasks\n\n- one\n\n# This sandbox\n") {
 		t.Errorf("note doesn't start with the style, then the Sandbox facts:\n%s", got)
 	}
@@ -101,12 +101,17 @@ func TestNote(t *testing.T) {
 		t.Errorf("note spacing:\n%q", got)
 	}
 
-	withEngine := Note(style, "# Containers\n\nengine text\n")
+	withEngine := Note(style, nil, "# Containers\n\nengine text\n")
 	if !strings.HasPrefix(withEngine, strings.TrimSuffix(got, "\n")+"\n\n# Containers\n\nengine text\n") {
 		t.Errorf("Engine VM note not appended after the Sandbox facts:\n%s", withEngine)
 	}
 
-	empty := Note(Style{Text: "  \n"}, "")
+	withFacts := Note(style, []string{"Call ticket_done."}, "# Containers\n\nengine text\n")
+	if !strings.Contains(withFacts, "park it.\n- Call ticket_done.\n\n# Containers\n") {
+		t.Errorf("agent facts not appended to the Sandbox facts, before the Engine VM note:\n%s", withFacts)
+	}
+
+	empty := Note(Style{Text: "  \n"}, nil, "")
 	if !strings.HasPrefix(empty, "# This sandbox\n") {
 		t.Errorf("empty style: note = %q, want only the Sandbox facts", empty)
 	}

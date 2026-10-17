@@ -84,7 +84,19 @@ Every `run` and `shell` session gives the agent kota's instructions, the same fo
 
 To use your own working style, write it to `$XDG_CONFIG_HOME/kota/instructions.md` (`~/.config/kota/instructions.md` when `XDG_CONFIG_HOME` is unset or not an absolute path). It replaces parts 1 and 2 for every project. Part 3 is still added, so an override can't drop the Sandbox facts. The file is read on the host and never mounted, so the agent can't change it. If it isn't a regular file, or is larger than 64 KiB, `run`, `shell` and `check` stop with its path.
 
+pi alone is also told to call `ticket_done` after it commits a finished ticket (see below). That line goes in part 3, so an override doesn't need to know about it, and opencode, which has no such tool, isn't told about it.
+
 `kota instructions` prints parts 1 and 2 as they are in effect to stdout, and says on stderr whether they are the `built-in default` or `override: <path>`. `kota instructions > ~/.config/kota/instructions.md` gives you a starting point. `check` shows the source too.
+
+### Clearing pi's context between tickets
+
+pi has a `ticket_done` tool (pi only; opencode relies on its own `/compact`). The agent calls it with the ticket and the commit once a ticket is done and committed. When that turn ends, the conversation is replaced by a short fixed note: the ticket is done in that commit, the agent's state is in the tickets and git history, so re-read `AGENTS.md` and the tracker, take the next ticket, and keep working unattended if you asked for that. None of the earlier conversation is kept, and the model writes no summary. pi then carries on with the next ticket in the same session. In the interactive UI the clear shows as a compaction, and the full transcript stays in the state volume.
+
+pi's own compaction, which runs when the context fills up or on `/compact`, has the model summarize the old messages. With a small local model, that summary loses detail, so a clean cut at each ticket boundary works better. Automatic compaction and `/compact` are unchanged.
+
+The tool isn't a gate. It doesn't check that the commit exists or that the ticket is marked done; the instructions say when to call it. A call without both arguments, or with a ticket path outside `/workspace`, returns an error and clears nothing.
+
+The tool is a pi extension in `assets/agents/pi/extensions/ticket-done.ts`. kota mounts that directory read-only at `~/.pi/agent/extensions`, so the agent can't change the extension or add one beside it, and `check` verifies that. pi loads extensions from its agent directory without project trust; the project's `.pi/extensions` stay untrusted.
 
 Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `kota-state-<agent>-<hash of the project path>`, mounted at `/var/lib/kota/state`. `--no-history` sessions have their own, `kota-state-<agent>-nohistory-<hash>`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them with `kota clean [dir]`. If the "state writable" probe fails after upgrading, run `kota build` and remove the project's state volume, which an older image created owned by root.
 

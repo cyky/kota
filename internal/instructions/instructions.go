@@ -81,10 +81,15 @@ const sandboxFacts = `# This sandbox
 `
 
 // Note is the file the agent reads: the working style, then the Sandbox
-// facts, then engineNote (sandbox.EngineNote) when there is one.
-func Note(style Style, engineNote string) string {
+// facts with agentFacts, the agent's own, as further items, then
+// engineNote (sandbox.EngineNote) when there is one.
+func Note(style Style, agentFacts []string, engineNote string) string {
+	facts := sandboxFacts
+	for _, f := range agentFacts {
+		facts += "- " + f + "\n"
+	}
 	var parts []string
-	for _, p := range []string{style.Text, sandboxFacts, engineNote} {
+	for _, p := range []string{style.Text, facts, engineNote} {
 		// An empty override leaves out the working style.
 		if p = strings.TrimSpace(p); p != "" {
 			parts = append(parts, p)

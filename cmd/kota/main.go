@@ -71,7 +71,7 @@ const (
 	// piAgentDir is pi's config directory. It is writable, because pi
 	// creates lock files next to its settings, and discarded after the
 	// session; the rendered settings.json, models.json and APPEND_SYSTEM.md
-	// in it are read-only.
+	// in it, and its extensions directory, are read-only.
 	piAgentDir   = sandbox.Home + "/.pi/agent"
 	piSessionDir = sandbox.StateDir + "/pi/sessions"
 )
@@ -306,6 +306,12 @@ type agentSetup struct {
 	// read-only, with noteScratch around it.
 	notePath    string
 	noteScratch []string
+	// facts are what this agent alone is told, after the Sandbox facts.
+	facts []string
+	// extensions, when set, is where the agent loads extensions from. The
+	// agent's bundled extensions (assets agents/<name>/extensions) are
+	// mounted there read-only, as a directory, so none can be added.
+	extensions string
 	// approval describes, for the startup message, whether the agent asks
 	// before it acts.
 	approval func(auto bool) string
@@ -342,8 +348,11 @@ func agentFor(name string) (agentSetup, error) {
 			configs:  []string{piAgentDir + "/settings.json", piAgentDir + "/models.json"},
 			scratch:  []string{piAgentDir},
 			notePath: piAgentDir + "/" + pi.AppendSystem,
-			env:      pi.Env(piAgentDir, piSessionDir),
-			command:  []string{"pi"},
+			facts: []string{"After you commit a finished ticket and mark it done, call the ticket_done tool with the ticket and the commit. " +
+				"It clears your context, so the next ticket starts fresh; your state is in the tickets and git history."},
+			extensions: piAgentDir + "/extensions",
+			env:        pi.Env(piAgentDir, piSessionDir),
+			command:    []string{"pi"},
 			render: func(c models.Catalog, _ bool, keyEnv string) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(pi.BaseSettings)
 				if err != nil {
@@ -435,6 +444,29 @@ func (s *session) engineNote() string {
 		return sandbox.EngineNote(false, nil)
 	}
 	return ""
+}
+
+// writeExtensions copies the agent's bundled extensions into dir, a new
+// directory.
+func writeExtensions(dir, agent string) error {
+	src := "agents/" + agent + "/extensions"
+	entries, err := assets.Agents.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		data, err := assets.Agents.ReadFile(src + "/" + e.Name())
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, e.Name()), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // engineOptions are what this kota's Engine VMs share.
@@ -694,7 +726,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	readOnlyTargets := agent.configs
 	scratch := agent.scratch
 	if !prep {
-		note := instructions.Note(style, sess.engineNote())
+		note := instructions.Note(style, agent.facts, sess.engineNote())
 		file := filepath.Join(sessionDir, "agent", path.Base(agent.notePath))
 		if err := os.WriteFile(file, []byte(note), 0o644); err != nil {
 			os.RemoveAll(sessionDir)
@@ -703,6 +735,15 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		cfgMounts = append(cfgMounts, sandbox.Mount{Source: file, Target: agent.notePath})
 		readOnlyTargets = append(slices.Clip(readOnlyTargets), agent.notePath)
 		scratch = append(slices.Clip(scratch), agent.noteScratch...)
+	}
+	if agent.extensions != "" {
+		dir := filepath.Join(sessionDir, "agent", "extensions")
+		if err := writeExtensions(dir, agent.name); err != nil {
+			os.RemoveAll(sessionDir)
+			return nil, err
+		}
+		cfgMounts = append(cfgMounts, sandbox.Mount{Source: dir, Target: agent.extensions})
+		readOnlyTargets = append(slices.Clip(readOnlyTargets), agent.extensions)
 	}
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {

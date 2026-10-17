@@ -476,6 +476,63 @@ func TestInstructionsOverride(t *testing.T) {
 	}
 }
 
+// TestTicketDoneOnlyForPi checks pi gets the ticket_done extension, in a
+// read-only extensions directory the probes check, and is told to call it,
+// also under an override; opencode gets neither.
+func TestTicketDoneOnlyForPi(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	override := filepath.Join(os.Getenv("HOME"), ".config", "kota", "instructions.md")
+	for _, withOverride := range []bool{false, true} {
+		if withOverride {
+			if err := os.MkdirAll(filepath.Dir(override), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(override, []byte("# Mine\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, agent := range []string{opencode.Agent, pi.Agent} {
+			sa, err := parseOfflineArgs("run", []string{"--agent", agent, project}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess, err := prepareTestSession(sa, sandbox.ModeRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			note := noteOf(t, sess)
+			var ext *sandbox.Volume
+			for _, v := range sess.spec.Services[sandbox.AgentService].Volumes {
+				if strings.HasSuffix(v.Target, "/extensions") {
+					ext = &v
+				}
+			}
+			told := strings.Contains(note, "ticket_done")
+			if agent == opencode.Agent {
+				if told || ext != nil {
+					t.Errorf("opencode (override %v): told %v, extensions %+v", withOverride, told, ext)
+				}
+				sess.cleanup()
+				continue
+			}
+			if !told {
+				t.Errorf("pi (override %v) isn't told to call ticket_done:\n%s", withOverride, note)
+			}
+			if ext == nil || ext.Target != piAgentDir+"/extensions" || !ext.ReadOnly || !slices.Contains(sess.mounts.ReadOnly, ext.Target) {
+				t.Fatalf("pi extensions mount = %+v, want read-only at %s/extensions and probed", ext, piAgentDir)
+			}
+			want, _ := assets.Agents.ReadFile("agents/pi/extensions/ticket-done.ts")
+			got, err := os.ReadFile(filepath.Join(ext.Source, "ticket-done.ts"))
+			if err != nil || string(got) != string(want) {
+				t.Errorf("extension source: %v, equal %v", err, string(got) == string(want))
+			}
+			sess.cleanup()
+		}
+	}
+}
+
 // TestInstructionsOverrideRefused checks a bad override stops startup with
 // its path, before anything is created.
 func TestInstructionsOverrideRefused(t *testing.T) {
