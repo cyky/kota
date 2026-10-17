@@ -27,7 +27,7 @@ models:
     output: 16384
     tools: true
   qwen3.5-2b-instruct:
-    context: 16384
+    context: 65536
     output: 4096
     tools: true
   zeta2.1:
