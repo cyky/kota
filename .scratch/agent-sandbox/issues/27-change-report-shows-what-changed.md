@@ -1,7 +1,9 @@
-# 27 — Change report says what changed in watched files
+# DONE — 27 — Change report says what changed in watched files
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
+
+Resolved in: 015a550
 
 ## Parent
 
@@ -18,9 +20,9 @@ For a modified watched file, show what changed, or at least where to look:
 
 ## Acceptance criteria
 
-- [ ] An added, removed or changed dependency or script in a manifest is named in the change report
-- [ ] Other modified watched files show a diff or a command to see one
-- [ ] Tests cover a manifest dependency change and a non-manifest watched file
+- [x] An added, removed or changed dependency or script in a manifest is named in the change report
+- [x] Other modified watched files show a diff or a command to see one
+- [x] Tests cover a manifest dependency change and a non-manifest watched file
 
 ## Blocked by
 
@@ -36,6 +38,21 @@ Decided in triage:
 
 - Other watched files get the `git diff -- <path>` command, not a printed diff. Those files were written by the agent, so printing their contents could send terminal escape sequences, or a very long diff, to the user's terminal.
 - Correction to the issue body: the prep gate does not list dependency changes today. It only names changed files (as `changereport.Change`). Working out what changed inside a manifest is new work.
+
+### 2026-10-17
+
+Implemented in 015a550.
+
+Verified: unit tests for the package.json and go.mod comparison (dependencies, scripts with install hooks marked, go, toolchain, require, replace and tool lines), unparseable and oversized manifests, and escaping of control characters in names, values and paths. `TestReportChangesDetails` replays the issue 17 case and checks the exact report output (wrangler devDependency, postinstall, `.envrc` diff command). The full unit and Docker integration suites pass.
+
+Deviations from the brief:
+
+- `go.mod` was added to `changereport.Watched`, despite "changing which files are watched" being out of scope: the go.mod criterion can't be met otherwise, and its go, toolchain and tool lines decide what the host's go downloads and runs. The commit check now flags hidden go.mod changes too.
+- The command is `git -C <project> diff HEAD -- <path>`, so staged changes show as well; added files get `git status -- <path>`, and added manifests get that command rather than a full list.
+- go.mod is parsed with `golang.org/x/mod/modfile`, a new dependency.
+- Path escaping also applies to the prep gate's list, which shares `Warnings`.
+
+Not covered: a watched file untracked before the session and modified by the agent gets `git diff HEAD`, which shows nothing for it.
 
 ## Agent Brief
 
@@ -60,13 +77,13 @@ When a session ends, the change report compares snapshots of the watched files (
 - The package.json parsing already used for the dependency plan (`deps`) can be reused or extended
 
 **Acceptance criteria:**
-- [ ] A dependency added to `devDependencies` in `package.json` during a session is named, with its version, in the change report
-- [ ] An added or changed `postinstall` script is named and marked as an install hook
-- [ ] A changed `require` version in `go.mod` is named with its old and new version
-- [ ] A modified watched file that isn't a manifest (e.g. `.envrc`) shows a `git diff -- <path>` command
-- [ ] An unparseable manifest falls back to the diff command without an error
-- [ ] Control characters in dependency names or script values are not written raw to the terminal
-- [ ] Unit tests cover the manifest comparison, and an integration or command-level test covers the report output
+- [x] A dependency added to `devDependencies` in `package.json` during a session is named, with its version, in the change report
+- [x] An added or changed `postinstall` script is named and marked as an install hook
+- [x] A changed `require` version in `go.mod` is named with its old and new version
+- [x] A modified watched file that isn't a manifest (e.g. `.envrc`) shows a `git diff -- <path>` command
+- [x] An unparseable manifest falls back to the diff command without an error
+- [x] Control characters in dependency names or script values are not written raw to the terminal
+- [x] Unit tests cover the manifest comparison, and an integration or command-level test covers the report output
 
 **Out of scope:**
 - Lockfile diffs (`package-lock.json`, `go.sum`, ...): they keep the diff command
