@@ -62,7 +62,7 @@ The most indirect way to escape a sandbox is to write a file that the host runs 
 
 Missing ones get a read-only placeholder for the session, so the agent can't create them either. Each directory on the way to a protected path is pinned too, so it can't be renamed away and replaced. Git still works inside the sandbox.
 
-Files that run things but must stay editable (`package.json`, `Makefile`, `.vscode/`, `.github/workflows/`, `build.rs`, `.husky/*`, ...) can't be locked without breaking normal work. kota hashes them before the session and, when it ends, lists every one that was added, changed or deleted, so you can review them before you build or open the project.
+Files that run things but must stay editable (`package.json`, `Makefile`, `.vscode/`, `.github/workflows/`, `build.rs`, `.husky/*`, ...) can't be locked without breaking normal work. kota hashes them before the session and, when it ends, lists every one that was added, changed or deleted, so you can review them before you build or open the project. For a changed `package.json` or `go.mod` it names the dependencies and scripts that changed; for other files it prints the `git` command that shows the diff.
 
 Before a full-auto session with uncommitted changes, kota asks you to confirm, so the agent's work doesn't mix with yours. That check runs `git status` in a throwaway, offline container, not on the host, because host git could run a filter the agent configured.
 

@@ -1223,7 +1223,8 @@ func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Sess
 }
 
 // reportChanges warns about watched files, and the files in watch, that the
-// session added, modified or deleted, and returns them.
+// session added, modified or deleted, says what changed in them or how to
+// see it, and returns them.
 func reportChanges(w io.Writer, project string, watch []string, before changereport.Files) []changereport.Change {
 	after, err := changereport.SnapshotWith(project, watch)
 	if err != nil {
@@ -1235,7 +1236,7 @@ func reportChanges(w io.Writer, project string, watch []string, before changerep
 		return nil
 	}
 	fmt.Fprintf(w, "WARNING: the session changed %d file(s) that can run code on the host. Review them before building, installing or opening the project in an editor:\n", len(changes))
-	for _, line := range changereport.Warnings(changes) {
+	for _, line := range changereport.Report(project, before, after, changes) {
 		fmt.Fprintln(w, "  "+line)
 	}
 	return changes

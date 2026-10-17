@@ -99,7 +99,23 @@ Secrets are masked: inside the sandbox they read as an empty file or directory a
 - Masks don't reach git. A secret that is tracked, or was ever committed, can be read from `.git` inside the sandbox (`git log -p -- .env`), and a commit made there would record a tracked one emptied. `run`, `shell`, `check` and `prep` warn about masked files that are tracked now, but history isn't checked. A commit that empties one is reported after the session (see below). To fix it, remove the file from the index (`git rm --cached`) and from history (for example with `git filter-repo`), and rotate the secret, since earlier clones and pushes still have it. To keep the history out of a session, use `--no-history` (see [Sessions without git history](#sessions-without-git-history)).
 - `--ro` paths aren't masked.
 
-Other files that run things can't be locked without breaking normal work, so `run` reports them instead. It records them before the session and, when it ends, lists any that were added, modified or deleted. The list covers, at any depth, `package.json`, `Makefile`, `*.nix`, `flake.lock`, `.envrc`, mise's `mise.toml`, `.mise.toml`, `mise.local.toml` and `.tool-versions`, `.gitattributes`, `.gitmodules`, `build.rs`, `justfile` and `Justfile`, `Taskfile.yml`, `.pre-commit-config.yaml`, and the `.cargo/` and `.idea/` directories. It also covers the `.github/workflows/`, `.vscode/`, `.devcontainer/`, `.husky/` and `.githooks/` directories (`changereport.Watched`). Content is compared by hash, so restoring a timestamp doesn't hide an edit. Permission changes and symlink targets count too. Review the listed files before you build, install or open the project in an editor. Limits:
+Other files that run things can't be locked without breaking normal work, so `run` reports them instead. It records them before the session and, when it ends, lists any that were added, modified or deleted. The list covers, at any depth, `package.json`, `go.mod`, `Makefile`, `*.nix`, `flake.lock`, `.envrc`, mise's `mise.toml`, `.mise.toml`, `mise.local.toml` and `.tool-versions`, `.gitattributes`, `.gitmodules`, `build.rs`, `justfile` and `Justfile`, `Taskfile.yml`, `.pre-commit-config.yaml`, and the `.cargo/` and `.idea/` directories. It also covers the `.github/workflows/`, `.vscode/`, `.devcontainer/`, `.husky/` and `.githooks/` directories (`changereport.Watched`). Content is compared by hash, so restoring a timestamp doesn't hide an edit. Permission changes and symlink targets count too. Under each file the report says what changed, or how to see it:
+
+- A modified `package.json` lists each dependency (`dependencies`, `devDependencies`, `optionalDependencies`, `peerDependencies`) and script that was added, removed or changed, with its old and new value. Scripts that the install runs, such as `postinstall` and `prepare`, are marked `(runs on install)`.
+- A modified `go.mod` lists changed `go`, `toolchain`, `require`, `replace` and `tool` lines.
+- Any other file, including lockfiles, gets the command that shows the change: `git -C <project> diff HEAD -- <path>`, or `git status` for an added file. kota doesn't print the diff itself, because the file was written by the agent. A manifest gets the command too when it can't be parsed before or after the session, or when none of the lines above changed.
+- Names and values are escaped and long ones are cut, so an agent-written file can't send control sequences to your terminal. Manifest contents are read on the host before the session starts.
+
+```
+WARNING: the session changed 2 file(s) that can run code on the host. ...
+  modified  .envrc
+      see: git -C /home/me/app diff HEAD -- .envrc
+  modified  package.json
+      devDependencies: added wrangler ^4.0.0
+      scripts: added postinstall (runs on install) "node x.js"
+```
+
+Review the listed files before you build, install or open the project in an editor. Limits:
 
 - It's a warning, not a block: the changes are already on the host.
 - Dependency and build directories are skipped, as for masks. So is `.git`, which is protected by mounts.

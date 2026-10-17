@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -210,6 +211,90 @@ func TestWarnings(t *testing.T) {
 	want := []string{"deleted   Makefile", "modified  package.json"}
 	if !slices.Equal(got, want) {
 		t.Errorf("Warnings = %q, want %q", got, want)
+	}
+}
+
+func TestReport(t *testing.T) {
+	root := project(t)
+	write(t, root, "package.json", `{"devDependencies":{"vitest":"^1.0.0"}}`)
+	write(t, root, "go.mod", "module a\n\nrequire example.com/x v1.0.0\n")
+	write(t, root, "web/package.json", `{"name":"web"}`)
+	before := snap(t, root)
+	write(t, root, "package.json", `{"devDependencies":{"vitest":"^1.0.0","wrangler":"^4.0.0"},"scripts":{"postinstall":"node x.js"}}`)
+	write(t, root, "go.mod", "module a\n\nrequire example.com/x v1.2.0\n")
+	write(t, root, "web/package.json", `{"name":"web",`)
+	write(t, root, "sub/.envrc", "changed")
+	write(t, root, ".vscode/my tasks.json", "{}")
+	os.Remove(filepath.Join(root, "Makefile"))
+	after := snap(t, root)
+
+	got := Report("/home/u/my project", before, after, Diff(before, after))
+	want := []string{
+		"added     .vscode/my tasks.json",
+		"    see: git -C '/home/u/my project' status -- '.vscode/my tasks.json'",
+		"deleted   Makefile",
+		"modified  go.mod",
+		"    require: changed example.com/x: v1.0.0 -> v1.2.0",
+		"modified  package.json",
+		"    devDependencies: added wrangler ^4.0.0",
+		`    scripts: added postinstall (runs on install) "node x.js"`,
+		"modified  sub/.envrc",
+		"    see: git -C '/home/u/my project' diff HEAD -- sub/.envrc",
+		"modified  web/package.json",
+		"    could not compare the dependencies: the file can't be parsed before or after the session",
+		"    see: git -C '/home/u/my project' diff HEAD -- web/package.json",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("Report\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestReportUncomparableManifests(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "package.json", `{"name":"a"}`)
+	write(t, root, "big/package.json", `{}`)
+	write(t, root, "link/real.json", `{}`)
+	if err := os.Symlink("real.json", filepath.Join(root, "link/package.json")); err != nil {
+		t.Fatal(err)
+	}
+	before := snap(t, root)
+	write(t, root, "package.json", `{"name":"b"}`)
+	write(t, root, "big/package.json", `{"x":"`+strings.Repeat("a", maxContent)+`"}`)
+	os.Remove(filepath.Join(root, "link/package.json"))
+	write(t, root, "link/package.json", `{}`)
+	after := snap(t, root)
+
+	got := strings.Join(Report("/p", before, after, Diff(before, after)), "\n")
+	for _, want := range []string{
+		"modified  big/package.json\n    could not compare the dependencies: not a regular file, or too large\n    see: git -C /p diff HEAD -- big/package.json",
+		"modified  link/package.json\n    could not compare the dependencies: not a regular file, or too large",
+		"modified  package.json\n    no dependency or script changes\n    see: git -C /p diff HEAD -- package.json",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Report lacks\n%s\nin\n%s", want, got)
+		}
+	}
+}
+
+// TestReportControlCharacterPaths checks that a path the agent chose can't
+// write control sequences to the terminal or into a command to copy.
+func TestReportControlCharacterPaths(t *testing.T) {
+	root := t.TempDir()
+	before := snap(t, root)
+	write(t, root, ".vscode/\x1b[2Jx.json", "{}")
+	write(t, root, ".vscode/a'; rm -rf ~ '.json", "{}")
+	got := strings.Join(Report("/p", before, snap(t, root), Diff(before, snap(t, root))), "\n")
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("raw escape in report:\n%q", got)
+	}
+	for _, want := range []string{
+		`added     ".vscode/\x1b[2Jx.json"`,
+		"    see: git status (the path has control characters)",
+		`    see: git -C /p status -- '.vscode/a'\''; rm -rf ~ '\''.json'`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Report lacks %q in\n%s", want, got)
+		}
 	}
 }
 

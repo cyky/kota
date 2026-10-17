@@ -4,6 +4,7 @@
 package changereport
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -12,7 +13,11 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+
+	"kota/internal/deps"
 )
 
 // Watched lists the paths whose changes are reported, in a gitignore-like
@@ -21,6 +26,9 @@ import (
 // otherwise it matches the name at any depth.
 var Watched = []string{
 	"package.json",
+	// The go and toolchain lines pick a toolchain go downloads and runs,
+	// and tool lines name commands go tool runs.
+	"go.mod",
 	"Makefile",
 	"makefile",
 	"GNUmakefile",
@@ -72,7 +80,13 @@ type entry struct {
 	mode fs.FileMode
 	sum  [sha256.Size]byte
 	link string
+	// content is kept for a manifest deps can compare, up to maxContent
+	// bytes; it is nil for a larger one.
+	content []byte
 }
+
+// maxContent is the largest manifest whose content a snapshot keeps.
+const maxContent = 1 << 20
 
 // Kind is how a watched file changed.
 type Kind string
@@ -243,10 +257,19 @@ func (s Files) record(root, rel string) error {
 		}
 		defer f.Close()
 		h := sha256.New()
-		if _, err := io.Copy(h, f); err != nil {
+		var w io.Writer = h
+		var kept capped
+		if deps.IsManifest(rel) {
+			w = io.MultiWriter(h, &kept)
+		}
+		if _, err := io.Copy(w, f); err != nil {
 			return err
 		}
 		copy(e.sum[:], h.Sum(nil))
+		if deps.IsManifest(rel) && !kept.over {
+			// Not nil, even for an empty file.
+			e.content = append([]byte{}, kept.buf.Bytes()...)
+		}
 	}
 	s[rel] = e
 	return nil
@@ -259,13 +282,105 @@ func Diff(before, after Files) []Change {
 	return DiffDigests(before.Digests(), after.Digests())
 }
 
+// capped is a writer that keeps up to maxContent bytes and notes whether
+// more were written.
+type capped struct {
+	buf  bytes.Buffer
+	over bool
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	if !c.over && c.buf.Len()+len(p) <= maxContent {
+		c.buf.Write(p)
+	} else {
+		c.over = true
+		c.buf.Reset()
+	}
+	return len(p), nil
+}
+
 // Warnings formats changes for the user, one line each.
 func Warnings(changes []Change) []string {
 	out := make([]string, len(changes))
 	for i, c := range changes {
-		out[i] = fmt.Sprintf("%-8s  %s", c.Kind, c.Path)
+		out[i] = fmt.Sprintf("%-8s  %s", c.Kind, printable(c.Path))
 	}
 	return out
+}
+
+// detailIndent indents Report's lines about a change under its line.
+const detailIndent = "    "
+
+// Report is Warnings with each added or modified file followed by indented
+// lines that say what changed or where to look: a modified manifest's
+// dependency and script changes, else the git command that shows the
+// change. before and after are the snapshots changes came from; project is
+// the host directory the commands name.
+func Report(project string, before, after Files, changes []Change) []string {
+	var out []string
+	for i, line := range Warnings(changes) {
+		out = append(out, line)
+		for _, d := range details(project, before, after, changes[i]) {
+			out = append(out, detailIndent+d)
+		}
+	}
+	return out
+}
+
+func details(project string, before, after Files, c Change) []string {
+	switch c.Kind {
+	case Deleted:
+		return nil
+	case Added:
+		return []string{gitCommand(project, "status", c.Path)}
+	}
+	if !deps.IsManifest(c.Path) {
+		return []string{gitCommand(project, "diff HEAD", c.Path)}
+	}
+	b, a := before[c.Path].content, after[c.Path].content
+	if b == nil || a == nil {
+		return []string{"could not compare the dependencies: not a regular file, or too large", gitCommand(project, "diff HEAD", c.Path)}
+	}
+	lines, err := deps.ManifestChanges(c.Path, b, a)
+	if err != nil {
+		// The parse error may quote the file, so it isn't shown.
+		return []string{"could not compare the dependencies: the file can't be parsed before or after the session", gitCommand(project, "diff HEAD", c.Path)}
+	}
+	if len(lines) == 0 {
+		return []string{"no dependency or script changes", gitCommand(project, "diff HEAD", c.Path)}
+	}
+	return lines
+}
+
+// gitCommand is the line telling the user to run git sub on rel in
+// project, with both paths quoted for the shell.
+func gitCommand(project, sub, rel string) string {
+	if printable(project) != project || printable(rel) != rel {
+		return "see: git status (the path has control characters)"
+	}
+	return fmt.Sprintf("see: git -C %s %s -- %s", shellQuote(project), sub, shellQuote(rel))
+}
+
+// printable returns s as it is when every character is printable, else
+// quoted with the rest escaped, so a path can't write control sequences to
+// the terminal.
+func printable(s string) string {
+	if strings.ContainsFunc(s, func(c rune) bool { return !unicode.IsPrint(c) }) {
+		return strconv.Quote(s)
+	}
+	return s
+}
+
+// shellQuote quotes s for sh when it holds anything but plain path
+// characters.
+func shellQuote(s string) string {
+	plain := s != "" && !strings.ContainsFunc(s, func(c rune) bool {
+		return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("/._-+@", c))
+	})
+	if plain {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // pattern is one parsed Watched entry.
