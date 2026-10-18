@@ -1,4 +1,4 @@
-package pi
+package agent
 
 import (
 	"encoding/json"
@@ -10,16 +10,16 @@ import (
 	"kota/internal/models"
 )
 
-func base(t *testing.T) []byte {
+func piBase(t *testing.T) []byte {
 	t.Helper()
-	data, err := assets.Agents.ReadFile(BaseSettings)
+	data, err := assets.Agents.ReadFile(piBaseSettings)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return data
 }
 
-var catalog = models.Catalog{
+var piCatalog = models.Catalog{
 	Models: []models.Model{
 		{ID: "big", Context: 129024, Output: 16384, Tools: true},
 		{ID: "notools", Context: 8192, Output: 2048, Tools: false},
@@ -29,10 +29,10 @@ var catalog = models.Catalog{
 	Small:   "small",
 }
 
-var settings = Settings{GatewayURL: "http://gateway:8080", Models: catalog}
+var piTestSettings = piSettings{GatewayURL: "http://gateway:8080", Models: piCatalog}
 
-// renderedSettings is the part of settings.json the tests inspect.
-type renderedSettings struct {
+// renderedPiSettings is the part of settings.json the tests inspect.
+type renderedPiSettings struct {
 	DefaultProvider        string   `json:"defaultProvider"`
 	DefaultModel           string   `json:"defaultModel"`
 	DefaultProjectTrust    string   `json:"defaultProjectTrust"`
@@ -40,17 +40,17 @@ type renderedSettings struct {
 	Extensions             []string `json:"extensions"`
 }
 
-func TestRenderSettings(t *testing.T) {
-	data, err := RenderSettings(base(t), settings)
+func TestRenderPiSettings(t *testing.T) {
+	data, err := renderPiSettings(piBase(t), piTestSettings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg renderedSettings
+	var cfg renderedPiSettings
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DefaultProvider != ProviderID || cfg.DefaultModel != "big" {
-		t.Errorf("default = %s/%s, want %s/big", cfg.DefaultProvider, cfg.DefaultModel, ProviderID)
+	if cfg.DefaultProvider != providerID || cfg.DefaultModel != "big" {
+		t.Errorf("default = %s/%s, want %s/big", cfg.DefaultProvider, cfg.DefaultModel, providerID)
 	}
 	// The project's .pi/ is writable by the agent; it must not load in a
 	// later session.
@@ -65,9 +65,9 @@ func TestRenderSettings(t *testing.T) {
 	}
 }
 
-func TestRenderSettingsReplacesBaseDefaults(t *testing.T) {
+func TestRenderPiSettingsReplacesBaseDefaults(t *testing.T) {
 	b := []byte(`{"defaultProvider": "anthropic", "defaultModel": "claude", "theme": "dark"}`)
-	data, err := RenderSettings(b, settings)
+	data, err := renderPiSettings(b, piTestSettings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,21 +75,21 @@ func TestRenderSettingsReplacesBaseDefaults(t *testing.T) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg["defaultProvider"] != ProviderID || cfg["defaultModel"] != "big" || cfg["theme"] != "dark" {
+	if cfg["defaultProvider"] != providerID || cfg["defaultModel"] != "big" || cfg["theme"] != "dark" {
 		t.Errorf("settings = %v", cfg)
 	}
 }
 
-func TestRenderSettingsOverride(t *testing.T) {
+func TestRenderPiSettingsOverride(t *testing.T) {
 	b := []byte(`{"defaultProjectTrust": "never", "terminal": {"showImages": true, "clearOnShrink": true}}`)
-	s := settings
+	s := piTestSettings
 	s.Override = map[string]any{
 		"theme":        "light",
 		"terminal":     map[string]any{"showImages": false},
 		"defaultModel": "other",
 		"retry":        map[string]any{"maxRetries": 5.0},
 	}
-	data, err := RenderSettings(b, s)
+	data, err := renderPiSettings(b, s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,15 +102,15 @@ func TestRenderSettingsOverride(t *testing.T) {
 		t.Errorf("settings = %v, want the override merged over the base", cfg)
 	}
 	// kota's own keys win, and the base's protections stay.
-	if cfg["defaultModel"] != "big" || cfg["defaultProvider"] != ProviderID || cfg["defaultProjectTrust"] != "never" {
+	if cfg["defaultModel"] != "big" || cfg["defaultProvider"] != providerID || cfg["defaultProjectTrust"] != "never" {
 		t.Errorf("settings = %v", cfg)
 	}
 }
 
-func TestSettingsOverridePolicy(t *testing.T) {
-	p := SettingsOverride.Policy
-	if SettingsOverride.Name != "pi/settings.json" || p.AnyKey {
-		t.Errorf("override = %+v", SettingsOverride)
+func TestPiSettingsOverridePolicy(t *testing.T) {
+	p := piSettingsOverride.Policy
+	if piSettingsOverride.Name != "pi/settings.json" || p.AnyKey {
+		t.Errorf("override = %+v", piSettingsOverride)
 	}
 	for _, k := range []string{"defaultThinkingLevel", "theme", "terminal", "markdown", "compaction", "retry", "steeringMode", "tuiMode"} {
 		if !slices.Contains(p.Allowed, k) {
@@ -126,7 +126,7 @@ func TestSettingsOverridePolicy(t *testing.T) {
 	}
 	// Everything the bundled base sets stays out of reach.
 	cfg := map[string]any{}
-	if err := json.Unmarshal(base(t), &cfg); err != nil {
+	if err := json.Unmarshal(piBase(t), &cfg); err != nil {
 		t.Fatal(err)
 	}
 	for k := range cfg {
@@ -136,14 +136,14 @@ func TestSettingsOverridePolicy(t *testing.T) {
 	}
 }
 
-func TestRenderSettingsBadBase(t *testing.T) {
-	if _, err := RenderSettings([]byte("{"), settings); err == nil {
+func TestRenderPiSettingsBadBase(t *testing.T) {
+	if _, err := renderPiSettings([]byte("{"), piTestSettings); err == nil {
 		t.Error("no error for invalid base")
 	}
 }
 
-// renderedModels is models.json.
-type renderedModels struct {
+// renderedPiModels is models.json.
+type renderedPiModels struct {
 	Providers map[string]struct {
 		BaseURL string `json:"baseUrl"`
 		API     string `json:"api"`
@@ -156,21 +156,21 @@ type renderedModels struct {
 	} `json:"providers"`
 }
 
-func TestRenderModels(t *testing.T) {
-	data, err := RenderModels(settings)
+func TestRenderPiModels(t *testing.T) {
+	data, err := renderPiModels(piTestSettings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg renderedModels
+	var cfg renderedPiModels
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Providers) != 1 {
-		t.Fatalf("providers = %v, want only %s", cfg.Providers, ProviderID)
+		t.Fatalf("providers = %v, want only %s", cfg.Providers, providerID)
 	}
-	p, ok := cfg.Providers[ProviderID]
+	p, ok := cfg.Providers[providerID]
 	if !ok {
-		t.Fatalf("provider %s missing", ProviderID)
+		t.Fatalf("provider %s missing", providerID)
 	}
 	if p.BaseURL != "http://gateway:8080/v1" || p.API != "openai-completions" {
 		t.Errorf("provider = %+v", p)
@@ -193,8 +193,8 @@ func TestRenderModels(t *testing.T) {
 	}
 }
 
-func TestEnv(t *testing.T) {
-	env := Env("/home/agent/.pi/agent", "/state/pi/sessions")
+func TestPiEnv(t *testing.T) {
+	env := piEnv("/home/agent/.pi/agent", "/state/pi/sessions")
 	want := map[string]string{
 		"PI_CODING_AGENT_DIR":         "/home/agent/.pi/agent",
 		"PI_CODING_AGENT_SESSION_DIR": "/state/pi/sessions",
@@ -209,13 +209,13 @@ func TestEnv(t *testing.T) {
 	}
 }
 
-func TestRenderKeybindings(t *testing.T) {
-	data, err := RenderKeybindings(nil)
+func TestRenderPiKeybindings(t *testing.T) {
+	data, err := renderPiKeybindings(nil)
 	if err != nil || strings.TrimSpace(string(data)) != "{}" {
 		t.Errorf("without an override: %q, %v", data, err)
 	}
 	over := map[string]any{"app.session.new": "ctrl+shift+n", "tui.altScreen.pageUp": []any{}}
-	data, err = RenderKeybindings(over)
+	data, err = renderPiKeybindings(over)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,11 +228,11 @@ func TestRenderKeybindings(t *testing.T) {
 	}
 }
 
-func TestKeybindingsOverridePolicy(t *testing.T) {
-	if KeybindingsOverride.Name != "pi/keybindings.json" || !KeybindingsOverride.Policy.AnyKey {
-		t.Errorf("override = %+v", KeybindingsOverride)
+func TestPiKeybindingsOverridePolicy(t *testing.T) {
+	if piKeybindingsOverride.Name != "pi/keybindings.json" || !piKeybindingsOverride.Policy.AnyKey {
+		t.Errorf("override = %+v", piKeybindingsOverride)
 	}
-	check := KeybindingsOverride.Policy.Value
+	check := piKeybindingsOverride.Policy.Value
 	for _, ok := range []any{"ctrl+k", []any{}, []any{"ctrl+k", "alt+k"}} {
 		if err := check(ok); err != nil {
 			t.Errorf("%v refused: %v", ok, err)
@@ -245,7 +245,7 @@ func TestKeybindingsOverridePolicy(t *testing.T) {
 	}
 }
 
-func TestRenderModelsGatewayKey(t *testing.T) {
+func TestRenderPiModelsGatewayKey(t *testing.T) {
 	cases := []struct {
 		keyEnv, want string
 	}{
@@ -254,17 +254,17 @@ func TestRenderModelsGatewayKey(t *testing.T) {
 		{"KOTA_GATEWAY_KEY", "$KOTA_GATEWAY_KEY"},
 	}
 	for _, c := range cases {
-		s := settings
+		s := piTestSettings
 		s.APIKeyEnv = c.keyEnv
-		data, err := RenderModels(s)
+		data, err := renderPiModels(s)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var cfg renderedModels
+		var cfg renderedPiModels
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			t.Fatal(err)
 		}
-		if got := cfg.Providers[ProviderID].APIKey; got != c.want {
+		if got := cfg.Providers[providerID].APIKey; got != c.want {
 			t.Errorf("APIKeyEnv %q: apiKey = %q, want %q", c.keyEnv, got, c.want)
 		}
 	}

@@ -9,8 +9,6 @@ import (
 	"testing"
 
 	"kota/internal/docker"
-	"kota/internal/opencode"
-	"kota/internal/pi"
 	"kota/internal/sandbox"
 )
 
@@ -48,12 +46,12 @@ func TestInstructionsInShell(t *testing.T) {
 	}
 	hostGit(t, project, "init", "-q")
 
-	for _, agent := range []string{opencode.Agent, pi.Agent} {
+	for _, agent := range []string{"opencode", "pi"} {
 		t.Run(agent, func(t *testing.T) {
 			sa := sessionArgs{agent: agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
 			var out string
 			withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
-				note := sess.agent.notePath
+				note := sess.bridge.NotePath
 				out, err = ds.Capture("bash", "-c", `exec 2>&1
 note=$1
 cat "$note"

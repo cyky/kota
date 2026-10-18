@@ -12,24 +12,6 @@ import (
 	"testing"
 )
 
-func TestFullAuto(t *testing.T) {
-	cases := []struct {
-		agent string
-		auto  bool
-		want  bool
-	}{
-		{"opencode", false, false},
-		{"opencode", true, true},
-		{"pi", false, true},
-		{"pi", true, true},
-	}
-	for _, c := range cases {
-		if got := FullAuto(c.agent, c.auto); got != c.want {
-			t.Errorf("FullAuto(%q, %v) = %v, want %v", c.agent, c.auto, got, c.want)
-		}
-	}
-}
-
 func TestNeedsConfirmation(t *testing.T) {
 	dirty := Status{Git: true, Changes: []string{" M main.go"}}
 	clean := Status{Git: true}
@@ -66,10 +48,10 @@ func TestConfirm(t *testing.T) {
 	}
 	for input, want := range cases {
 		var out bytes.Buffer
-		if got := Confirm(strings.NewReader(input), &out, "pi", s); got != want {
+		if got := Confirm(strings.NewReader(input), &out, "the agent", s); got != want {
 			t.Errorf("Confirm(%q) = %v, want %v", input, got, want)
 		}
-		for _, line := range []string{"pi runs in full auto", "2 uncommitted change(s)", " M main.go", "?? new.txt", "Type y"} {
+		for _, line := range []string{"the agent runs in full auto", "2 uncommitted change(s)", " M main.go", "?? new.txt", "Type y"} {
 			if !strings.Contains(out.String(), line) {
 				t.Errorf("prompt lacks %q:\n%s", line, out.String())
 			}
@@ -83,7 +65,7 @@ func TestConfirmTruncatesLongLists(t *testing.T) {
 		s.Changes = append(s.Changes, "?? f"+strconv.Itoa(i))
 	}
 	var out bytes.Buffer
-	Confirm(strings.NewReader("n\n"), &out, "opencode", s)
+	Confirm(strings.NewReader("n\n"), &out, "the agent", s)
 	if strings.Contains(out.String(), "f10") || !strings.Contains(out.String(), "and 15 more") {
 		t.Errorf("prompt:\n%s", out.String())
 	}
@@ -172,7 +154,7 @@ func TestReadStatus(t *testing.T) {
 
 func TestConfirmLeavesTheRestOfInput(t *testing.T) {
 	in := strings.NewReader("y\nfor the agent\n")
-	if !Confirm(in, &bytes.Buffer{}, "pi", Status{Git: true, Changes: []string{"?? x"}}) {
+	if !Confirm(in, &bytes.Buffer{}, "the agent", Status{Git: true, Changes: []string{"?? x"}}) {
 		t.Fatal("declined")
 	}
 	rest := new(strings.Builder)

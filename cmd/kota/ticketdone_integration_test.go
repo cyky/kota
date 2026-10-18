@@ -18,7 +18,6 @@ import (
 	"kota/assets"
 	"kota/internal/docker"
 	"kota/internal/models"
-	"kota/internal/pi"
 	"kota/internal/sandbox"
 )
 
@@ -156,7 +155,7 @@ func TestTicketDone(t *testing.T) {
 				toolCallReply("ticket_done", map[string]string{"ticket": c.ticket, "commit": "abc1234"}),
 				textReply("taking the next ticket"),
 			}}
-			sa := sessionArgs{agent: pi.Agent, gatewayURL: g.start(t), dir: project, shell: true}
+			sa := sessionArgs{agent: "pi", gatewayURL: g.start(t), dir: project, shell: true}
 			var out string
 			withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
 				out, err = ds.Capture("bash", "-c", `exec 2>&1
@@ -165,7 +164,7 @@ pi -p 'START-MARKER: work on the tickets' </dev/null
 echo "PI-EXIT=$?"
 echo x >> "$ext" && echo WROTE
 touch "$1/evil.ts" && echo ADDED
-true`, "bash", sess.agent.extensions)
+true`, "bash", sess.bridge.Extensions)
 				if err != nil {
 					t.Fatalf("%v\n%s", err, out)
 				}

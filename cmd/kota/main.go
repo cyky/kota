@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"kota/assets"
+	"kota/internal/agent"
 	"kota/internal/approval"
 	"kota/internal/changereport"
 	"kota/internal/check"
@@ -38,10 +39,7 @@ import (
 	"kota/internal/mask"
 	"kota/internal/models"
 	"kota/internal/nohistory"
-	"kota/internal/opencode"
-	"kota/internal/override"
 	"kota/internal/pathpolicy"
-	"kota/internal/pi"
 	"kota/internal/prepgate"
 	"kota/internal/probe"
 	"kota/internal/projectimage"
@@ -53,28 +51,12 @@ const (
 	baseImage      = "kota-base:latest"
 	forwarderImage = "kota-forwarder:latest"
 	defaultGateway = "http://host.docker.internal:8686"
-	defaultAgent   = opencode.Agent
+	defaultAgent   = agent.Default
 	// engineHostAlias is the host as the engine forwarder reaches it, where
 	// QEMU's port forwards listen on 127.0.0.1.
 	engineHostAlias = "host.docker.internal"
 	// engineBootTimeout bounds the Engine VM's boot to a ready Docker API.
 	engineBootTimeout = 60 * time.Second
-
-	opencodeConfigPath = "/etc/kota/opencode.json"
-	// opencodeConfigDir is opencode's global config directory. opencode
-	// writes its service state there, so it and ~/.config stay writable on
-	// their own tmpfs, around the read-only opencodeInstructionsPath.
-	opencodeConfigDir = sandbox.Home + "/.config/opencode"
-	// opencodeInstructionsPath holds kota's instructions to opencode.
-	// opencode reads the global AGENTS.md as
-	// well as the project's; its config's instructions setting is ignored.
-	opencodeInstructionsPath = opencodeConfigDir + "/AGENTS.md"
-	// piAgentDir is pi's config directory. It is writable, because pi
-	// creates lock files next to its settings, and discarded after the
-	// session; the rendered settings.json, models.json, keybindings.json and
-	// APPEND_SYSTEM.md in it, and its extensions directory, are read-only.
-	piAgentDir   = sandbox.Home + "/.pi/agent"
-	piSessionDir = sandbox.StateDir + "/pi/sessions"
 )
 
 const usage = `usage: kota <command> [flags]
@@ -306,114 +288,6 @@ func chooseImage(project string) (projectimage.Choice, error) {
 	return projectimage.Choose(project, baseImage, dockerfile, projectimage.Image{Exists: exists, Labels: labels}, baseID), nil
 }
 
-// agentSetup is how a session runs one agent.
-type agentSetup struct {
-	name string
-	// configs are the in-sandbox paths of the config files render returns,
-	// each mounted read-only.
-	configs []string
-	// scratch are writable per-session directories (sandbox.Inputs.Scratch).
-	scratch []string
-	env     map[string]string
-	command []string
-	// overrides are the Agent override files the agent reads, loaded on
-	// the host before the session starts.
-	overrides []override.File
-	// overrideEnv, when set, returns environment variables carrying the
-	// loaded overrides, for an agent that takes its config inline.
-	overrideEnv func(ov map[string]map[string]any) (map[string]string, error)
-	// render returns the content of each of configs, in order. keyEnv,
-	// when set, names the variable holding the gateway key. ov holds the
-	// loaded overrides by override.File.Name, without those not found.
-	render func(c models.Catalog, auto bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error)
-	// notePath is where the agent reads kota's instructions, mounted
-	// read-only, with noteScratch around it.
-	notePath    string
-	noteScratch []string
-	// facts are what this agent alone is told, after the Sandbox facts.
-	facts []string
-	// extensions, when set, is where the agent loads extensions from. The
-	// agent's bundled extensions (assets agents/<name>/extensions) are
-	// mounted there read-only, as a directory, so none can be added.
-	extensions string
-	// approval describes, for the startup message, whether the agent asks
-	// before it acts.
-	approval func(auto bool) string
-}
-
-func agentFor(name string) (agentSetup, error) {
-	switch name {
-	case opencode.Agent:
-		return agentSetup{
-			name:        opencode.Agent,
-			configs:     []string{opencodeConfigPath},
-			notePath:    opencodeInstructionsPath,
-			noteScratch: []string{path.Dir(opencodeConfigDir), opencodeConfigDir},
-			env:         opencode.Env(opencodeConfigPath),
-			command:     []string{"opencode"},
-			overrides:   []override.File{opencode.ConfigOverride, opencode.CLIOverride},
-			// opencode writes cli.json when settings change in the TUI, so
-			// the CLI config goes inline instead of in a read-only file.
-			overrideEnv: func(ov map[string]map[string]any) (map[string]string, error) {
-				base, err := assets.Agents.ReadFile(opencode.BaseCLI)
-				if err != nil {
-					return nil, err
-				}
-				content, err := opencode.RenderCLI(base, ov[opencode.CLIOverride.Name])
-				return map[string]string{opencode.CLIEnv: content}, err
-			},
-			render: func(c models.Catalog, auto bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error) {
-				base, err := assets.Agents.ReadFile(opencode.BaseConfig)
-				if err != nil {
-					return nil, err
-				}
-				cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto, APIKeyEnv: keyEnv, Override: ov[opencode.ConfigOverride.Name]})
-				return [][]byte{cfg}, err
-			},
-			approval: func(auto bool) string {
-				if auto {
-					return "auto (opencode edits files and runs commands without asking)"
-				}
-				return "ask (opencode asks before edits and commands; --auto to skip)"
-			},
-		}, nil
-	case pi.Agent:
-		return agentSetup{
-			name:      pi.Agent,
-			configs:   []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piAgentDir + "/" + pi.Keybindings},
-			scratch:   []string{piAgentDir},
-			overrides: []override.File{pi.SettingsOverride, pi.KeybindingsOverride},
-			notePath:  piAgentDir + "/" + pi.AppendSystem,
-			facts: []string{"After you commit a finished ticket and mark it done, call the ticket_done tool with the ticket and the commit. " +
-				"It clears your context, so the next ticket starts fresh; your state is in the tickets and git history."},
-			extensions: piAgentDir + "/extensions",
-			env:        pi.Env(piAgentDir, piSessionDir),
-			command:    []string{"pi"},
-			render: func(c models.Catalog, _ bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error) {
-				base, err := assets.Agents.ReadFile(pi.BaseSettings)
-				if err != nil {
-					return nil, err
-				}
-				s := pi.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, APIKeyEnv: keyEnv, Override: ov[pi.SettingsOverride.Name]}
-				settings, err := pi.RenderSettings(base, s)
-				if err != nil {
-					return nil, err
-				}
-				modelsCfg, err := pi.RenderModels(s)
-				if err != nil {
-					return nil, err
-				}
-				keys, err := pi.RenderKeybindings(ov[pi.KeybindingsOverride.Name])
-				return [][]byte{settings, modelsCfg, keys}, err
-			},
-			approval: func(bool) string {
-				return "auto (pi has no permission system: it edits files and runs commands without asking, and the sandbox is its only boundary)"
-			},
-		}, nil
-	}
-	return agentSetup{}, fmt.Errorf("unknown agent %q; available: %s, %s", name, opencode.Agent, pi.Agent)
-}
-
 // session holds everything needed to start one sandbox.
 type session struct {
 	shell bool
@@ -430,11 +304,14 @@ type session struct {
 	// project of a No-history copy.
 	key    string
 	layout mask.Layout
-	agent  agentSetup
+	// agent is the session's agent with its Agent overrides, nil for prep,
+	// and bridge how it is wired in.
+	agent  *agent.Agent
+	bridge agent.Bridge
 	// gatewayKey is the gateway API key, empty when none is configured. It
 	// only reaches the sandbox through docker compose's environment.
 	gatewayKey string
-	// cfgFiles are the host files behind agent.configs, written by
+	// cfgFiles are the host files behind bridge.Configs, written by
 	// configure once the gateway's models are known.
 	cfgFiles []string
 	// mounts are what the probes verify.
@@ -458,10 +335,6 @@ type session struct {
 	// style is the working style the agent's note starts with; unset for
 	// prep.
 	style instructions.Style
-	// overrides are the agent's loaded Agent overrides, for render, and
-	// overrideFiles their host paths, for the user; both unset for prep.
-	overrides     map[string]map[string]any
-	overrideFiles []string
 }
 
 // loadStyle reads the user's working style override, or returns the
@@ -478,28 +351,14 @@ func loadStyle() (instructions.Style, error) {
 	return instructions.Load(instructions.OverridePath(os.Getenv, home), builtin)
 }
 
-// loadOverrides reads the user's Agent overrides of files, returning those
-// found by name and their paths, in files' order.
-func loadOverrides(files []override.File) (map[string]map[string]any, []string, error) {
+// loadAgent picks the agent called name and reads the user's Agent
+// overrides of it.
+func loadAgent(name string) (*agent.Agent, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	config := instructions.ConfigHome(os.Getenv, home)
-	loaded := map[string]map[string]any{}
-	var found []string
-	for _, f := range files {
-		file := override.Path(config, f.Name)
-		over, ok, err := override.Load(file, f.Policy)
-		if err != nil {
-			return nil, nil, err
-		}
-		if ok {
-			loaded[f.Name] = over
-			found = append(found, file)
-		}
-	}
-	return loaded, found, nil
+	return agent.Load(name, instructions.ConfigHome(os.Getenv, home))
 }
 
 // overrideSource says which Agent override files the session uses.
@@ -712,19 +571,18 @@ func sessionDeps(project, key string) (deps.Plan, error) {
 // or the original project of a No-history copy.
 func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, key string, depPlan deps.Plan) (*session, error) {
 	prep := mode == sandbox.ModePrep
-	var agent agentSetup
+	var ag *agent.Agent
+	var bridge agent.Bridge
 	var style instructions.Style
-	var overrides map[string]map[string]any
-	var overrideFiles []string
 	var err error
 	if !prep {
-		if agent, err = agentFor(sa.agent); err != nil {
+		if ag, err = loadAgent(sa.agent); err != nil {
 			return nil, err
 		}
 		if style, err = loadStyle(); err != nil {
 			return nil, err
 		}
-		if overrides, overrideFiles, err = loadOverrides(agent.overrides); err != nil {
+		if bridge, err = ag.Bridge(); err != nil {
 			return nil, err
 		}
 	}
@@ -769,7 +627,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	var cfgMounts []sandbox.Mount
 	var cfgFiles []string
 	err = os.Mkdir(filepath.Join(sessionDir, "agent"), 0o755)
-	for _, target := range agent.configs {
+	for _, target := range bridge.Configs {
 		if err != nil {
 			break
 		}
@@ -783,7 +641,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		return nil, err
 	}
 
-	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: agent, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image, style: style, overrides: overrides, overrideFiles: overrideFiles}
+	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, bridge: bridge, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image, style: style}
 	var engineRoute *sandbox.EngineRoute
 	if !prep {
 		opts, err := engineOptions()
@@ -804,27 +662,27 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		}
 	}
 	// Every agent gets the note; prep runs none.
-	readOnlyTargets := agent.configs
-	scratch := agent.scratch
+	readOnlyTargets := bridge.Configs
+	scratch := bridge.Scratch
 	if !prep {
-		note := instructions.Note(style, agent.facts, sess.engineNote())
-		file := filepath.Join(sessionDir, "agent", path.Base(agent.notePath))
+		note := instructions.Note(style, bridge.Facts, sess.engineNote())
+		file := filepath.Join(sessionDir, "agent", path.Base(bridge.NotePath))
 		if err := os.WriteFile(file, []byte(note), 0o644); err != nil {
 			os.RemoveAll(sessionDir)
 			return nil, err
 		}
-		cfgMounts = append(cfgMounts, sandbox.Mount{Source: file, Target: agent.notePath})
-		readOnlyTargets = append(slices.Clip(readOnlyTargets), agent.notePath)
-		scratch = append(slices.Clip(scratch), agent.noteScratch...)
+		cfgMounts = append(cfgMounts, sandbox.Mount{Source: file, Target: bridge.NotePath})
+		readOnlyTargets = append(slices.Clip(readOnlyTargets), bridge.NotePath)
+		scratch = append(slices.Clip(scratch), bridge.NoteScratch...)
 	}
-	if agent.extensions != "" {
+	if bridge.Extensions != "" {
 		dir := filepath.Join(sessionDir, "agent", "extensions")
-		if err := writeExtensions(dir, agent.name); err != nil {
+		if err := writeExtensions(dir, ag.Name()); err != nil {
 			os.RemoveAll(sessionDir)
 			return nil, err
 		}
-		cfgMounts = append(cfgMounts, sandbox.Mount{Source: dir, Target: agent.extensions})
-		readOnlyTargets = append(slices.Clip(readOnlyTargets), agent.extensions)
+		cfgMounts = append(cfgMounts, sandbox.Mount{Source: dir, Target: bridge.Extensions})
+		readOnlyTargets = append(slices.Clip(readOnlyTargets), bridge.Extensions)
 	}
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {
@@ -858,19 +716,11 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	}
 
 	env := map[string]string{}
-	maps.Copy(env, agent.env)
-	if agent.overrideEnv != nil {
-		ovEnv, err := agent.overrideEnv(overrides)
-		if err != nil {
-			os.RemoveAll(sessionDir)
-			return nil, err
-		}
-		maps.Copy(env, ovEnv)
-	}
+	maps.Copy(env, bridge.Env)
 	maps.Copy(env, gitEnv(key))
 	command := sa.command
 	if len(command) == 0 {
-		command = agent.command
+		command = bridge.Command
 	}
 	if sa.shell {
 		command = []string{"bash", "--noprofile", "--norc", "-i"}
@@ -879,7 +729,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	if prep {
 		command = []string{"sh", "-c", depPlan.Script()}
 	} else {
-		state := agent.name
+		state := ag.Name()
 		if sa.noHistory {
 			state += sandbox.NoHistoryState
 		}
@@ -1055,8 +905,9 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		return err
 	}
 	defer releaseProject(lease)
-	// Fail on an unknown agent or a broken models.yaml before asking.
-	agent, err := agentFor(sa.agent)
+	// Fail on an unknown agent, a refused Agent override or a broken
+	// models.yaml before asking.
+	ag, err := loadAgent(sa.agent)
 	if err != nil {
 		return err
 	}
@@ -1064,7 +915,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		return err
 	}
 	start := time.Now()
-	paths, key, err := offlinePaths(sa, lease, agent.name, auto, start)
+	paths, key, err := offlinePaths(sa, lease, ag, auto, start)
 	if err != nil {
 		return err
 	}
@@ -1106,7 +957,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	}
 	// Before cleanup, as commits.finish: the copy's status and export read
 	// its .git, where cleanup removes seeded files.
-	ret := returnWork(sess, commits, returnName(sa, agent.name), start)
+	ret := returnWork(sess, commits, returnName(sa, ag.Name()), start)
 	sess.cleanup()
 	// The copy's working tree is discarded, so watched files changed in
 	// its commits are always flagged, and its changes are listed in full
@@ -1233,7 +1084,7 @@ const maxListedChanges = 20
 // offlinePaths returns the paths a run or shell session mounts and the
 // project it belongs to, after the full-auto prompt or, with --no-history,
 // after making the No-history copy.
-func offlinePaths(sa sessionArgs, lease *lockedProject, agent string, auto bool, start time.Time) (pathpolicy.Paths, string, error) {
+func offlinePaths(sa sessionArgs, lease *lockedProject, ag *agent.Agent, auto bool, start time.Time) (pathpolicy.Paths, string, error) {
 	paths, key := lease.paths, lease.paths.Project
 	if sa.noHistory {
 		// The agent works on the copy, so the original's uncommitted
@@ -1244,7 +1095,7 @@ func offlinePaths(sa sessionArgs, lease *lockedProject, agent string, auto bool,
 		return paths, key, err
 	}
 	if !sa.shell {
-		if err := confirmFullAuto(key, agent, auto); err != nil {
+		if err := confirmFullAuto(key, ag.Name(), ag.FullAuto(auto), ag.FullAuto(false)); err != nil {
 			return paths, key, err
 		}
 	}
@@ -1347,8 +1198,8 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 		if sess.shell {
 			fmt.Fprintln(os.Stderr, "starting an interactive Bash shell (no agent)")
 		} else {
-			fmt.Fprintln(os.Stderr, "approval:", sess.agent.approval(auto))
-			fmt.Fprintln(os.Stderr, "agent override:", overrideSource(sess.overrideFiles))
+			fmt.Fprintln(os.Stderr, "approval:", sess.agent.Approval(auto))
+			fmt.Fprintln(os.Stderr, "agent override:", overrideSource(sess.agent.Overrides()))
 		}
 		if skipCheck {
 			fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
@@ -1595,7 +1446,7 @@ func cmdCheck(args []string) error {
 	printMounts(os.Stdout, sess.spec)
 	printMasks(os.Stdout, sess.layout)
 	fmt.Fprintf(os.Stdout, "instructions: %s ('kota instructions' prints them)\n", sess.style.Source)
-	fmt.Fprintln(os.Stdout, "agent override:", overrideSource(sess.overrideFiles))
+	fmt.Fprintln(os.Stdout, "agent override:", overrideSource(sess.agent.Overrides()))
 	sess.printWarnings(os.Stdout)
 	engineErr := printEngine(os.Stdout, sess)
 
@@ -2123,7 +1974,7 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 	if s.gatewayKey != "" {
 		keyEnv = sandbox.GatewayKeyEnv
 	}
-	contents, err := s.agent.render(catalog, auto, keyEnv, s.overrides)
+	contents, err := s.bridge.Render(catalog, auto, keyEnv)
 	if err != nil {
 		return models.Catalog{}, err
 	}
@@ -2137,8 +1988,10 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 
 // confirmFullAuto asks the user to type y before a full-auto session on a
 // project with uncommitted changes. It returns an error when they decline.
-func confirmFullAuto(project, agent string, auto bool) error {
-	if !approval.FullAuto(agent, auto) {
+// fullAuto is whether the agent acts without asking in this session, and
+// always whether it would without --auto too.
+func confirmFullAuto(project, agent string, fullAuto, always bool) error {
+	if !fullAuto {
 		return nil
 	}
 	status, err := approval.ReadStatus(project, offlineRunner)
@@ -2150,7 +2003,7 @@ func confirmFullAuto(project, agent string, auto bool) error {
 	}
 	if !interrupt.Ask(func() bool { return approval.Confirm(os.Stdin, os.Stderr, agent, status) }) {
 		msg := "not started; commit or stash your changes first (git stash -u)"
-		if !approval.FullAuto(agent, false) {
+		if !always {
 			msg += ", or run without --auto"
 		}
 		return errors.New(msg)

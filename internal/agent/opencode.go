@@ -1,37 +1,45 @@
-// Package opencode renders opencode's config for a sandbox session.
-package opencode
+package agent
 
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 
+	"kota/assets"
 	"kota/internal/models"
 	"kota/internal/override"
+	"kota/internal/sandbox"
 )
 
-// Agent is the agent name, used for its state volume and config directory.
-const Agent = "opencode"
+const (
+	opencodeConfigPath = "/etc/kota/opencode.json"
+	// opencodeConfigDir is opencode's global config directory. opencode
+	// writes its service state there, so it and ~/.config stay writable on
+	// their own tmpfs, around the read-only opencodeInstructionsPath.
+	opencodeConfigDir = sandbox.Home + "/.config/opencode"
+	// opencodeInstructionsPath holds kota's instructions to opencode.
+	// opencode reads the global AGENTS.md as
+	// well as the project's; its config's instructions setting is ignored.
+	opencodeInstructionsPath = opencodeConfigDir + "/AGENTS.md"
+)
 
-// ProviderID is the provider name the gateway is registered under.
-const ProviderID = "kota"
+// opencodeBaseConfig is the path of the base config in assets.Agents.
+const opencodeBaseConfig = "agents/opencode/opencode.json"
 
-// BaseConfig is the path of the base config in assets.Agents.
-const BaseConfig = "agents/opencode/opencode.json"
-
-// BaseCLI is the path of the base CLI config in assets.Agents: opencode
-// v2's terminal preferences (keybinds, theme), kept apart from
+// opencodeBaseCLI is the path of the base CLI config in assets.Agents:
+// opencode v2's terminal preferences (keybinds, theme), kept apart from
 // opencode.json.
-const BaseCLI = "agents/opencode/cli.json"
+const opencodeBaseCLI = "agents/opencode/cli.json"
 
-// CLIEnv carries the rendered CLI config. opencode merges it over its
-// global cli.json, which it writes itself when settings change in the
+// opencodeCLIEnv carries the rendered CLI config. opencode merges it over
+// its global cli.json, which it writes itself when settings change in the
 // TUI, and keeps it authoritative while set. opencode has no project-level
 // CLI config.
-const CLIEnv = "OPENCODE_CLI_CONFIG_CONTENT"
+const opencodeCLIEnv = "OPENCODE_CLI_CONFIG_CONTENT"
 
-// CLIOverride is the user's Agent override of cli.json. Its settings only
-// change how the terminal UI looks and which keys do what.
-var CLIOverride = override.File{
+// opencodeCLIOverride is the user's Agent override of cli.json. Its
+// settings only change how the terminal UI looks and which keys do what.
+var opencodeCLIOverride = override.File{
 	Name: "opencode/cli.json",
 	Policy: override.Policy{
 		Allowed: []string{"keybinds", "leader", "theme", "animations", "cursor", "mouse", "scroll", "prompt", "session", "tabs", "diffs", "terminal", "mini", "highlights"},
@@ -44,12 +52,12 @@ var CLIOverride = override.File{
 	},
 }
 
-// ConfigOverride is the user's Agent override of opencode.json. Only
-// compaction is allowed: the rest is gateway wiring, the approval model,
-// code or paths opencode loads, or terminal settings that belong in
+// opencodeConfigOverride is the user's Agent override of opencode.json.
+// Only compaction is allowed: the rest is gateway wiring, the approval
+// model, code or paths opencode loads, or terminal settings that belong in
 // cli.json. opencode 2 still reads v1 names and maps them to v2 ones, so
 // both are refused.
-var ConfigOverride = override.File{
+var opencodeConfigOverride = override.File{
 	Name: "opencode/opencode.json",
 	Policy: override.Policy{
 		Allowed: []string{"compaction"},
@@ -95,11 +103,41 @@ var ConfigOverride = override.File{
 	},
 }
 
-// autoAllowed are the permissions Auto switches from ask to allow.
-var autoAllowed = []string{"edit", "bash"}
+// opencode asks before edits and commands, unless --auto.
+var opencode = adapter{
+	name:        "opencode",
+	asks:        true,
+	configs:     []string{opencodeConfigPath},
+	notePath:    opencodeInstructionsPath,
+	noteScratch: []string{path.Dir(opencodeConfigDir), opencodeConfigDir},
+	env:         opencodeEnv(opencodeConfigPath),
+	command:     []string{"opencode"},
+	overrides:   []override.File{opencodeConfigOverride, opencodeCLIOverride},
+	// opencode writes cli.json when settings change in the TUI, so the CLI
+	// config goes inline instead of in a read-only file.
+	overrideEnv: func(ov map[string]map[string]any) (map[string]string, error) {
+		base, err := assets.Agents.ReadFile(opencodeBaseCLI)
+		if err != nil {
+			return nil, err
+		}
+		content, err := renderOpencodeCLI(base, ov[opencodeCLIOverride.Name])
+		return map[string]string{opencodeCLIEnv: content}, err
+	},
+	render: func(c models.Catalog, auto bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error) {
+		base, err := assets.Agents.ReadFile(opencodeBaseConfig)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err := renderOpencode(base, opencodeSettings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto, APIKeyEnv: keyEnv, Override: ov[opencodeConfigOverride.Name]})
+		return [][]byte{cfg}, err
+	},
+}
 
-// Settings are the inputs for a session's opencode config.
-type Settings struct {
+// opencodeAutoAllowed are the permissions Auto switches from ask to allow.
+var opencodeAutoAllowed = []string{"edit", "bash"}
+
+// opencodeSettings are the inputs for a session's opencode config.
+type opencodeSettings struct {
 	// GatewayURL is the gateway base URL as seen from inside the sandbox.
 	GatewayURL string
 	// Models are the models offered, with the default and small model.
@@ -110,16 +148,16 @@ type Settings struct {
 	// gateway key. The config refers to it, so the key isn't written out.
 	APIKeyEnv string
 	// Override is the user's Agent override of opencode.json, from
-	// ConfigOverride, or nil.
+	// opencodeConfigOverride, or nil.
 	Override map[string]any
 }
 
-// Render returns the opencode.json content for a session: base (the
-// versioned permissions and defaults), then the user's override, then the
-// gateway provider, its models and the default and small model. With Auto,
-// edits and shell commands are allowed; other permissions keep their base
-// values.
-func Render(base []byte, s Settings) ([]byte, error) {
+// renderOpencode returns the opencode.json content for a session: base
+// (the versioned permissions and defaults), then the user's override, then
+// the gateway provider, its models and the default and small model. With
+// Auto, edits and shell commands are allowed; other permissions keep their
+// base values.
+func renderOpencode(base []byte, s opencodeSettings) ([]byte, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
 		return nil, fmt.Errorf("base opencode config: %w", err)
@@ -133,18 +171,18 @@ func Render(base []byte, s Settings) ([]byte, error) {
 			"limit":     map[string]int{"context": m.Context, "output": m.Output},
 		}
 	}
-	cfg["enabled_providers"] = []string{ProviderID}
-	cfg["model"] = ProviderID + "/" + s.Models.Default
+	cfg["enabled_providers"] = []string{providerID}
+	cfg["model"] = providerID + "/" + s.Models.Default
 	delete(cfg, "small_model")
 	if s.Models.Small != "" {
-		cfg["small_model"] = ProviderID + "/" + s.Models.Small
+		cfg["small_model"] = providerID + "/" + s.Models.Small
 	}
 	if s.Auto {
 		perm, _ := cfg["permission"].(map[string]any)
 		if perm == nil {
 			perm = map[string]any{}
 		}
-		for _, k := range autoAllowed {
+		for _, k := range opencodeAutoAllowed {
 			perm[k] = "allow"
 		}
 		cfg["permission"] = perm
@@ -154,7 +192,7 @@ func Render(base []byte, s Settings) ([]byte, error) {
 		options["apiKey"] = "{env:" + s.APIKeyEnv + "}"
 	}
 	cfg["provider"] = map[string]any{
-		ProviderID: map[string]any{
+		providerID: map[string]any{
 			"npm":     "@ai-sdk/openai-compatible",
 			"name":    "kota gateway",
 			"options": options,
@@ -164,9 +202,10 @@ func Render(base []byte, s Settings) ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// RenderCLI returns the CLI config for a session, for CLIEnv: base with
-// the user's override, from CLIOverride, merged on top. over may be nil.
-func RenderCLI(base []byte, over map[string]any) (string, error) {
+// renderOpencodeCLI returns the CLI config for a session, for
+// opencodeCLIEnv: base with the user's override, from opencodeCLIOverride,
+// merged on top. over may be nil.
+func renderOpencodeCLI(base []byte, over map[string]any) (string, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
 		return "", fmt.Errorf("base opencode cli config: %w", err)
@@ -175,14 +214,14 @@ func RenderCLI(base []byte, over map[string]any) (string, error) {
 	return string(data), err
 }
 
-// Env returns environment variables that keep opencode offline-friendly and
-// point it at the rendered config.
+// opencodeEnv returns environment variables that keep opencode
+// offline-friendly and point it at the rendered config.
 //
 // The project's opencode.json and .opencode/ are ignored: the agent can
 // write them, and they would override configPath. The global config
 // directory stays at ~/.config/opencode on the session's tmpfs, because
 // opencode writes its service state there; configPath outranks it.
-func Env(configPath string) map[string]string {
+func opencodeEnv(configPath string) map[string]string {
 	return map[string]string{
 		"OPENCODE_CONFIG":                 configPath,
 		"OPENCODE_DISABLE_PROJECT_CONFIG": "1",

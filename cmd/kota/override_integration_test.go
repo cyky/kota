@@ -11,8 +11,6 @@ import (
 	"testing"
 
 	"kota/internal/docker"
-	"kota/internal/opencode"
-	"kota/internal/pi"
 	"kota/internal/sandbox"
 )
 
@@ -54,10 +52,10 @@ func TestAgentOverrideInShell(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sa := sessionArgs{agent: opencode.Agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
+	sa := sessionArgs{agent: "opencode", gatewayURL: stubModelGateway(t), dir: project, shell: true}
 	var out string
 	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
-		out, err = ds.Capture("bash", "-c", `printf %s "$`+opencode.CLIEnv+`"`)
+		out, err = ds.Capture("bash", "-c", `printf %s "$`+opencodeCLIEnv+`"`)
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
@@ -66,10 +64,10 @@ func TestAgentOverrideInShell(t *testing.T) {
 		Keybinds map[string]string `json:"keybinds"`
 	}
 	if err := json.Unmarshal([]byte(out), &cfg); err != nil {
-		t.Fatalf("%s = %q: %v", opencode.CLIEnv, out, err)
+		t.Fatalf("%s = %q: %v", opencodeCLIEnv, out, err)
 	}
 	if cfg.Keybinds["session.delete"] != "ctrl+shift+d" || cfg.Keybinds["leader"] != "$HOME" {
-		t.Errorf("%s = %s, want the override as written", opencode.CLIEnv, out)
+		t.Errorf("%s = %s, want the override as written", opencodeCLIEnv, out)
 	}
 }
 
@@ -107,7 +105,7 @@ func TestPiKeybindingsInShell(t *testing.T) {
 	}
 	hostGit(t, project, "init", "-q")
 
-	sa := sessionArgs{agent: pi.Agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
+	sa := sessionArgs{agent: "pi", gatewayURL: stubModelGateway(t), dir: project, shell: true}
 	var out string
 	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
 		out, err = ds.Capture("bash", "-c", `exec 2>&1
@@ -174,7 +172,7 @@ func TestPiSettingsInShell(t *testing.T) {
 	}
 	hostGit(t, project, "init", "-q")
 
-	sa := sessionArgs{agent: pi.Agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
+	sa := sessionArgs{agent: "pi", gatewayURL: stubModelGateway(t), dir: project, shell: true}
 	var out string
 	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
 		out, err = ds.Capture("bash", "-c", `exec 2>&1
@@ -193,7 +191,7 @@ console.log("trust=" + s.getDefaultProjectTrust());
 		}
 	})
 	t.Logf("inside:\n%s", out)
-	for _, want := range []string{"theme=light", "thinking=high", "showImages=false", "provider=" + pi.ProviderID, "trust=never"} {
+	for _, want := range []string{"theme=light", "thinking=high", "showImages=false", "provider=" + providerID, "trust=never"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pi's settings lack %s:\n%s", want, out)
 		}
@@ -234,7 +232,7 @@ func TestOpencodeConfigInShell(t *testing.T) {
 	}
 	hostGit(t, project, "init", "-q")
 
-	sa := sessionArgs{agent: opencode.Agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
+	sa := sessionArgs{agent: "opencode", gatewayURL: stubModelGateway(t), dir: project, shell: true}
 	var out string
 	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
 		out, err = ds.Capture("bash", "-c", `opencode debug config 2>&1`)

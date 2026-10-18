@@ -19,13 +19,24 @@ import (
 	"kota/internal/docker"
 	"kota/internal/instructions"
 	"kota/internal/models"
-	"kota/internal/opencode"
-	"kota/internal/pi"
 	"kota/internal/prepgate"
 	"kota/internal/probe"
 	"kota/internal/projectimage"
 	"kota/internal/sandbox"
 	"kota/internal/sessionregistry"
+)
+
+// Where the agents' config lives in the sandbox, and what they are told,
+// as the tests expect it.
+const (
+	opencodeConfigPath       = "/etc/kota/opencode.json"
+	opencodeInstructionsPath = sandbox.Home + "/.config/opencode/AGENTS.md"
+	opencodeCLIEnv           = "OPENCODE_CLI_CONFIG_CONTENT"
+	piAgentDir               = sandbox.Home + "/.pi/agent"
+	piSessionDir             = sandbox.StateDir + "/pi/sessions"
+	piNotePath               = piAgentDir + "/APPEND_SYSTEM.md"
+	piKeybindingsPath        = piAgentDir + "/keybindings.json"
+	providerID               = "kota"
 )
 
 // TestSessionMountsNoHostAgentConfig builds a session for each agent against
@@ -55,14 +66,14 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 		command []string
 	}{
 		{
-			agent:   opencode.Agent,
+			agent:   "opencode",
 			configs: []string{opencodeConfigPath},
-			env:     map[string]string{"OPENCODE_DISABLE_PROJECT_CONFIG": "1", opencode.CLIEnv: "{}"},
+			env:     map[string]string{"OPENCODE_DISABLE_PROJECT_CONFIG": "1", opencodeCLIEnv: "{}"},
 			command: []string{"opencode"},
 		},
 		{
-			agent:   pi.Agent,
-			configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piAgentDir + "/" + pi.Keybindings},
+			agent:   "pi",
+			configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piKeybindingsPath},
 			env:     map[string]string{"PI_CODING_AGENT_DIR": piAgentDir, "PI_CODING_AGENT_SESSION_DIR": piSessionDir, "PI_OFFLINE": "1"},
 			command: []string{"pi"},
 		},
@@ -408,7 +419,7 @@ func TestPrepGateOutput(t *testing.T) {
 func noteOf(t *testing.T, sess *session) string {
 	t.Helper()
 	for _, v := range sess.spec.Services[sandbox.AgentService].Volumes {
-		if v.Target == sess.agent.notePath {
+		if v.Target == sess.bridge.NotePath {
 			if !v.ReadOnly {
 				t.Errorf("note mounted writable: %+v", v)
 			}
@@ -419,7 +430,7 @@ func noteOf(t *testing.T, sess *session) string {
 			return string(data)
 		}
 	}
-	t.Fatalf("no note mounted at %s", sess.agent.notePath)
+	t.Fatalf("no note mounted at %s", sess.bridge.NotePath)
 	return ""
 }
 
@@ -460,7 +471,7 @@ func TestInstructionsOverride(t *testing.T) {
 		t.Errorf("override: stdout %q, stderr %q", out.String(), info.String())
 	}
 
-	for _, agent := range []string{opencode.Agent, pi.Agent} {
+	for _, agent := range []string{"opencode", "pi"} {
 		sa, err := parseOfflineArgs("run", []string{"--agent", agent, project}, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -494,7 +505,7 @@ func TestTicketDoneOnlyForPi(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for _, agent := range []string{opencode.Agent, pi.Agent} {
+		for _, agent := range []string{"opencode", "pi"} {
 			sa, err := parseOfflineArgs("run", []string{"--agent", agent, project}, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -511,7 +522,7 @@ func TestTicketDoneOnlyForPi(t *testing.T) {
 				}
 			}
 			told := strings.Contains(note, "ticket_done")
-			if agent == opencode.Agent {
+			if agent == "opencode" {
 				if told || ext != nil {
 					t.Errorf("opencode (override %v): told %v, extensions %+v", withOverride, told, ext)
 				}
@@ -578,9 +589,9 @@ func writeOverride(t *testing.T, name, content string) string {
 // cliConfig returns the CLI config sess passes opencode inline.
 func cliConfig(t *testing.T, sess *session) map[string]any {
 	t.Helper()
-	content, ok := sess.spec.Services[sandbox.AgentService].Environment[opencode.CLIEnv]
+	content, ok := sess.spec.Services[sandbox.AgentService].Environment[opencodeCLIEnv]
 	if !ok {
-		t.Fatalf("%s not set", opencode.CLIEnv)
+		t.Fatalf("%s not set", opencodeCLIEnv)
 	}
 	var cfg map[string]any
 	if err := json.Unmarshal([]byte(content), &cfg); err != nil {
@@ -604,10 +615,10 @@ func TestAgentOverrideCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg := cliConfig(t, sess); len(cfg) != 0 || len(sess.overrideFiles) != 0 {
-		t.Errorf("without an override: cli config = %v, files %v", cfg, sess.overrideFiles)
+	if cfg := cliConfig(t, sess); len(cfg) != 0 || len(sess.agent.Overrides()) != 0 {
+		t.Errorf("without an override: cli config = %v, files %v", cfg, sess.agent.Overrides())
 	}
-	if got := overrideSource(sess.overrideFiles); got != "none (bundled config)" {
+	if got := overrideSource(sess.agent.Overrides()); got != "none (bundled config)" {
 		t.Errorf("source = %q", got)
 	}
 	sess.cleanup()
@@ -623,19 +634,19 @@ func TestAgentOverrideCLI(t *testing.T) {
 	if keys["session.delete"] != "ctrl+backspace" || cfg["$schema"] != nil {
 		t.Errorf("cli config = %v, want the override's keybind without $schema", cfg)
 	}
-	if !slices.Equal(sess.overrideFiles, []string{file}) || overrideSource(sess.overrideFiles) != file {
-		t.Errorf("override files = %v", sess.overrideFiles)
+	if !slices.Equal(sess.agent.Overrides(), []string{file}) || overrideSource(sess.agent.Overrides()) != file {
+		t.Errorf("override files = %v", sess.agent.Overrides())
 	}
 
 	// pi doesn't read opencode's override.
-	sa.agent = pi.Agent
+	sa.agent = "pi"
 	piSess, err := prepareTestSession(sa, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer piSess.cleanup()
-	if len(piSess.overrideFiles) != 0 {
-		t.Errorf("pi override files = %v", piSess.overrideFiles)
+	if len(piSess.agent.Overrides()) != 0 {
+		t.Errorf("pi override files = %v", piSess.agent.Overrides())
 	}
 }
 
@@ -646,19 +657,19 @@ func TestAgentOverridePiKeybindings(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	project := fakeHome(t, map[string]string{"README.md": "x"})
-	sa, err := parseOfflineArgs("run", []string{"--agent", pi.Agent, project}, nil)
+	sa, err := parseOfflineArgs("run", []string{"--agent", "pi", project}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := piAgentDir + "/" + pi.Keybindings
+	target := piKeybindingsPath
 	keybindings := func(sess *session) map[string]any {
 		t.Helper()
-		contents, err := sess.agent.render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "", sess.overrides)
+		contents, err := sess.bridge.Render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		var cfg map[string]any
-		if err := json.Unmarshal(contents[slices.Index(sess.agent.configs, target)], &cfg); err != nil {
+		if err := json.Unmarshal(contents[slices.Index(sess.bridge.Configs, target)], &cfg); err != nil {
 			t.Fatal(err)
 		}
 		return cfg
@@ -668,8 +679,8 @@ func TestAgentOverridePiKeybindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg := keybindings(sess); len(cfg) != 0 || len(sess.overrideFiles) != 0 {
-		t.Errorf("without an override: keybindings.json = %v, files %v", cfg, sess.overrideFiles)
+	if cfg := keybindings(sess); len(cfg) != 0 || len(sess.agent.Overrides()) != 0 {
+		t.Errorf("without an override: keybindings.json = %v, files %v", cfg, sess.agent.Overrides())
 	}
 	if !slices.Contains(sess.mounts.ReadOnly, target) {
 		t.Errorf("probes don't check %s is read-only", target)
@@ -685,8 +696,8 @@ func TestAgentOverridePiKeybindings(t *testing.T) {
 	if cfg["app.session.new"] != "ctrl+shift+n" || len(cfg) != 2 {
 		t.Errorf("keybindings.json = %v, want the override without $schema", cfg)
 	}
-	if !slices.Equal(sess.overrideFiles, []string{file}) {
-		t.Errorf("override files = %v", sess.overrideFiles)
+	if !slices.Equal(sess.agent.Overrides(), []string{file}) {
+		t.Errorf("override files = %v", sess.agent.Overrides())
 	}
 	sess.cleanup()
 
@@ -703,7 +714,7 @@ func TestAgentOverridePiSettings(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	project := fakeHome(t, map[string]string{"README.md": "x"})
-	sa, err := parseOfflineArgs("run", []string{"--agent", pi.Agent, project}, nil)
+	sa, err := parseOfflineArgs("run", []string{"--agent", "pi", project}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,20 +724,20 @@ func TestAgentOverridePiSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, err := sess.agent.render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "", sess.overrides)
+	contents, err := sess.bridge.Render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "")
 	sess.cleanup()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var cfg map[string]any
-	if err := json.Unmarshal(contents[slices.Index(sess.agent.configs, piAgentDir+"/settings.json")], &cfg); err != nil {
+	if err := json.Unmarshal(contents[slices.Index(sess.bridge.Configs, piAgentDir+"/settings.json")], &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if cfg["theme"] != "light" || cfg["defaultModel"] != "m" || cfg["defaultProjectTrust"] != "never" {
 		t.Errorf("settings.json = %v", cfg)
 	}
-	if !slices.Equal(sess.overrideFiles, []string{settingsFile, keysFile}) {
-		t.Errorf("override files = %v, want settings then keybindings", sess.overrideFiles)
+	if !slices.Equal(sess.agent.Overrides(), []string{settingsFile, keysFile}) {
+		t.Errorf("override files = %v, want settings then keybindings", sess.agent.Overrides())
 	}
 
 	writeOverride(t, "pi/settings.json", `{"extensions": ["/workspace/evil.ts"]}`)
@@ -754,23 +765,23 @@ func TestAgentOverrideOpencodeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, err := sess.agent.render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, true, "", sess.overrides)
+	contents, err := sess.bridge.Render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, true, "")
 	sess.cleanup()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var cfg map[string]any
-	if err := json.Unmarshal(contents[slices.Index(sess.agent.configs, opencodeConfigPath)], &cfg); err != nil {
+	if err := json.Unmarshal(contents[slices.Index(sess.bridge.Configs, opencodeConfigPath)], &cfg); err != nil {
 		t.Fatal(err)
 	}
 	compaction, _ := cfg["compaction"].(map[string]any)
 	perm, _ := cfg["permission"].(map[string]any)
-	if compaction["auto"] != false || cfg["model"] != opencode.ProviderID+"/m" || cfg["share"] != "disabled" || cfg["autoupdate"] != false ||
+	if compaction["auto"] != false || cfg["model"] != providerID+"/m" || cfg["share"] != "disabled" || cfg["autoupdate"] != false ||
 		perm["edit"] != "allow" || perm["webfetch"] != "deny" {
 		t.Errorf("opencode.json = %v", cfg)
 	}
-	if !slices.Equal(sess.overrideFiles, []string{configFile, cliFile}) {
-		t.Errorf("override files = %v, want opencode.json then cli.json", sess.overrideFiles)
+	if !slices.Equal(sess.agent.Overrides(), []string{configFile, cliFile}) {
+		t.Errorf("override files = %v, want opencode.json then cli.json", sess.agent.Overrides())
 	}
 
 	for key, why := range map[string]string{"keybinds": "cli.json next to this file", "mcp": "runs code"} {
@@ -808,6 +819,9 @@ func TestAgentOverrideRefused(t *testing.T) {
 	sess, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep)
 	if err != nil {
 		t.Fatalf("prep: %v", err)
+	}
+	if sess.agent != nil {
+		t.Errorf("prep has agent %s", sess.agent.Name())
 	}
 	sess.cleanup()
 }
@@ -985,7 +999,7 @@ func TestSessionImage(t *testing.T) {
 				want = projectimage.Tag(project)
 			}
 			for _, mode := range []sandbox.Mode{sandbox.ModeRun, sandbox.ModePrep} {
-				sess, err := prepareTestSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, mode)
+				sess, err := prepareTestSession(sessionArgs{agent: "opencode", gatewayURL: defaultGateway, dir: project}, mode)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1024,7 +1038,7 @@ func TestDockerfileReadOnly(t *testing.T) {
 	project := fakeHome(t, map[string]string{})
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	sess, err := prepareTestSession(sessionArgs{agent: opencode.Agent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
+	sess, err := prepareTestSession(sessionArgs{agent: "opencode", gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1037,7 +1051,7 @@ func TestDockerfileReadOnly(t *testing.T) {
 // Shell changes only the command: the selected agent's config/state, probes,
 // dependency mounts, gateway key and hardening stay identical to run.
 func TestShellMatchesRun(t *testing.T) {
-	for _, name := range []string{opencode.Agent, pi.Agent} {
+	for _, name := range []string{"opencode", "pi"} {
 		t.Run(name, func(t *testing.T) {
 			project := fakeHome(t, map[string]string{
 				"package.json": "{}", ".env": "SECRET=1\n",

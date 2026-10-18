@@ -25,8 +25,6 @@ import (
 	"kota/internal/engine"
 	"kota/internal/enginevm"
 	"kota/internal/models"
-	"kota/internal/opencode"
-	"kota/internal/pi"
 	"kota/internal/sandbox"
 )
 
@@ -267,7 +265,11 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 	// full-auto question, which these sessions never answer.
 	paths, key := lease.paths, lease.paths.Project
 	if sa.noHistory {
-		if paths, key, err = offlinePaths(sa, lease, sa.agent, false, time.Now()); err != nil {
+		ag, err := loadAgent(sa.agent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if paths, key, err = offlinePaths(sa, lease, ag, false, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -403,8 +405,8 @@ cat `+opencodeInstructionsPath)
 		}
 	})
 
-	notes := map[string]string{opencode.Agent: opencodeInstructionsPath, pi.Agent: piAgentDir + "/" + pi.AppendSystem}
-	for _, agent := range []string{opencode.Agent, pi.Agent} {
+	notes := map[string]string{"opencode": opencodeInstructionsPath, "pi": piNotePath}
+	for _, agent := range []string{"opencode", "pi"} {
 		t.Run("run starts the Engine VM for "+agent, func(t *testing.T) {
 			sa, err := parseOfflineArgs("run", []string{"--agent", agent, "--gateway", gateway, project}, nil)
 			if err != nil {

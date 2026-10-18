@@ -1,6 +1,6 @@
-// Package approval decides whether a session runs in full auto, and asks
-// the user to confirm a full-auto session on a project with uncommitted
-// changes, which the agent could overwrite without asking.
+// Package approval asks the user to confirm a full-auto session on a
+// project with uncommitted changes, which the agent could overwrite without
+// asking.
 package approval
 
 import (
@@ -13,16 +13,6 @@ import (
 	"slices"
 	"strings"
 )
-
-// Agents without a permission system of their own. The sandbox is their
-// only boundary, so they always run in full auto.
-var alwaysAuto = map[string]bool{"pi": true}
-
-// FullAuto reports whether agent acts without asking: always for agents
-// without permissions, otherwise only when auto was requested.
-func FullAuto(agent string, auto bool) bool {
-	return auto || alwaysAuto[agent]
-}
 
 // Status is the project's working tree state.
 type Status struct {

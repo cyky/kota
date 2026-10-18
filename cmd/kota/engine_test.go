@@ -12,8 +12,6 @@ import (
 	"kota/internal/changereport"
 	"kota/internal/deps"
 	"kota/internal/engine"
-	"kota/internal/opencode"
-	"kota/internal/pi"
 	"kota/internal/prepgate"
 	"kota/internal/sandbox"
 )
@@ -169,7 +167,7 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 func TestRunEngineSession(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	for _, agent := range []string{opencode.Agent, pi.Agent} {
+	for _, agent := range []string{"opencode", "pi"} {
 		t.Run(agent, func(t *testing.T) {
 			project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
 			fakeEngine(t, project, []string{"postgres:16-alpine"})
@@ -319,8 +317,8 @@ func TestAgentEngineInstructions(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	notes := map[string]string{
-		opencode.Agent: opencodeInstructionsPath,
-		pi.Agent:       piAgentDir + "/" + pi.AppendSystem,
+		"opencode": opencodeInstructionsPath,
+		"pi":       piNotePath,
 	}
 	states := []struct {
 		name string
@@ -332,7 +330,7 @@ func TestAgentEngineInstructions(t *testing.T) {
 		{name: "--no-engine", yaml: engineYAML, args: []string{"--no-engine"}, want: sandbox.EngineUnavailable},
 		{name: "no engine section", yaml: "prep:\n  dirs: [.venv]\n"},
 	}
-	for _, name := range []string{opencode.Agent, pi.Agent} {
+	for _, name := range []string{"opencode", "pi"} {
 		for _, st := range states {
 			t.Run(name+"/"+st.name, func(t *testing.T) {
 				project := fakeHome(t, map[string]string{engine.ConfigFile: st.yaml})
