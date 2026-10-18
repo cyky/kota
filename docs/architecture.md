@@ -1,6 +1,6 @@
 # Architecture
 
-How kota is put together, as diagrams. The README describes each behaviour in detail; terms are as in `CONTEXT.md`, and the Engine VM decision is in `docs/adr/0001-engine-vm-for-agent-containers.md`.
+How kota is put together, as diagrams. The pages linked from the README describe each behaviour in detail; terms are as in `CONTEXT.md`, and the Engine VM decision is in `docs/adr/0001-engine-vm-for-agent-containers.md`.
 
 ## Runtime view
 

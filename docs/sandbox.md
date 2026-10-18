@@ -1,6 +1,6 @@
 # The sandbox and how it protects the host
 
-kota lets a coding agent work unattended on one project. It doesn't trust the agent: it assumes the agent may be confused, misled by a prompt in a file it reads, or simply wrong, and may try anything a shell allows. This page explains what the **Sandbox** stops, how, and what it doesn't stop. Terms are as in `CONTEXT.md`. The README has the full details of each mechanism, and `docs/architecture.md` has diagrams.
+kota lets a coding agent work unattended on one project. It doesn't trust the agent: it assumes the agent may be confused, misled by a prompt in a file it reads, or simply wrong, and may try anything a shell allows. This page explains what the **Sandbox** stops, how, and what it doesn't stop. Terms are as in `CONTEXT.md`. The full details of each mechanism are in [Sessions](sessions.md), [Protecting the host](protections.md), [Sessions without git history](no-history.md), [Dependencies](dependencies.md) and [Engine VM](engine-vm.md), and [Architecture](architecture.md) has diagrams.
 
 ## The threat model in one paragraph
 
