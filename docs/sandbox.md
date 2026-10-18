@@ -1,6 +1,6 @@
 # The sandbox and how it protects the host
 
-kota lets a coding agent work unattended on one project. It doesn't trust the agent: it assumes the agent may be confused, misled by a prompt in a file it reads, or simply wrong, and may try anything a shell allows. This page explains what the **Sandbox** stops, how, and what it doesn't stop. Terms are as in `CONTEXT.md`. The full details of each mechanism are in [Sessions](sessions.md), [Protecting the host](protections.md), [Sessions without git history](no-history.md), [Dependencies](dependencies.md) and [Engine VM](engine-vm.md), and [Architecture](architecture.md) has diagrams.
+kota lets a coding agent work unattended on one project. It doesn't trust the agent: it assumes the agent may be confused, misled by a prompt in a file it reads, or simply wrong, and may try anything a shell allows. This page explains what the **Sandbox** stops, how, and what it doesn't stop. Each protection links to the page with its full details; [Architecture](architecture.md) has diagrams, and terms are as in `CONTEXT.md`.
 
 ## The threat model in one paragraph
 
@@ -12,6 +12,7 @@ The agent runs as a process inside a container, with a shell, and can write any 
 | --- | --- |
 | The project | Read-write at `/workspace`, except secrets, git hooks and config, and kota's own files |
 | Secrets in the project (`.env`, keys, `.npmrc`, `.ssh/`, ...) | Masked: read as empty, can't be written |
+| The project's git history | Readable, unless the session uses `--no-history` |
 | `--ro` paths | Read-only at `/ro/<name>`, not masked |
 | Your home directory, `~/.ssh`, `~/.config`, other projects | Not mounted at all |
 | Host agent config (`~/.config/opencode`, ...) | Not mounted; the agent gets a config versioned in this repo, read-only |
@@ -26,6 +27,8 @@ The agent runs as a process inside a container, with a shell, and can write any 
 The project directory is bind-mounted at `/workspace`; nothing else from the host is, apart from `--ro` reference paths you name and kota's own read-only config. The project must lie inside an allowed root (`~/Projects` by default), and kota refuses `$HOME`, `/` and the root itself, after resolving symlinks. `--ro` paths can't point at or around `$HOME`, the project, credential directories or Docker socket locations.
 
 Agent state (sessions, logs, build caches) lives in a Docker volume per agent per project, so one project's sessions can't see another's.
+
+Details: [Sessions](sessions.md#project-and---ro-paths).
 
 ### 2. The container has no privileges
 
@@ -48,9 +51,15 @@ The agent container is attached only to an internal Docker network:
 
 The agent can't reach the internet, DNS, the LAN, the host's other ports or the Docker VM. It can't send your code anywhere, and it can't download anything. Dependencies are installed beforehand by `kota prep`, which runs without an agent.
 
+Details: [Sessions](sessions.md#network).
+
 ### 4. Secrets are masked
 
 At launch, kota finds secret files and directories in the project (`.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `.npmrc`, `.netrc`, `.git-credentials`, Terraform state, `.aws/`, `.ssh/`, `.gnupg/`, ...) and mounts an empty read-only file or directory over each. Inside the sandbox they read as empty; on the host they stay untouched. Add your own rules in `.kotaignore`.
+
+Masks hide files on disk only, not what git has stored: see the limits below.
+
+Details: [Protecting the host](protections.md#secret-masks).
 
 ### 5. The agent can't plant code that runs on the host
 
@@ -62,25 +71,39 @@ The most indirect way to escape a sandbox is to write a file that the host runs 
 
 Missing ones get a read-only placeholder for the session, so the agent can't create them either. Each directory on the way to a protected path is pinned too, so it can't be renamed away and replaced. Git still works inside the sandbox.
 
-Files that run things but must stay editable (`package.json`, `Makefile`, `.vscode/`, `.github/workflows/`, `build.rs`, `.husky/*`, ...) can't be locked without breaking normal work. kota hashes them before the session and, when it ends, lists every one that was added, changed or deleted, so you can review them before you build or open the project. For a changed `package.json` or `go.mod` it names the dependencies and scripts that changed; for other files it prints the `git` command that shows the diff.
+Files that run things but must stay editable (`package.json`, `Makefile`, `.vscode/`, `.github/workflows/`, `build.rs`, `.husky/*`, ...) can't be locked without breaking normal work. kota hashes them before the session and, when it ends, lists every one that was added, changed or deleted, so you can review them before you build or open the project. For a changed `package.json` or `go.mod` it names the dependencies and scripts that changed; for other files it prints the `git` command that shows the diff. It also lists the commits the session made, and warns about commits that touch masked files or hide a change to one of these files.
 
-Before a full-auto session with uncommitted changes, kota asks you to confirm, so the agent's work doesn't mix with yours. That check runs `git status` in a throwaway, offline container, not on the host, because host git could run a filter the agent configured.
+Details: [Protecting the host](protections.md).
 
-### 6. Dependency installs are separated and confirmed
+### 6. Your uncommitted work is kept apart
+
+Before a full-auto session with uncommitted changes, kota asks you to confirm, so the agent's work doesn't mix with yours. That check runs `git status` in a throwaway, offline container, not on the host, because host git could run a filter the agent configured. git never runs on the host against the project for kota's own checks and reports.
+
+Details: [Sessions](sessions.md#approval).
+
+### 7. Dependency installs are separated and confirmed
 
 `kota prep` is the only step with internet access. It runs no agent, has no gateway key, and keeps the same masks and read-only files. Because the agent can edit the files that decide what `prep` runs (lockfiles, `package.json` scripts, `kota.yaml`), `prep` lists what changed since the last approved run and asks you to type `y`. Shared caches are written only by package managers in a phase where no project code runs, so one project can't plant code in another's dependencies.
 
-### 7. Containers the agent starts run in their own VM
+Details: [Dependencies](dependencies.md).
 
-Tests that start containers (testcontainers) never get the host's Docker, because controlling a Docker engine is root on the machine that runs it. A project that declares images in `kota.yaml` gets an **Engine VM**: a QEMU VM with QEMU's restricted networking, so even as root inside it, the agent has no route out. Its Docker API needs a TLS client certificate made for this session only. It boots from a clean disk every session and has no host directories mounted. See ADR 0001.
+### 8. Containers the agent starts run in their own VM
 
-### 8. Everything is checked before every session
+Tests that start containers (testcontainers) never get the host's Docker, because controlling a Docker engine is root on the machine that runs it. A project that declares images in `kota.yaml` gets an **Engine VM**: a QEMU VM with QEMU's restricted networking, so even as root inside it, the agent has no route out. Its Docker API needs a TLS client certificate made for this session only. It boots from a clean disk every session and has no host directories mounted.
+
+Details: [Engine VM](engine-vm.md); why a VM: [ADR 0001](adr/0001-engine-vm-for-agent-containers.md).
+
+### 9. Everything is checked before every session
 
 Before every `run` and `shell`, probes run in a fresh container of the same setup. They try to reach the internet over IPv4 and IPv6, external DNS, the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN, and check that read-only mounts reject writes and that the gateway and workspace work. The Engine VM has its own probes. Any failure blocks the session. `kota check` shows the mounts, masks and probe results without starting an agent.
 
-### 9. Nothing is left behind
+Details: [Sessions](sessions.md#containment-probes).
+
+### 10. Nothing is left behind
 
 Ctrl-C, SIGTERM or a closed terminal tears down the containers, networks, Engine VM, placeholders and session directory, and still runs the change report. Only one command at a time can use a project.
+
+Details: [Sessions](sessions.md#interrupts).
 
 ## Drawbacks and limits
 
@@ -90,11 +113,12 @@ kota reduces risk; it isn't a guarantee. Know these before you point it at a pro
 
 - **Containers share a kernel.** The sandbox is a container on the Docker VM (Rancher Desktop on macOS), not a VM of its own. A kernel or container runtime exploit would put the agent on that Docker VM, which mounts your home directory and can reach the host's loopback. On Linux, the shared kernel is the host's. Dropped capabilities and `no-new-privileges` make this harder, not impossible. Keep Docker and Rancher Desktop up to date.
 - **No resource limits.** The agent container has no CPU, memory or process limits. A runaway build or fork bomb can slow down or exhaust the Docker VM, though not reach the host's files.
+- **No approval with pi or `--auto`.** pi never asks before it edits a file or runs a command, and opencode doesn't with `--auto`. The sandbox is then the only boundary, and nobody sees a command before it runs.
 
 **What the agent can still read or use**
 
 - **Everything in the project that isn't masked.** Masks are found by name. A secret in an unusual file, or one created during the session, isn't masked. Dependency and build directories aren't searched.
-- **Git history.** Masks don't reach `.git`. A secret that is or ever was committed can be read with `git log -p`. kota warns about tracked masked files but doesn't check history. `--no-history` runs the session on a copy of the last commit, without the older history; a secret tracked in that commit is still readable.
+- **Git history.** Masks don't reach `.git`. A secret that is or ever was committed can be read with `git log -p`. kota warns about tracked masked files but doesn't check history. `--no-history` hides the older commits but keeps the last one, with its files, message and author, so a secret tracked in it is still readable. To keep a path and its history away from the agent entirely, point kota at a directory that doesn't contain it, for example a subdirectory of a monorepo ([details](no-history.md)).
 - **`--ro` paths** are mounted as they are, without masks.
 - **The gateway key**, if you set one, is readable by the agent. Use a key meant only for the gateway.
 - **The model.** The agent can use the gateway freely, including other models it serves.
@@ -105,6 +129,7 @@ kota reduces risk; it isn't a guarantee. Know these before you point it at a pro
 - **Files that run things are reported, not blocked.** `package.json` scripts, `Makefile`, `.vscode/`, CI workflows, husky scripts and similar are already changed on the host when you read the report. Review them before you build, install, or open the project in an editor that runs tasks.
 - **Git config can point at writable scripts.** A protected config value like `core.fsmonitor` or a `filter.*` driver may name a project script, which stays writable. kota warns and reports changes to such scripts, but only when it can see the path in the command.
 - **New git repositories.** The agent can `git init` a nested repository, or create bare-repository files at the project root; their hooks run when you use git there on the host. Set `git config --global safe.bareRepository explicit` to close the bare case.
+- **Kept `--no-history` copies.** A copy kept after a session has git config and hooks the agent could write. Running git in it on the host runs them; look at them first, or remove the copy with `kota clean`.
 
 **Other gaps**
 
@@ -117,6 +142,6 @@ kota reduces risk; it isn't a guarantee. Know these before you point it at a pro
 ## In practice
 
 - Commit before a session; review `git diff` and the change report after it.
-- Keep secrets out of git history, and out of projects you run kota on, where you can.
+- Keep secrets out of git history, and out of projects you run kota on, where you can. Where you can't, use `--no-history`, or point kota at a directory without them.
 - Read the `prep` confirmation before typing `y`.
 - Run `kota check` when you change the setup, and don't use `--unsafe-skip-check` as a habit.
