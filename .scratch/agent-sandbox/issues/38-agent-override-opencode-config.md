@@ -1,7 +1,9 @@
-# 38 — Agent override for opencode's opencode.json
+# DONE — 38 — Agent override for opencode's opencode.json
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
+
+Resolved in: a9d5623
 
 ## Parent
 
@@ -22,13 +24,13 @@ Docs: add `opencode/opencode.json` to the usage text and docs, saying that keybi
 
 ## Acceptance criteria
 
-- [ ] `compaction` in the override takes effect in an opencode **Session**
-- [ ] The bundled base's `share: disabled`, `autoupdate: false` and permissions survive any override, and `--auto` still works
-- [ ] `keybinds` or `theme` in the override refuses the **Session** with an error pointing to `tui.json`
-- [ ] Another refused key (for example `mcp`) refuses the **Session** with an error naming the file and key, and why
-- [ ] The startup line lists the file
-- [ ] Usage text and docs describe it
-- [ ] Tests use a fake HOME / XDG_CONFIG_HOME
+- [x] `compaction` in the override takes effect in an opencode **Session** (checked with `opencode debug config` in the Sandbox; compaction not observed in a long conversation)
+- [x] The bundled base's `share: disabled`, `autoupdate: false` and permissions survive any override, and `--auto` still works
+- [x] `keybinds` or `theme` in the override refuses the **Session** with an error pointing to `cli.json` (see the issue 35 comment)
+- [x] Another refused key (for example `mcp`) refuses the **Session** with an error naming the file and key, and why
+- [x] The startup line lists the file
+- [x] Usage text and docs describe it
+- [x] Tests use a fake HOME / XDG_CONFIG_HOME
 
 ## Blocked by
 
@@ -43,3 +45,16 @@ Docs: add `opencode/opencode.json` to the usage text and docs, saying that keybi
 ### 2026-10-18 (from issue 35)
 
 opencode 2.0.25 keeps terminal preferences in `cli.json`, not `tui.json` (issue 35 comments). Read `tui.json` above as `cli.json`: the refusal for `keybinds` and `theme` should point to `~/.config/kota/opencode/cli.json`. The v2 `opencode.json` field names also differ from the v1 ones listed here (the embedded docs name `permissions`, `agents`, `commands`, `plugins`, `providers`, `mcp`, `skills`, `instructions`, `references`, `formatter`, `lsp`), and the bundled base still uses v1's `permission`. Check the allowlist and refusals against `opencode.ai/v2/docs/config` before building.
+
+### 2026-10-18 (implementation)
+
+Checked against opencode 2.0.25 itself (the strings in the binary in `kota-base`) as well as `opencode.ai/v2/docs/config`. Every config file goes through a normalizer that maps v1 names to v2 ones (`autoupdate` to `update`, `permission` and `tools` to `permissions` rules, `enabled_providers` to `provider.use` policies, `agent`/`mode` to `agents`, and so on) and drops keys it doesn't know. So the refusals cover both names: `plugin`/`plugins`, `command`/`commands`, `agent`/`agents`/`mode`, `reference`/`references`, `provider`/`providers`, `permission`/`permissions`, `share`/`autoshare`/`enterprise`, `autoupdate`/`update`, plus the v2-only `skills`, `worktree`, `policies` and `websearch`. v2's `compaction` is `auto`, `keep.tokens` and `buffer`; v1's `preserve_recent_tokens` and `reserved` are mapped to it, so either form works.
+
+`keybinds` and `theme` point to "cli.json next to this file" rather than a fixed path, since the error already names the override's full path, which follows `XDG_CONFIG_HOME`.
+
+Not allowed, though harmless, to keep to "only compaction": `snapshots`, `tool_output`, `media`, `username`, `default_agent`.
+
+Verified:
+- Unit tests: the override merged into the base with kota's model and `--auto` permissions winning and `share`, `autoupdate` and `webfetch: deny` kept; the policy refusing every key above with a reason; the startup line listing opencode.json then cli.json; `keybinds` and `mcp` refusing the session with the file, key and reason.
+- `TestOpencodeConfigInShell` (integration, real Sandbox): `opencode debug config` shows the rendered config with `compaction.auto: false`, `keep.tokens: 4000`, `update: disable`, `share: disabled` and edits set to ask.
+- The other `InShell` integration tests pass. One earlier run of them failed after 142s without the failure captured; two reruns passed.
