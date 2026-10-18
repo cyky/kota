@@ -48,6 +48,10 @@ _Avoid_: shallow clone, workspace copy, mirror
 The branch `kota/<agent>-<YYYY-MM-DDTHHMMSS>` that brings the **No-history copy**'s `HEAD` back into the original project after the **Session**. It is never checked out.
 _Avoid_: agent branch, result branch
 
+**Agent**:
+A coding agent kota runs in a **Session** (opencode or pi), with kota's bundled config for it, its **Agent overrides**, and kota's instructions.
+_Avoid_: harness, tool, assistant
+
 **Agent override**:
 A user's own settings for an agent (keybindings, theme and similar), kept on the host in the kota config dir in the agent's own file format, and layered over kota's bundled agent config in every **Session**. Only settings kota allows can be overridden; without an override file, the bundled config is used as is.
 _Avoid_: user config, custom config, project config
