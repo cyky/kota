@@ -12,7 +12,6 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -304,16 +303,13 @@ type session struct {
 	// project of a No-history copy.
 	key    string
 	layout mask.Layout
-	// agent is the session's agent with its Agent overrides, nil for prep,
-	// and bridge how it is wired in.
-	agent  *agent.Agent
-	bridge agent.Bridge
+	// agent is the session's agent with its Agent overrides, and prepared
+	// its files in the session dir; both nil for prep.
+	agent    *agent.Agent
+	prepared *agent.Prepared
 	// gatewayKey is the gateway API key, empty when none is configured. It
 	// only reaches the sandbox through docker compose's environment.
 	gatewayKey string
-	// cfgFiles are the host files behind bridge.Configs, written by
-	// configure once the gateway's models are known.
-	cfgFiles []string
 	// mounts are what the probes verify.
 	mounts check.Mounts
 	// deps is how prep installs the project's dependencies.
@@ -379,29 +375,6 @@ func (s *session) engineNote() string {
 		return sandbox.EngineNote(false, nil)
 	}
 	return ""
-}
-
-// writeExtensions copies the agent's bundled extensions into dir, a new
-// directory.
-func writeExtensions(dir, agent string) error {
-	src := "agents/" + agent + "/extensions"
-	entries, err := assets.Agents.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		return err
-	}
-	for _, e := range entries {
-		data, err := assets.Agents.ReadFile(src + "/" + e.Name())
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(dir, e.Name()), data, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // engineOptions are what this kota's Engine VMs share.
@@ -565,14 +538,14 @@ func sessionDeps(project, key string) (deps.Plan, error) {
 // prepareSession builds the compose spec from the paths covered by the lease
 // and depPlan from detectDeps, which the user may have confirmed. It writes
 // to the host (the session dir, seeded protections), so confirmations come
-// first. The agent config is written later by configure. The caller removes
-// sessionDir when done. Prep has no agent, gateway or key and runs the
-// dependency install. key is the project the session belongs to: paths.Project,
-// or the original project of a No-history copy.
+// first. The agent writes its files in sessionDir/agent; its config is
+// filled in later by configure. The caller removes sessionDir when done.
+// Prep has no agent, gateway or key and runs the dependency install. key is
+// the project the session belongs to: paths.Project, or the original
+// project of a No-history copy.
 func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, key string, depPlan deps.Plan) (*session, error) {
 	prep := mode == sandbox.ModePrep
 	var ag *agent.Agent
-	var bridge agent.Bridge
 	var style instructions.Style
 	var err error
 	if !prep {
@@ -580,9 +553,6 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 			return nil, err
 		}
 		if style, err = loadStyle(); err != nil {
-			return nil, err
-		}
-		if bridge, err = ag.Bridge(); err != nil {
 			return nil, err
 		}
 	}
@@ -623,25 +593,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	if err != nil {
 		return nil, err
 	}
-	// Created empty so each mount source is a file; configure fills them.
-	var cfgMounts []sandbox.Mount
-	var cfgFiles []string
-	err = os.Mkdir(filepath.Join(sessionDir, "agent"), 0o755)
-	for _, target := range bridge.Configs {
-		if err != nil {
-			break
-		}
-		file := filepath.Join(sessionDir, "agent", path.Base(target))
-		err = os.WriteFile(file, nil, 0o644)
-		cfgFiles = append(cfgFiles, file)
-		cfgMounts = append(cfgMounts, sandbox.Mount{Source: file, Target: target})
-	}
-	if err != nil {
-		os.RemoveAll(sessionDir)
-		return nil, err
-	}
-
-	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, bridge: bridge, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image, style: style}
+	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, gatewayKey: apiKey, deps: depPlan, image: image, style: style}
 	var engineRoute *sandbox.EngineRoute
 	if !prep {
 		opts, err := engineOptions()
@@ -661,28 +613,21 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 			engineRoute = sess.engine.Route()
 		}
 	}
-	// Every agent gets the note; prep runs none.
-	readOnlyTargets := bridge.Configs
-	scratch := bridge.Scratch
+	// Prep runs no agent.
+	var cfgMounts []sandbox.Mount
+	var scratch []string
+	var command []string
+	env := map[string]string{}
 	if !prep {
-		note := instructions.Note(style, bridge.Facts, sess.engineNote())
-		file := filepath.Join(sessionDir, "agent", path.Base(bridge.NotePath))
-		if err := os.WriteFile(file, []byte(note), 0o644); err != nil {
+		p, err := ag.Prepare(filepath.Join(sessionDir, "agent"), agent.Note{Style: style, Engine: sess.engineNote()})
+		if err != nil {
 			os.RemoveAll(sessionDir)
 			return nil, err
 		}
-		cfgMounts = append(cfgMounts, sandbox.Mount{Source: file, Target: bridge.NotePath})
-		readOnlyTargets = append(slices.Clip(readOnlyTargets), bridge.NotePath)
-		scratch = append(slices.Clip(scratch), bridge.NoteScratch...)
-	}
-	if bridge.Extensions != "" {
-		dir := filepath.Join(sessionDir, "agent", "extensions")
-		if err := writeExtensions(dir, ag.Name()); err != nil {
-			os.RemoveAll(sessionDir)
-			return nil, err
-		}
-		cfgMounts = append(cfgMounts, sandbox.Mount{Source: dir, Target: bridge.Extensions})
-		readOnlyTargets = append(slices.Clip(readOnlyTargets), bridge.Extensions)
+		sess.prepared = p
+		cfgMounts = slices.Clone(p.ReadOnly)
+		scratch, command = p.Scratch, p.Command
+		maps.Copy(env, p.Env)
 	}
 	var depMounts []sandbox.Mount
 	for _, d := range depPlan.Dirs {
@@ -703,7 +648,11 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	}
 	cfgMounts = append(cfgMounts, sandbox.Mount{Source: excludes, Target: sandbox.GitExcludes})
 	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
-	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, readOnlyTargets...)
+	if sess.prepared != nil {
+		for _, m := range sess.prepared.ReadOnly {
+			sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
+		}
+	}
 	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, sandbox.GitExcludes)
 	if !prep {
 		sess.mounts.State = sandbox.StateDir
@@ -715,12 +664,9 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, sandbox.EngineCertDir)
 	}
 
-	env := map[string]string{}
-	maps.Copy(env, bridge.Env)
 	maps.Copy(env, gitEnv(key))
-	command := sa.command
-	if len(command) == 0 {
-		command = bridge.Command
+	if len(sa.command) > 0 {
+		command = sa.command
 	}
 	if sa.shell {
 		command = []string{"bash", "--noprofile", "--norc", "-i"}
@@ -1974,14 +1920,8 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 	if s.gatewayKey != "" {
 		keyEnv = sandbox.GatewayKeyEnv
 	}
-	contents, err := s.bridge.Render(catalog, auto, keyEnv)
-	if err != nil {
+	if err := s.prepared.Configure(catalog, auto, keyEnv); err != nil {
 		return models.Catalog{}, err
-	}
-	for i, file := range s.cfgFiles {
-		if err := os.WriteFile(file, contents[i], 0o644); err != nil {
-			return models.Catalog{}, err
-		}
 	}
 	return catalog, nil
 }

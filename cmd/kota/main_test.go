@@ -14,11 +14,11 @@ import (
 	"testing"
 
 	"kota/assets"
+	"kota/internal/agent"
 	"kota/internal/changereport"
 	"kota/internal/deps"
 	"kota/internal/docker"
 	"kota/internal/instructions"
-	"kota/internal/models"
 	"kota/internal/prepgate"
 	"kota/internal/probe"
 	"kota/internal/projectimage"
@@ -133,6 +133,47 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 				t.Errorf("command = %q, want %q", agent.Command, c.command)
 			}
 		})
+	}
+}
+
+// TestAgentMountsProbedReadOnly checks every read-only mount the agent asks
+// for is in the spec, read-only from the session dir, and probed read-only,
+// for run and shell.
+func TestAgentMountsProbedReadOnly(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	for _, name := range agent.Names() {
+		for _, shell := range []bool{false, true} {
+			sess, err := prepareTestSession(sessionArgs{agent: name, gatewayURL: defaultGateway, dir: project, shell: shell}, sandbox.ModeRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sess.prepared.ReadOnly) == 0 {
+				t.Errorf("%s: no read-only mounts", name)
+			}
+			volumes := sess.spec.Services[sandbox.AgentService].Volumes
+			for _, m := range sess.prepared.ReadOnly {
+				i := slices.IndexFunc(volumes, func(v sandbox.Volume) bool { return v.Target == m.Target })
+				if i < 0 || volumes[i].Source != m.Source || !volumes[i].ReadOnly || !strings.HasPrefix(m.Source, sess.sessionDir+"/") {
+					t.Errorf("%s (shell %v): %+v not mounted read-only from the session dir", name, shell, m)
+				}
+				if !slices.Contains(sess.mounts.ReadOnly, m.Target) {
+					t.Errorf("%s (shell %v): probes don't check %s is read-only", name, shell, m.Target)
+				}
+			}
+			sess.cleanup()
+		}
+	}
+}
+
+// TestOverrideSource checks the "agent override:" line.
+func TestOverrideSource(t *testing.T) {
+	if got := overrideSource(nil); got != "none (bundled config)" {
+		t.Errorf("none: %q", got)
+	}
+	if got := overrideSource([]string{"/a.json", "/b.json"}); got != "/a.json, /b.json" {
+		t.Errorf("two: %q", got)
 	}
 }
 
@@ -415,11 +456,15 @@ func TestPrepGateOutput(t *testing.T) {
 	}
 }
 
+// notePaths are where each agent reads kota's note.
+var notePaths = map[string]string{"opencode": opencodeInstructionsPath, "pi": piNotePath}
+
 // noteOf returns the content of the agent's note in sess.
 func noteOf(t *testing.T, sess *session) string {
 	t.Helper()
+	notePath := notePaths[sess.agent.Name()]
 	for _, v := range sess.spec.Services[sandbox.AgentService].Volumes {
-		if v.Target == sess.bridge.NotePath {
+		if v.Target == notePath {
 			if !v.ReadOnly {
 				t.Errorf("note mounted writable: %+v", v)
 			}
@@ -430,7 +475,7 @@ func noteOf(t *testing.T, sess *session) string {
 			return string(data)
 		}
 	}
-	t.Fatalf("no note mounted at %s", sess.bridge.NotePath)
+	t.Fatalf("no note mounted at %s", notePath)
 	return ""
 }
 
@@ -584,213 +629,6 @@ func writeOverride(t *testing.T, name, content string) string {
 		t.Fatal(err)
 	}
 	return file
-}
-
-// cliConfig returns the CLI config sess passes opencode inline.
-func cliConfig(t *testing.T, sess *session) map[string]any {
-	t.Helper()
-	content, ok := sess.spec.Services[sandbox.AgentService].Environment[opencodeCLIEnv]
-	if !ok {
-		t.Fatalf("%s not set", opencodeCLIEnv)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal([]byte(content), &cfg); err != nil {
-		t.Fatal(err)
-	}
-	return cfg
-}
-
-// TestAgentOverrideCLI checks opencode gets the bundled cli.json without an
-// override, and the override's keybinds merged in with one.
-func TestAgentOverrideCLI(t *testing.T) {
-	t.Setenv("KOTA_GATEWAY_KEY", "")
-	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	project := fakeHome(t, map[string]string{"README.md": "x"})
-	sa, err := parseOfflineArgs("run", []string{project}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sess, err := prepareTestSession(sa, sandbox.ModeRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg := cliConfig(t, sess); len(cfg) != 0 || len(sess.agent.Overrides()) != 0 {
-		t.Errorf("without an override: cli config = %v, files %v", cfg, sess.agent.Overrides())
-	}
-	if got := overrideSource(sess.agent.Overrides()); got != "none (bundled config)" {
-		t.Errorf("source = %q", got)
-	}
-	sess.cleanup()
-
-	file := writeOverride(t, "opencode/cli.json", `{"$schema": "https://opencode.ai/v2/cli.json", "keybinds": {"session.delete": "ctrl+backspace"}}`)
-	sess, err = prepareTestSession(sa, sandbox.ModeRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.cleanup()
-	cfg := cliConfig(t, sess)
-	keys, _ := cfg["keybinds"].(map[string]any)
-	if keys["session.delete"] != "ctrl+backspace" || cfg["$schema"] != nil {
-		t.Errorf("cli config = %v, want the override's keybind without $schema", cfg)
-	}
-	if !slices.Equal(sess.agent.Overrides(), []string{file}) || overrideSource(sess.agent.Overrides()) != file {
-		t.Errorf("override files = %v", sess.agent.Overrides())
-	}
-
-	// pi doesn't read opencode's override.
-	sa.agent = "pi"
-	piSess, err := prepareTestSession(sa, sandbox.ModeRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer piSess.cleanup()
-	if len(piSess.agent.Overrides()) != 0 {
-		t.Errorf("pi override files = %v", piSess.agent.Overrides())
-	}
-}
-
-// TestAgentOverridePiKeybindings checks pi gets an empty keybindings.json,
-// read-only and probed, without an override, and the override's bindings
-// with one; a binding pi can't use refuses the session.
-func TestAgentOverridePiKeybindings(t *testing.T) {
-	t.Setenv("KOTA_GATEWAY_KEY", "")
-	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	project := fakeHome(t, map[string]string{"README.md": "x"})
-	sa, err := parseOfflineArgs("run", []string{"--agent", "pi", project}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := piKeybindingsPath
-	keybindings := func(sess *session) map[string]any {
-		t.Helper()
-		contents, err := sess.bridge.Render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var cfg map[string]any
-		if err := json.Unmarshal(contents[slices.Index(sess.bridge.Configs, target)], &cfg); err != nil {
-			t.Fatal(err)
-		}
-		return cfg
-	}
-
-	sess, err := prepareTestSession(sa, sandbox.ModeRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg := keybindings(sess); len(cfg) != 0 || len(sess.agent.Overrides()) != 0 {
-		t.Errorf("without an override: keybindings.json = %v, files %v", cfg, sess.agent.Overrides())
-	}
-	if !slices.Contains(sess.mounts.ReadOnly, target) {
-		t.Errorf("probes don't check %s is read-only", target)
-	}
-	sess.cleanup()
-
-	file := writeOverride(t, "pi/keybindings.json", `{"$schema": "https://pi.dev/schemas/keybindings.schema.json", "app.session.new": "ctrl+shift+n", "tui.altScreen.pageUp": []}`)
-	sess, err = prepareTestSession(sa, sandbox.ModeRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := keybindings(sess)
-	if cfg["app.session.new"] != "ctrl+shift+n" || len(cfg) != 2 {
-		t.Errorf("keybindings.json = %v, want the override without $schema", cfg)
-	}
-	if !slices.Equal(sess.agent.Overrides(), []string{file}) {
-		t.Errorf("override files = %v", sess.agent.Overrides())
-	}
-	sess.cleanup()
-
-	writeOverride(t, "pi/keybindings.json", `{"app.session.new": 3}`)
-	if _, err := prepareTestSession(sa, sandbox.ModeRun); err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), `"app.session.new"`) {
-		t.Errorf("bad binding: err = %v, want it to name %s and the action", err, file)
-	}
-}
-
-// TestAgentOverridePiSettings checks pi's settings.json gets an allowed
-// setting from the override, keeps kota's model and the base's project
-// trust, and that a refused key stops the session with why.
-func TestAgentOverridePiSettings(t *testing.T) {
-	t.Setenv("KOTA_GATEWAY_KEY", "")
-	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	project := fakeHome(t, map[string]string{"README.md": "x"})
-	sa, err := parseOfflineArgs("run", []string{"--agent", "pi", project}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	settingsFile := writeOverride(t, "pi/settings.json", `{"$schema": "https://pi.dev/schemas/settings.schema.json", "theme": "light", "terminal": {"showImages": false}}`)
-	keysFile := writeOverride(t, "pi/keybindings.json", `{}`)
-	sess, err := prepareTestSession(sa, sandbox.ModeRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contents, err := sess.bridge.Render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "")
-	sess.cleanup()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(contents[slices.Index(sess.bridge.Configs, piAgentDir+"/settings.json")], &cfg); err != nil {
-		t.Fatal(err)
-	}
-	if cfg["theme"] != "light" || cfg["defaultModel"] != "m" || cfg["defaultProjectTrust"] != "never" {
-		t.Errorf("settings.json = %v", cfg)
-	}
-	if !slices.Equal(sess.agent.Overrides(), []string{settingsFile, keysFile}) {
-		t.Errorf("override files = %v, want settings then keybindings", sess.agent.Overrides())
-	}
-
-	writeOverride(t, "pi/settings.json", `{"extensions": ["/workspace/evil.ts"]}`)
-	_, err = prepareTestSession(sa, sandbox.ModeRun)
-	if err == nil || !strings.Contains(err.Error(), settingsFile) || !strings.Contains(err.Error(), `"extensions"`) || !strings.Contains(err.Error(), "loads code") {
-		t.Errorf("err = %v, want it to name %s, the key and why", err, settingsFile)
-	}
-}
-
-// TestAgentOverrideOpencodeConfig checks opencode.json gets compaction from
-// the override and keeps kota's model, the base's sharing and update
-// settings and --auto's permissions, and that keybinds and mcp stop the
-// session with why.
-func TestAgentOverrideOpencodeConfig(t *testing.T) {
-	t.Setenv("KOTA_GATEWAY_KEY", "")
-	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	project := fakeHome(t, map[string]string{"README.md": "x"})
-	sa, err := parseOfflineArgs("run", []string{project}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configFile := writeOverride(t, "opencode/opencode.json", `{"$schema": "https://opencode.ai/config.json", "compaction": {"auto": false}}`)
-	cliFile := writeOverride(t, "opencode/cli.json", `{}`)
-	sess, err := prepareTestSession(sa, sandbox.ModeRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contents, err := sess.bridge.Render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, true, "")
-	sess.cleanup()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(contents[slices.Index(sess.bridge.Configs, opencodeConfigPath)], &cfg); err != nil {
-		t.Fatal(err)
-	}
-	compaction, _ := cfg["compaction"].(map[string]any)
-	perm, _ := cfg["permission"].(map[string]any)
-	if compaction["auto"] != false || cfg["model"] != providerID+"/m" || cfg["share"] != "disabled" || cfg["autoupdate"] != false ||
-		perm["edit"] != "allow" || perm["webfetch"] != "deny" {
-		t.Errorf("opencode.json = %v", cfg)
-	}
-	if !slices.Equal(sess.agent.Overrides(), []string{configFile, cliFile}) {
-		t.Errorf("override files = %v, want opencode.json then cli.json", sess.agent.Overrides())
-	}
-
-	for key, why := range map[string]string{"keybinds": "cli.json next to this file", "mcp": "runs code"} {
-		writeOverride(t, "opencode/opencode.json", `{"`+key+`": {}}`)
-		_, err = prepareTestSession(sa, sandbox.ModeRun)
-		if err == nil || !strings.Contains(err.Error(), configFile) || !strings.Contains(err.Error(), `"`+key+`"`) || !strings.Contains(err.Error(), why) {
-			t.Errorf("%s: err = %v, want it to name %s, the key and %q", key, err, configFile, why)
-		}
-	}
 }
 
 // TestAgentOverrideRefused checks an override with a key that isn't

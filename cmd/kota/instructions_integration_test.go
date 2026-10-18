@@ -51,7 +51,7 @@ func TestInstructionsInShell(t *testing.T) {
 			sa := sessionArgs{agent: agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
 			var out string
 			withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
-				note := sess.bridge.NotePath
+				note := notePaths[agent]
 				out, err = ds.Capture("bash", "-c", `exec 2>&1
 note=$1
 cat "$note"

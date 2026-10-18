@@ -6,24 +6,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"kota/assets"
-	"kota/internal/models"
 )
-
-func opencodeBase(t *testing.T) []byte {
-	t.Helper()
-	data, err := assets.Agents.ReadFile(opencodeBaseConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
-}
 
 // opencodeRendered is the part of opencode.json the tests inspect.
 type opencodeRendered struct {
 	Model            string            `json:"model"`
-	SmallModel       string            `json:"small_model"`
+	SmallModel       *string           `json:"small_model"`
 	Autoupdate       bool              `json:"autoupdate"`
 	Share            string            `json:"share"`
 	Permission       map[string]string `json:"permission"`
@@ -44,33 +32,33 @@ type opencodeRendered struct {
 	} `json:"provider"`
 }
 
-func renderOpencodeConfig(t *testing.T, b []byte, c models.Catalog) opencodeRendered {
+// opencodeConfig is opencode.json after Configure.
+func opencodeConfig(t *testing.T, overrides map[string]string, auto bool, keyEnv string) opencodeRendered {
 	t.Helper()
-	data, err := renderOpencode(b, opencodeSettings{GatewayURL: "http://gateway:8080", Models: c})
-	if err != nil {
-		t.Fatal(err)
-	}
 	var cfg opencodeRendered
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	mountedJSON(t, configure(t, "opencode", overrides, auto, keyEnv), opencodeConfigPath, &cfg)
+	return cfg
+}
+
+// opencodeCLI is the CLI config opencode gets inline.
+func opencodeCLI(t *testing.T, overrides map[string]string) map[string]any {
+	t.Helper()
+	p := prepare(t, load(t, "opencode", overrides), Note{})
+	content, ok := p.Env[opencodeCLIEnv]
+	if !ok {
+		t.Fatalf("%s not set in %v", opencodeCLIEnv, p.Env)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(content), &cfg); err != nil {
 		t.Fatal(err)
 	}
 	return cfg
 }
 
-var opencodeCatalog = models.Catalog{
-	Models: []models.Model{
-		{ID: "big", Context: 129024, Output: 16384, Tools: true},
-		{ID: "small", Context: 16384, Output: 4096, Tools: false},
-	},
-	Default: "big",
-	Small:   "small",
-}
-
-func TestRenderOpencode(t *testing.T) {
-	cfg := renderOpencodeConfig(t, opencodeBase(t), opencodeCatalog)
-
-	if cfg.Model != "kota/big" || cfg.SmallModel != "kota/small" {
-		t.Errorf("model = %q, small_model = %q", cfg.Model, cfg.SmallModel)
+func TestOpencodeConfig(t *testing.T) {
+	cfg := opencodeConfig(t, nil, false, "")
+	if cfg.Model != "kota/big" || cfg.SmallModel == nil || *cfg.SmallModel != "kota/small" {
+		t.Errorf("model = %q, small_model = %v", cfg.Model, cfg.SmallModel)
 	}
 	if cfg.Autoupdate || cfg.Share != "disabled" {
 		t.Errorf("autoupdate = %v, share = %q", cfg.Autoupdate, cfg.Share)
@@ -82,215 +70,135 @@ func TestRenderOpencode(t *testing.T) {
 	if !ok || len(cfg.Provider) != 1 {
 		t.Fatalf("provider = %v", cfg.Provider)
 	}
-	if p.Options.BaseURL != "http://gateway:8080/v1" {
-		t.Errorf("baseURL = %q", p.Options.BaseURL)
+	if p.Options.BaseURL != gatewayURL {
+		t.Errorf("baseURL = %q, want %q", p.Options.BaseURL, gatewayURL)
 	}
-	if ids := slices.Sorted(maps.Keys(p.Models)); !slices.Equal(ids, []string{"big", "small"}) {
+	if ids := slices.Sorted(maps.Keys(p.Models)); !slices.Equal(ids, []string{"big", "notools", "small"}) {
 		t.Fatalf("models = %v", ids)
 	}
-	big, small := p.Models["big"], p.Models["small"]
+	big, notools := p.Models["big"], p.Models["notools"]
 	if big.Name != "big" || !big.ToolCall || big.Limit.Context != 129024 || big.Limit.Output != 16384 {
 		t.Errorf("big = %+v", big)
 	}
-	if small.ToolCall || small.Limit.Context != 16384 || small.Limit.Output != 4096 {
-		t.Errorf("small = %+v", small)
+	if notools.ToolCall || notools.Limit.Context != 8192 || notools.Limit.Output != 2048 {
+		t.Errorf("notools = %+v", notools)
 	}
 }
 
-func TestRenderOpencodeWithoutSmallModel(t *testing.T) {
-	c := opencodeCatalog
+func TestOpencodeConfigWithoutSmallModel(t *testing.T) {
+	p := prepare(t, load(t, "opencode", nil), Note{})
+	c := catalog
 	c.Small = ""
-	cfg := renderOpencodeConfig(t, []byte(`{"small_model":"openai/gpt-mini"}`), c)
-	if cfg.SmallModel != "" {
-		t.Errorf("small_model = %q, want unset", cfg.SmallModel)
+	if err := p.Configure(c, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	var cfg opencodeRendered
+	mountedJSON(t, p, opencodeConfigPath, &cfg)
+	if cfg.SmallModel != nil {
+		t.Errorf("small_model = %q, want unset", *cfg.SmallModel)
 	}
 }
 
-func TestOpencodeBaseConfigAsksBeforeEditsAndCommands(t *testing.T) {
-	cfg := renderOpencodeConfig(t, opencodeBase(t), opencodeCatalog)
-	for _, k := range []string{"edit", "bash"} {
-		if cfg.Permission[k] != "ask" {
-			t.Errorf("permission %s = %q, want ask", k, cfg.Permission[k])
+func TestOpencodePermissions(t *testing.T) {
+	cases := map[bool]map[string]string{
+		false: {"edit": "ask", "bash": "ask", "webfetch": "deny"},
+		true:  {"edit": "allow", "bash": "allow", "webfetch": "deny"},
+	}
+	for auto, want := range cases {
+		if got := opencodeConfig(t, nil, auto, "").Permission; !maps.Equal(got, want) {
+			t.Errorf("auto %v: permission = %v, want %v", auto, got, want)
 		}
 	}
 }
 
-func TestRenderOpencodeOverridesProvidersInBase(t *testing.T) {
-	b := []byte(`{"share":"disabled","enabled_providers":["openai"],"model":"openai/gpt","provider":{"openai":{}}}`)
-	cfg := renderOpencodeConfig(t, b, opencodeCatalog)
-	if cfg.Share != "disabled" {
-		t.Errorf("share = %q, want the base value", cfg.Share)
+func TestOpencodeGatewayKey(t *testing.T) {
+	if k := opencodeConfig(t, nil, false, "").Provider[providerID].Options.APIKey; k != nil {
+		t.Errorf("apiKey = %q without a gateway key, want unset", *k)
 	}
-	if cfg.Model != "kota/big" || !slices.Equal(cfg.EnabledProviders, []string{providerID}) {
-		t.Errorf("model = %q, enabled_providers = %v", cfg.Model, cfg.EnabledProviders)
-	}
-	if _, ok := cfg.Provider["openai"]; ok || len(cfg.Provider) != 1 {
-		t.Errorf("provider = %v, want only %s", cfg.Provider, providerID)
+	// opencode substitutes {env:NAME}; the key itself is never written.
+	if k := opencodeConfig(t, nil, false, "KOTA_GATEWAY_KEY").Provider[providerID].Options.APIKey; k == nil || *k != "{env:KOTA_GATEWAY_KEY}" {
+		t.Errorf("apiKey = %v, want {env:KOTA_GATEWAY_KEY}", k)
 	}
 }
 
-func TestRenderOpencodeRejectsBadBase(t *testing.T) {
-	if _, err := renderOpencode([]byte("{"), opencodeSettings{Models: opencodeCatalog}); err == nil {
-		t.Error("no error for invalid base config")
-	}
-}
-
-func TestOpencodeEnvIgnoresProjectConfig(t *testing.T) {
-	env := opencodeEnv("/etc/kota/opencode.json")
-	if env["OPENCODE_CONFIG"] != "/etc/kota/opencode.json" || env["OPENCODE_DISABLE_PROJECT_CONFIG"] != "1" {
+// TestOpencodeEnv checks opencode reads the mounted config and ignores the
+// project's.
+func TestOpencodeEnv(t *testing.T) {
+	env := prepare(t, load(t, "opencode", nil), Note{}).Env
+	if env["OPENCODE_CONFIG"] != opencodeConfigPath || env["OPENCODE_DISABLE_PROJECT_CONFIG"] != "1" || env["OPENCODE_DISABLE_AUTOUPDATE"] != "1" {
 		t.Errorf("env = %v", env)
 	}
 }
 
-func TestRenderOpencodeCLI(t *testing.T) {
-	b := []byte(`{"keybinds": {"leader": "ctrl+x", "session.delete": "ctrl+d"}, "theme": {"name": "system"}}`)
-	over := map[string]any{"keybinds": map[string]any{"session.delete": "ctrl+backspace"}}
-	content, err := renderOpencodeCLI(b, over)
-	if err != nil {
-		t.Fatal(err)
-	}
+// TestOpencodeConfigOverride checks opencode.json gets compaction from the
+// override and keeps kota's model, the base's sharing and update settings
+// and --auto's permissions.
+func TestOpencodeConfigOverride(t *testing.T) {
+	data := configure(t, "opencode", map[string]string{
+		"opencode/opencode.json": `{"$schema": "https://opencode.ai/config.json", "compaction": {"auto": false, "keep": {"tokens": 4000}}}`,
+	}, true, "")
 	var cfg map[string]any
-	if err := json.Unmarshal([]byte(content), &cfg); err != nil {
-		t.Fatal(err)
-	}
-	keys := cfg["keybinds"].(map[string]any)
-	if keys["session.delete"] != "ctrl+backspace" || keys["leader"] != "ctrl+x" || cfg["theme"].(map[string]any)["name"] != "system" {
-		t.Errorf("cli config = %v", cfg)
-	}
-
-	bundled, err := assets.Agents.ReadFile(opencodeBaseCLI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := renderOpencodeCLI(bundled, nil); err != nil {
-		t.Errorf("bundled cli.json without an override: %v", err)
-	}
-	if _, err := renderOpencodeCLI([]byte("{"), nil); err == nil {
-		t.Error("no error for invalid base")
-	}
-}
-
-func TestOpencodeCLIOverridePolicy(t *testing.T) {
-	if opencodeCLIOverride.Name != "opencode/cli.json" {
-		t.Errorf("name = %q", opencodeCLIOverride.Name)
-	}
-	for _, k := range []string{"keybinds", "leader", "theme", "scroll", "cursor", "mouse"} {
-		if !slices.Contains(opencodeCLIOverride.Policy.Allowed, k) {
-			t.Errorf("%s not allowed", k)
-		}
-	}
-	for _, k := range []string{"plugins", "attention", "debug", "experimental"} {
-		if slices.Contains(opencodeCLIOverride.Policy.Allowed, k) || opencodeCLIOverride.Policy.Refused[k] == "" {
-			t.Errorf("%s not refused with a reason", k)
-		}
-	}
-}
-
-func TestRenderOpencodeOverride(t *testing.T) {
-	data, err := renderOpencode(opencodeBase(t), opencodeSettings{
-		GatewayURL: "http://gateway:8080",
-		Models:     opencodeCatalog,
-		Auto:       true,
-		Override: map[string]any{
-			"compaction": map[string]any{"auto": false, "keep": map[string]any{"tokens": 4000.0}},
-			"model":      "other/model",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	compaction := cfg["compaction"].(map[string]any)
-	if compaction["auto"] != false || compaction["keep"].(map[string]any)["tokens"] != 4000.0 {
+	mountedJSON(t, data, opencodeConfigPath, &cfg)
+	compaction, _ := cfg["compaction"].(map[string]any)
+	keep, _ := compaction["keep"].(map[string]any)
+	if compaction["auto"] != false || keep["tokens"] != 4000.0 {
 		t.Errorf("compaction = %v, want the override's", compaction)
 	}
-	// kota's own keys win, --auto still applies, and the base's settings
-	// stay.
-	perm := cfg["permission"].(map[string]any)
-	if cfg["model"] != providerID+"/big" || perm["edit"] != "allow" || perm["bash"] != "allow" || perm["webfetch"] != "deny" ||
+	perm, _ := cfg["permission"].(map[string]any)
+	if cfg["model"] != providerID+"/big" || perm["edit"] != "allow" || perm["webfetch"] != "deny" ||
 		cfg["share"] != "disabled" || cfg["autoupdate"] != false {
-		t.Errorf("config = %v", cfg)
+		t.Errorf("opencode.json = %v", cfg)
 	}
 }
 
-func TestOpencodeConfigOverridePolicy(t *testing.T) {
-	p := opencodeConfigOverride.Policy
-	if opencodeConfigOverride.Name != "opencode/opencode.json" || p.AnyKey || !slices.Equal(p.Allowed, []string{"compaction"}) {
-		t.Errorf("override = %+v", opencodeConfigOverride)
-	}
+func TestOpencodeConfigOverrideRefused(t *testing.T) {
 	// v1 names, which opencode 2 still reads, and their v2 names.
 	for _, k := range []string{"plugin", "plugins", "mcp", "lsp", "formatter", "command", "commands", "agent", "agents", "mode", "shell",
 		"instructions", "watcher", "skills", "reference", "references", "worktree",
 		"provider", "providers", "model", "small_model", "enabled_providers", "disabled_providers", "permission", "permissions", "tools", "policies", "websearch",
 		"share", "autoshare", "enterprise", "autoupdate", "update", "server", "experimental", "keybinds", "theme"} {
-		if p.Refused[k] == "" {
-			t.Errorf("%s not refused with a reason", k)
+		if err := refused(t, "opencode", "opencode/opencode.json", `{"`+k+`": {}}`); err == nil || !strings.Contains(err.Error(), `"`+k+`"`) {
+			t.Errorf("%s: err = %v, want it refused", k, err)
 		}
 	}
 	for _, k := range []string{"keybinds", "theme"} {
-		if !strings.Contains(p.Refused[k], "cli.json next to this file") {
-			t.Errorf("%s refusal = %q, want a pointer to cli.json", k, p.Refused[k])
+		if err := refused(t, "opencode", "opencode/opencode.json", `{"`+k+`": {}}`); err == nil || !strings.Contains(err.Error(), "cli.json next to this file") {
+			t.Errorf("%s: err = %v, want a pointer to cli.json", k, err)
 		}
 	}
 	// Everything the bundled base sets stays out of reach.
-	cfg := map[string]any{}
-	if err := json.Unmarshal(opencodeBase(t), &cfg); err != nil {
-		t.Fatal(err)
-	}
-	for k := range cfg {
-		if slices.Contains(p.Allowed, k) {
+	for _, k := range baseKeys(t, opencodeBaseConfig) {
+		if k != "$schema" && refused(t, "opencode", "opencode/opencode.json", `{"`+k+`": {}}`) == nil {
 			t.Errorf("base key %s can be overridden", k)
 		}
 	}
 }
 
-func TestRenderOpencodePermissions(t *testing.T) {
-	cases := []struct {
-		name string
-		base []byte
-		auto bool
-		want map[string]string
-	}{
-		{"ask by default", opencodeBase(t), false, map[string]string{"edit": "ask", "bash": "ask", "webfetch": "deny"}},
-		{"auto allows edits and commands", opencodeBase(t), true, map[string]string{"edit": "allow", "bash": "allow", "webfetch": "deny"}},
-		{"auto without base permissions", []byte(`{}`), true, map[string]string{"edit": "allow", "bash": "allow"}},
+// TestOpencodeCLIOverride checks opencode gets the bundled cli.json without
+// an override, and the override's keybinds without its $schema with one.
+func TestOpencodeCLIOverride(t *testing.T) {
+	if cfg := opencodeCLI(t, nil); len(cfg) != 0 {
+		t.Errorf("without an override: cli config = %v", cfg)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			data, err := renderOpencode(c.base, opencodeSettings{GatewayURL: "http://gateway:8080", Models: opencodeCatalog, Auto: c.auto})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var cfg opencodeRendered
-			if err := json.Unmarshal(data, &cfg); err != nil {
-				t.Fatal(err)
-			}
-			if !maps.Equal(cfg.Permission, c.want) {
-				t.Errorf("permission = %v, want %v", cfg.Permission, c.want)
-			}
-		})
+	cfg := opencodeCLI(t, map[string]string{
+		"opencode/cli.json": `{"$schema": "https://opencode.ai/v2/cli.json", "keybinds": {"session.delete": "ctrl+backspace"}, "theme": {"name": "system"}}`,
+	})
+	keys, _ := cfg["keybinds"].(map[string]any)
+	theme, _ := cfg["theme"].(map[string]any)
+	if keys["session.delete"] != "ctrl+backspace" || theme["name"] != "system" || cfg["$schema"] != nil {
+		t.Errorf("cli config = %v, want the override without $schema", cfg)
 	}
 }
 
-func TestRenderOpencodeGatewayKey(t *testing.T) {
-	cfg := renderOpencodeConfig(t, opencodeBase(t), opencodeCatalog)
-	if k := cfg.Provider[providerID].Options.APIKey; k != nil {
-		t.Errorf("apiKey = %q without a gateway key, want unset", *k)
+func TestOpencodeCLIOverridePolicy(t *testing.T) {
+	for _, k := range []string{"keybinds", "leader", "theme", "scroll", "cursor", "mouse"} {
+		if err := refused(t, "opencode", "opencode/cli.json", `{"`+k+`": {}}`); err != nil {
+			t.Errorf("%s refused: %v", k, err)
+		}
 	}
-
-	data, err := renderOpencode(opencodeBase(t), opencodeSettings{GatewayURL: "http://gateway:8080", Models: opencodeCatalog, APIKeyEnv: "KOTA_GATEWAY_KEY"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var withKey opencodeRendered
-	if err := json.Unmarshal(data, &withKey); err != nil {
-		t.Fatal(err)
-	}
-	// opencode substitutes {env:NAME}; the key itself is never written.
-	if k := withKey.Provider[providerID].Options.APIKey; k == nil || *k != "{env:KOTA_GATEWAY_KEY}" {
-		t.Errorf("apiKey = %v, want {env:KOTA_GATEWAY_KEY}", k)
+	for k, why := range map[string]string{"plugins": "loads code", "attention": "file paths", "debug": "diagnostics", "experimental": "unreviewed"} {
+		if err := refused(t, "opencode", "opencode/cli.json", `{"`+k+`": {}}`); err == nil || !strings.Contains(err.Error(), why) {
+			t.Errorf("%s: err = %v, want it refused because %s", k, err, why)
+		}
 	}
 }

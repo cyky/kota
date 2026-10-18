@@ -164,7 +164,7 @@ pi -p 'START-MARKER: work on the tickets' </dev/null
 echo "PI-EXIT=$?"
 echo x >> "$ext" && echo WROTE
 touch "$1/evil.ts" && echo ADDED
-true`, "bash", sess.bridge.Extensions)
+true`, "bash", piAgentDir+"/extensions")
 				if err != nil {
 					t.Fatalf("%v\n%s", err, out)
 				}

@@ -1,15 +1,23 @@
 // Package agent is how a session runs one Agent: opencode or pi. It picks
-// the agent, reads the user's Agent overrides and renders the agent's config
-// for the sandbox.
+// the agent, reads the user's Agent overrides, and writes the agent's files
+// in the session directory: its config, kota's note and its extensions.
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
 	"strings"
 
+	"kota/assets"
+	"kota/internal/instructions"
 	"kota/internal/models"
 	"kota/internal/override"
+	"kota/internal/sandbox"
 )
 
 // Default is the agent a session runs without --agent.
@@ -124,53 +132,116 @@ func (a *Agent) Approval(auto bool) string {
 	return fmt.Sprintf("auto (%s edits files and runs commands without asking)", a.Name())
 }
 
-// Bridge is how cmd/kota wires the agent into a session until Prepare and
-// Configure take its place.
-type Bridge struct {
-	// Configs are the in-sandbox paths of the config files Render returns,
-	// each mounted read-only.
-	Configs []string
-	// Scratch are writable per-session directories (sandbox.Inputs.Scratch).
-	Scratch []string
-	// NotePath is where the agent reads kota's instructions, mounted
-	// read-only, with NoteScratch around it.
-	NotePath    string
-	NoteScratch []string
-	// Facts are what this agent alone is told, after the Sandbox facts.
-	Facts []string
-	// Extensions, when set, is where the agent's bundled extensions (assets
-	// agents/<name>/extensions) are mounted read-only.
-	Extensions string
-	// Env is the agent's environment, with the overrides it takes inline.
-	Env     map[string]string
-	Command []string
-	// Render returns the content of each of Configs, in order. keyEnv,
-	// when set, names the variable holding the gateway key.
-	Render func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error)
+// Note is what the agent is told besides its own facts.
+type Note struct {
+	// Style is the working style the note starts with.
+	Style instructions.Style
+	// Engine is the instruction about the Engine VM, empty for a project
+	// without one.
+	Engine string
 }
 
-// Bridge returns the agent's session wiring.
-func (a *Agent) Bridge() (Bridge, error) {
+// Prepared is the agent's part of a session, with its files in place.
+type Prepared struct {
+	// ReadOnly are the agent's config files, its note and its extensions,
+	// each mounted read-only.
+	ReadOnly []sandbox.Mount
+	// Scratch are writable per-session directories (sandbox.Inputs.Scratch).
+	Scratch []string
+	// Env is the agent's environment, with the overrides it takes inline.
+	Env map[string]string
+	// Command starts the agent.
+	Command []string
+
+	agent *Agent
+	// configs are the host files behind the config mounts, in the order
+	// the adapter renders them.
+	configs []string
+}
+
+// Prepare writes the agent's files into dir, a new directory it owns: the
+// config files, empty until Configure, so each mount source exists; kota's
+// note; and the bundled extensions.
+func (a *Agent) Prepare(dir string, note Note) (*Prepared, error) {
 	ad := a.ad
-	env := maps.Clone(ad.env)
-	if ad.overrideEnv != nil {
-		ovEnv, err := ad.overrideEnv(a.overrides)
-		if err != nil {
-			return Bridge{}, err
-		}
-		maps.Copy(env, ovEnv)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return nil, err
 	}
-	return Bridge{
-		Configs:     ad.configs,
-		Scratch:     ad.scratch,
-		NotePath:    ad.notePath,
-		NoteScratch: ad.noteScratch,
-		Facts:       ad.facts,
-		Extensions:  ad.extensions,
-		Env:         env,
-		Command:     ad.command,
-		Render: func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error) {
-			return ad.render(c, auto, keyEnv, a.overrides)
-		},
-	}, nil
+	p := &Prepared{
+		Scratch: slices.Concat(ad.scratch, ad.noteScratch),
+		Env:     maps.Clone(ad.env),
+		Command: ad.command,
+		agent:   a,
+	}
+	for _, target := range ad.configs {
+		file := filepath.Join(dir, path.Base(target))
+		if err := os.WriteFile(file, nil, 0o644); err != nil {
+			return nil, err
+		}
+		p.configs = append(p.configs, file)
+		p.ReadOnly = append(p.ReadOnly, sandbox.Mount{Source: file, Target: target})
+	}
+	file := filepath.Join(dir, path.Base(ad.notePath))
+	if err := os.WriteFile(file, []byte(instructions.Note(note.Style, ad.facts, note.Engine)), 0o644); err != nil {
+		return nil, err
+	}
+	p.ReadOnly = append(p.ReadOnly, sandbox.Mount{Source: file, Target: ad.notePath})
+	if ad.extensions != "" {
+		ext := filepath.Join(dir, "extensions")
+		if err := writeExtensions(ext, ad.name); err != nil {
+			return nil, err
+		}
+		p.ReadOnly = append(p.ReadOnly, sandbox.Mount{Source: ext, Target: ad.extensions})
+	}
+	if ad.overrideEnv != nil {
+		env, err := ad.overrideEnv(a.overrides)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(p.Env, env)
+	}
+	return p, nil
+}
+
+// Configure writes the agent's config for the models the gateway offers,
+// over the files Prepare created. auto approves edits and commands, for an
+// agent that asks; keyEnv, when set, names the variable holding the gateway
+// key.
+func (p *Prepared) Configure(c models.Catalog, auto bool, keyEnv string) error {
+	if p.agent == nil {
+		return errors.New("agent config written before Prepare")
+	}
+	contents, err := p.agent.ad.render(c, auto, keyEnv, p.agent.overrides)
+	if err != nil {
+		return err
+	}
+	for i, file := range p.configs {
+		if err := os.WriteFile(file, contents[i], 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeExtensions copies the agent's bundled extensions into dir, a new
+// directory. It is mounted as a directory, so none can be added.
+func writeExtensions(dir, agent string) error {
+	src := "agents/" + agent + "/extensions"
+	entries, err := assets.Agents.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		data, err := assets.Agents.ReadFile(src + "/" + e.Name())
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, e.Name()), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -133,7 +133,7 @@ flowchart TD
     subgraph spec["Sandbox definition"]
         sandbox["sandbox<br/>compose spec, names, gateway"]
         models["models<br/>catalog from gateway + models.yaml"]
-        agent["agent<br/>opencode and pi: overrides,<br/>config, approval"]
+        agent["agent<br/>opencode and pi: overrides,<br/>config, note, approval"]
         gatewaykey["gatewaykey"]
         instructions["instructions<br/>what the agent is told"]
         override["override<br/>agent overrides"]
@@ -166,7 +166,7 @@ flowchart TD
     mask --> deps & projectimage & sandbox
     pathpolicy --> sandbox
     nohistory --> approval & mask & deps & projectimage & changereport & hostdata
-    agent --> models & override & sandbox
+    agent --> models & override & sandbox & instructions
     check --> docker & probe & sandbox
     probe --> sandbox
     prepgate --> changereport & deps
