@@ -1,6 +1,7 @@
 package override
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -76,6 +77,23 @@ func TestLoadRefuses(t *testing.T) {
 				t.Errorf("%s: err = %q, want it to contain %q", c.name, err, w)
 			}
 		}
+	}
+}
+
+func TestLoadAnyKey(t *testing.T) {
+	p := Policy{AnyKey: true, Value: func(v any) error {
+		if _, ok := v.(string); !ok {
+			return errors.New("want a string")
+		}
+		return nil
+	}}
+	over, found, err := Load(write(t, `{"$schema": "x", "app.session.new": "ctrl+shift+n"}`), p)
+	if err != nil || !found || !reflect.DeepEqual(over, map[string]any{"app.session.new": "ctrl+shift+n"}) {
+		t.Errorf("any key: %v, %v, %v", over, found, err)
+	}
+	file := write(t, `{"app.session.new": 3}`)
+	if _, _, err := Load(file, p); err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), `"app.session.new"`) || !strings.Contains(err.Error(), "want a string") {
+		t.Errorf("bad value: err = %v", err)
 	}
 }
 

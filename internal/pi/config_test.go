@@ -3,6 +3,7 @@ package pi
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"kota/assets"
@@ -148,6 +149,42 @@ func TestEnv(t *testing.T) {
 	for k, v := range want {
 		if env[k] != v {
 			t.Errorf("%s = %q, want %q", k, env[k], v)
+		}
+	}
+}
+
+func TestRenderKeybindings(t *testing.T) {
+	data, err := RenderKeybindings(nil)
+	if err != nil || strings.TrimSpace(string(data)) != "{}" {
+		t.Errorf("without an override: %q, %v", data, err)
+	}
+	over := map[string]any{"app.session.new": "ctrl+shift+n", "tui.altScreen.pageUp": []any{}}
+	data, err = RenderKeybindings(over)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["app.session.new"] != "ctrl+shift+n" || len(cfg) != 2 {
+		t.Errorf("keybindings.json = %v", cfg)
+	}
+}
+
+func TestKeybindingsOverridePolicy(t *testing.T) {
+	if KeybindingsOverride.Name != "pi/keybindings.json" || !KeybindingsOverride.Policy.AnyKey {
+		t.Errorf("override = %+v", KeybindingsOverride)
+	}
+	check := KeybindingsOverride.Policy.Value
+	for _, ok := range []any{"ctrl+k", []any{}, []any{"ctrl+k", "alt+k"}} {
+		if err := check(ok); err != nil {
+			t.Errorf("%v refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []any{3.0, true, nil, map[string]any{}, []any{"ctrl+k", 1.0}} {
+		if check(bad) == nil {
+			t.Errorf("%v accepted", bad)
 		}
 	}
 }

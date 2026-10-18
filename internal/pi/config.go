@@ -6,9 +6,11 @@ package pi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"kota/internal/models"
+	"kota/internal/override"
 )
 
 // Agent is the agent name, used for its state volume.
@@ -25,6 +27,46 @@ const BaseSettings = "agents/pi/settings.json"
 // but pi reads that only in trusted projects, and the base settings trust
 // none.
 const AppendSystem = "APPEND_SYSTEM.md"
+
+// Keybindings is the file in pi's agent directory that maps action ids to
+// keys. pi has no project-level keybindings.
+const Keybindings = "keybindings.json"
+
+// KeybindingsOverride is the user's Agent override of keybindings.json.
+// Every action may be rebound: the file only names actions and keys, so
+// nothing in it can load or run anything.
+var KeybindingsOverride = override.File{
+	Name:   "pi/" + Keybindings,
+	Policy: override.Policy{AnyKey: true, Value: checkBinding},
+}
+
+// checkBinding accepts what pi does for one action: a key, or a list of
+// keys, empty to disable the action. pi itself silently drops other values.
+func checkBinding(v any) error {
+	switch b := v.(type) {
+	case string:
+		return nil
+	case []any:
+		for _, k := range b {
+			if _, ok := k.(string); !ok {
+				return errors.New("want a key or a list of keys")
+			}
+		}
+		return nil
+	}
+	return errors.New("want a key or a list of keys")
+}
+
+// RenderKeybindings returns the keybindings.json content for a session:
+// the user's override from KeybindingsOverride, or none. pi reads the file
+// once at startup and on /reload; it only writes it to migrate legacy
+// action names, which it also does in memory when it can't.
+func RenderKeybindings(over map[string]any) ([]byte, error) {
+	if over == nil {
+		over = map[string]any{}
+	}
+	return json.MarshalIndent(over, "", "  ")
+}
 
 // placeholderKey is used without a gateway key: pi only offers a
 // provider's models when it has a key, and the gateway doesn't check it.

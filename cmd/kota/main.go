@@ -71,8 +71,8 @@ const (
 	opencodeInstructionsPath = opencodeConfigDir + "/AGENTS.md"
 	// piAgentDir is pi's config directory. It is writable, because pi
 	// creates lock files next to its settings, and discarded after the
-	// session; the rendered settings.json, models.json and APPEND_SYSTEM.md
-	// in it, and its extensions directory, are read-only.
+	// session; the rendered settings.json, models.json, keybindings.json and
+	// APPEND_SYSTEM.md in it, and its extensions directory, are read-only.
 	piAgentDir   = sandbox.Home + "/.pi/agent"
 	piSessionDir = sandbox.StateDir + "/pi/sessions"
 )
@@ -123,7 +123,8 @@ when present, replaces the built-in working style for every project.
 $XDG_CONFIG_HOME/kota/opencode/cli.json, when present, is merged over
 opencode's bundled terminal settings in every session; it may set keybinds,
 leader, theme, animations, cursor, mouse, scroll, prompt, session, tabs,
-diffs, terminal, mini and highlights.
+diffs, terminal, mini and highlights. $XDG_CONFIG_HOME/kota/pi/keybindings.json
+rebinds any of pi's actions.
 A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
 the file named by $KOTA_GATEWAY_KEY_FILE.
 `
@@ -367,16 +368,17 @@ func agentFor(name string) (agentSetup, error) {
 		}, nil
 	case pi.Agent:
 		return agentSetup{
-			name:     pi.Agent,
-			configs:  []string{piAgentDir + "/settings.json", piAgentDir + "/models.json"},
-			scratch:  []string{piAgentDir},
-			notePath: piAgentDir + "/" + pi.AppendSystem,
+			name:      pi.Agent,
+			configs:   []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piAgentDir + "/" + pi.Keybindings},
+			scratch:   []string{piAgentDir},
+			overrides: []override.File{pi.KeybindingsOverride},
+			notePath:  piAgentDir + "/" + pi.AppendSystem,
 			facts: []string{"After you commit a finished ticket and mark it done, call the ticket_done tool with the ticket and the commit. " +
 				"It clears your context, so the next ticket starts fresh; your state is in the tickets and git history."},
 			extensions: piAgentDir + "/extensions",
 			env:        pi.Env(piAgentDir, piSessionDir),
 			command:    []string{"pi"},
-			render: func(c models.Catalog, _ bool, keyEnv string, _ map[string]map[string]any) ([][]byte, error) {
+			render: func(c models.Catalog, _ bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(pi.BaseSettings)
 				if err != nil {
 					return nil, err
@@ -387,7 +389,11 @@ func agentFor(name string) (agentSetup, error) {
 					return nil, err
 				}
 				modelsCfg, err := pi.RenderModels(s)
-				return [][]byte{settings, modelsCfg}, err
+				if err != nil {
+					return nil, err
+				}
+				keys, err := pi.RenderKeybindings(ov[pi.KeybindingsOverride.Name])
+				return [][]byte{settings, modelsCfg, keys}, err
 			},
 			approval: func(bool) string {
 				return "auto (pi has no permission system: it edits files and runs commands without asking, and the sandbox is its only boundary)"

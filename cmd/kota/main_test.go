@@ -18,6 +18,7 @@ import (
 	"kota/internal/deps"
 	"kota/internal/docker"
 	"kota/internal/instructions"
+	"kota/internal/models"
 	"kota/internal/opencode"
 	"kota/internal/pi"
 	"kota/internal/prepgate"
@@ -61,7 +62,7 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 		},
 		{
 			agent:   pi.Agent,
-			configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json"},
+			configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piAgentDir + "/" + pi.Keybindings},
 			env:     map[string]string{"PI_CODING_AGENT_DIR": piAgentDir, "PI_CODING_AGENT_SESSION_DIR": piSessionDir, "PI_OFFLINE": "1"},
 			command: []string{"pi"},
 		},
@@ -635,6 +636,63 @@ func TestAgentOverrideCLI(t *testing.T) {
 	defer piSess.cleanup()
 	if len(piSess.overrideFiles) != 0 {
 		t.Errorf("pi override files = %v", piSess.overrideFiles)
+	}
+}
+
+// TestAgentOverridePiKeybindings checks pi gets an empty keybindings.json,
+// read-only and probed, without an override, and the override's bindings
+// with one; a binding pi can't use refuses the session.
+func TestAgentOverridePiKeybindings(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	sa, err := parseOfflineArgs("run", []string{"--agent", pi.Agent, project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := piAgentDir + "/" + pi.Keybindings
+	keybindings := func(sess *session) map[string]any {
+		t.Helper()
+		contents, err := sess.agent.render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "", sess.overrides)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(contents[slices.Index(sess.agent.configs, target)], &cfg); err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	sess, err := prepareTestSession(sa, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg := keybindings(sess); len(cfg) != 0 || len(sess.overrideFiles) != 0 {
+		t.Errorf("without an override: keybindings.json = %v, files %v", cfg, sess.overrideFiles)
+	}
+	if !slices.Contains(sess.mounts.ReadOnly, target) {
+		t.Errorf("probes don't check %s is read-only", target)
+	}
+	sess.cleanup()
+
+	file := writeOverride(t, "pi/keybindings.json", `{"$schema": "https://pi.dev/schemas/keybindings.schema.json", "app.session.new": "ctrl+shift+n", "tui.altScreen.pageUp": []}`)
+	sess, err = prepareTestSession(sa, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := keybindings(sess)
+	if cfg["app.session.new"] != "ctrl+shift+n" || len(cfg) != 2 {
+		t.Errorf("keybindings.json = %v, want the override without $schema", cfg)
+	}
+	if !slices.Equal(sess.overrideFiles, []string{file}) {
+		t.Errorf("override files = %v", sess.overrideFiles)
+	}
+	sess.cleanup()
+
+	writeOverride(t, "pi/keybindings.json", `{"app.session.new": 3}`)
+	if _, err := prepareTestSession(sa, sandbox.ModeRun); err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), `"app.session.new"`) {
+		t.Errorf("bad binding: err = %v, want it to name %s and the action", err, file)
 	}
 }
 

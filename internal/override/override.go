@@ -31,8 +31,13 @@ type Policy struct {
 	// Allowed are the top-level keys it may set. An allowed object is
 	// allowed as a whole.
 	Allowed []string
+	// AnyKey allows every top-level key, for a file that can only name
+	// harmless settings, such as a map of keybindings.
+	AnyKey bool
 	// Refused gives, for some keys that aren't allowed, why not.
 	Refused map[string]string
+	// Value, when set, checks each top-level value.
+	Value func(v any) error
 }
 
 // File is one override file an agent reads.
@@ -78,7 +83,13 @@ func Load(file string, p Policy) (over map[string]any, found bool, err error) {
 	}
 	delete(over, schemaKey)
 	for _, k := range slices.Sorted(maps.Keys(over)) {
-		if slices.Contains(p.Allowed, k) {
+		if p.AnyKey || slices.Contains(p.Allowed, k) {
+			if p.Value == nil {
+				continue
+			}
+			if err := p.Value(over[k]); err != nil {
+				return nil, false, fmt.Errorf("agent override %s: %q: %w", file, k, err)
+			}
 			continue
 		}
 		why := ""
