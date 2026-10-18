@@ -54,7 +54,7 @@ kota runs the agent in a container on an internal Docker network whose only way 
 - [The sandbox](docs/sandbox.md): the threat model, what the agent can and can't do, and the limits and risks
 - [Sessions](docs/sessions.md): network, approval, models, agent config and state, probes and cleanup
 - [Protecting the host](docs/protections.md): git hook and config protection, secret masks and the change report
-- [The agents](docs/agents.md): what the agent is told, your own agent settings, and pi's `ticket_done`
+- [The agents](docs/agent-setup.md): what the agent is told, your own agent settings, and pi's `ticket_done`
 - [Sessions without git history](docs/no-history.md): `--no-history`, and what it doesn't hide
 - [Dependencies](docs/dependencies.md): `prep`, shared caches and project images
 - [Engine VM](docs/engine-vm.md): containers for a project's tests

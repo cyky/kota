@@ -27,7 +27,7 @@ When a new agent session resolves a different model than another active agent se
 
 The agent's config is versioned in this repo (`assets/agents/opencode/opencode.json`: permissions and defaults). Each session gets that config plus the gateway provider and model, mounted read-only at `/etc/kota/opencode.json`. Your host `~/.config/opencode`, and any other host agent config, is never mounted. The agent's `HOME` is an empty tmpfs that is discarded when the session ends. opencode ignores the project's `opencode.json` and `.opencode/` directory inside the sandbox, because the agent could write them to change its own permissions. pi's config is versioned the same way (`assets/agents/pi/settings.json`). Each session renders `settings.json` (default model) and `models.json` (the gateway provider and its models), mounted read-only into pi's config directory `~/.pi/agent`. That directory is its own tmpfs, writable because pi creates lock files there, and discarded after the session. The base settings set `defaultProjectTrust` to `never`, so pi doesn't load the project's `.pi/` (settings, extensions, skills, system prompt), which the agent could write for a later session; a `.pi/` of your own isn't used in the sandbox either. `AGENTS.md` and other context files still load. pi's sessions are stored in its state volume via `PI_CODING_AGENT_SESSION_DIR`, which also outranks a `sessionDir` in the project's settings.
 
-Your own preferences for the agents, and what kota tells them, are in [The agents](agents.md).
+Your own preferences for the agents, and what kota tells them, are in [The agents](agent-setup.md).
 
 ## Agent state
 
