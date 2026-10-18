@@ -123,7 +123,14 @@ when present, replaces the built-in working style for every project.
 $XDG_CONFIG_HOME/kota/opencode/cli.json, when present, is merged over
 opencode's bundled terminal settings in every session; it may set keybinds,
 leader, theme, animations, cursor, mouse, scroll, prompt, session, tabs,
-diffs, terminal, mini and highlights. $XDG_CONFIG_HOME/kota/pi/keybindings.json
+diffs, terminal, mini and highlights. $XDG_CONFIG_HOME/kota/pi/settings.json
+is merged over pi's bundled settings; it may set defaultThinkingLevel,
+modelThinkingLevels, thinkingBudgets, hideThinkingBlock, steeringMode,
+followUpMode, doubleEscapeAction, treeFilterMode, compaction, branchSummary,
+retry, theme, quietStartup, tuiMode, fullscreenExitOutput,
+fullscreenScrollbar, fullscreenCopyOnSelect, fullscreenWheelScrollLines,
+editorPaddingX, outputPad, autocompleteMaxVisible, showHardwareCursor,
+terminal, images and markdown. $XDG_CONFIG_HOME/kota/pi/keybindings.json
 rebinds any of pi's actions.
 A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
 the file named by $KOTA_GATEWAY_KEY_FILE.
@@ -371,7 +378,7 @@ func agentFor(name string) (agentSetup, error) {
 			name:      pi.Agent,
 			configs:   []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piAgentDir + "/" + pi.Keybindings},
 			scratch:   []string{piAgentDir},
-			overrides: []override.File{pi.KeybindingsOverride},
+			overrides: []override.File{pi.SettingsOverride, pi.KeybindingsOverride},
 			notePath:  piAgentDir + "/" + pi.AppendSystem,
 			facts: []string{"After you commit a finished ticket and mark it done, call the ticket_done tool with the ticket and the commit. " +
 				"It clears your context, so the next ticket starts fresh; your state is in the tickets and git history."},
@@ -383,7 +390,7 @@ func agentFor(name string) (agentSetup, error) {
 				if err != nil {
 					return nil, err
 				}
-				s := pi.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, APIKeyEnv: keyEnv}
+				s := pi.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, APIKeyEnv: keyEnv, Override: ov[pi.SettingsOverride.Name]}
 				settings, err := pi.RenderSettings(base, s)
 				if err != nil {
 					return nil, err

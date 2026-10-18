@@ -95,6 +95,7 @@ Keybindings, theme and similar preferences can be set per user, for every sessio
 | File | Agent setting | Allowed keys |
 |---|---|---|
 | `opencode/cli.json` | opencode v2's terminal preferences (`~/.config/opencode/cli.json`) | `keybinds`, `leader`, `theme`, `animations`, `cursor`, `mouse`, `scroll`, `prompt`, `session`, `tabs`, `diffs`, `terminal`, `mini`, `highlights` |
+| `pi/settings.json` | pi's settings (`~/.pi/agent/settings.json`) | `defaultThinkingLevel`, `modelThinkingLevels`, `thinkingBudgets`, `hideThinkingBlock`, `steeringMode`, `followUpMode`, `doubleEscapeAction`, `treeFilterMode`, `compaction`, `branchSummary`, `retry`, `theme`, `quietStartup`, `tuiMode`, `fullscreenExitOutput`, `fullscreenScrollbar`, `fullscreenCopyOnSelect`, `fullscreenWheelScrollLines`, `editorPaddingX`, `outputPad`, `autocompleteMaxVisible`, `showHardwareCursor`, `terminal`, `images`, `markdown` |
 | `pi/keybindings.json` | pi's keybindings (`~/.pi/agent/keybindings.json`) | every action; each value must be a key or a list of keys (empty to disable the action) |
 
 For example, to move opencode's session delete off `ctrl+d`:
@@ -109,6 +110,8 @@ For example, to move opencode's session delete off `ctrl+d`:
 ```
 
 The rendered settings reach opencode through `OPENCODE_CLI_CONFIG_CONTENT`, which opencode merges over its global `cli.json` and keeps authoritative. opencode has no project-level `cli.json`, so the project can't change them. Settings you change in the TUI go to the session's `~/.config/opencode/cli.json` on its tmpfs and are lost after the session; put lasting ones in the override. `plugins` (loads code), `attention` (takes sound file paths; notifications can't leave the sandbox), `debug` and `experimental` are refused.
+
+pi's `settings.json` is the bundled base, then your override, then the provider and model kota sets, so `--model` still picks the model and the base's `defaultProjectTrust: never`, disabled telemetry and disabled llama.cpp extension stay. Refused, with the reason in the error: anything that loads files or code (`packages`, `extensions`, `skills`, `prompts`, `themes`, so `theme` names a built-in theme), runs commands (`shellPath`, `shellCommandPrefix`, `npmCommand`, `externalEditor`), changes trust, telemetry or the network route (`defaultProjectTrust`, `enableInstallTelemetry`, `enableAnalytics`, `httpProxy`, `transport`), or that kota owns (`defaultProvider`, `defaultModel`, `enabledModels`, `defaultTools`, `sessionDir`).
 
 pi gets its `keybindings.json` rendered into its agent directory and mounted read-only, like `settings.json`; without an override it is empty and pi uses its defaults. pi has no project-level keybindings. `/hotkeys` in pi shows the bindings in effect, and `/reload` rereads the file, but edits to the override only reach the next session.
 

@@ -696,6 +696,46 @@ func TestAgentOverridePiKeybindings(t *testing.T) {
 	}
 }
 
+// TestAgentOverridePiSettings checks pi's settings.json gets an allowed
+// setting from the override, keeps kota's model and the base's project
+// trust, and that a refused key stops the session with why.
+func TestAgentOverridePiSettings(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	sa, err := parseOfflineArgs("run", []string{"--agent", pi.Agent, project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsFile := writeOverride(t, "pi/settings.json", `{"$schema": "https://pi.dev/schemas/settings.schema.json", "theme": "light", "terminal": {"showImages": false}}`)
+	keysFile := writeOverride(t, "pi/keybindings.json", `{}`)
+	sess, err := prepareTestSession(sa, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := sess.agent.render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, false, "", sess.overrides)
+	sess.cleanup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(contents[slices.Index(sess.agent.configs, piAgentDir+"/settings.json")], &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["theme"] != "light" || cfg["defaultModel"] != "m" || cfg["defaultProjectTrust"] != "never" {
+		t.Errorf("settings.json = %v", cfg)
+	}
+	if !slices.Equal(sess.overrideFiles, []string{settingsFile, keysFile}) {
+		t.Errorf("override files = %v, want settings then keybindings", sess.overrideFiles)
+	}
+
+	writeOverride(t, "pi/settings.json", `{"extensions": ["/workspace/evil.ts"]}`)
+	_, err = prepareTestSession(sa, sandbox.ModeRun)
+	if err == nil || !strings.Contains(err.Error(), settingsFile) || !strings.Contains(err.Error(), `"extensions"`) || !strings.Contains(err.Error(), "loads code") {
+		t.Errorf("err = %v, want it to name %s, the key and why", err, settingsFile)
+	}
+}
+
 // TestAgentOverrideRefused checks an override with a key that isn't
 // allowed stops startup with its path and the key, before anything is
 // created; prep, which runs no agent, isn't affected.

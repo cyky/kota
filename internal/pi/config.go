@@ -82,16 +82,59 @@ type Settings struct {
 	// APIKeyEnv, when set, names the environment variable holding the
 	// gateway key. The config refers to it, so the key isn't written out.
 	APIKeyEnv string
+	// Override is the user's Agent override of settings.json, from
+	// SettingsOverride, or nil.
+	Override map[string]any
+}
+
+// SettingsOverride is the user's Agent override of settings.json: how pi
+// thinks, compacts, retries and looks, but nothing that loads files or
+// code, runs commands, changes trust or telemetry, or touches the gateway
+// wiring kota sets. A group, such as terminal, is allowed as a whole.
+var SettingsOverride = override.File{
+	Name: "pi/settings.json",
+	Policy: override.Policy{
+		Allowed: []string{
+			"defaultThinkingLevel", "modelThinkingLevels", "thinkingBudgets", "hideThinkingBlock",
+			"steeringMode", "followUpMode", "doubleEscapeAction", "treeFilterMode",
+			"compaction", "branchSummary", "retry",
+			"theme", "quietStartup", "tuiMode", "fullscreenExitOutput", "fullscreenScrollbar", "fullscreenCopyOnSelect",
+			"fullscreenWheelScrollLines", "editorPaddingX", "outputPad", "autocompleteMaxVisible", "showHardwareCursor",
+			"terminal", "images", "markdown",
+		},
+		Refused: map[string]string{
+			"packages":               "loads code",
+			"extensions":             "loads code",
+			"skills":                 "loads files",
+			"prompts":                "loads files",
+			"themes":                 "loads files; theme can name a built-in theme",
+			"shellPath":              "runs commands",
+			"shellCommandPrefix":     "runs commands",
+			"npmCommand":             "runs commands",
+			"externalEditor":         "runs commands",
+			"defaultProjectTrust":    "would let the project's .pi/ load",
+			"enableInstallTelemetry": "telemetry stays off",
+			"enableAnalytics":        "telemetry stays off",
+			"httpProxy":              "the gateway is the only network route",
+			"transport":              "the gateway is the only network route",
+			"defaultProvider":        "kota sets the gateway provider",
+			"defaultModel":           "use --model",
+			"enabledModels":          "kota offers the gateway's models",
+			"defaultTools":           "kota sets pi's tools",
+			"sessionDir":             "sessions live in kota's state volume",
+		},
+	},
 }
 
 // RenderSettings returns the settings.json content for a session: base (the
-// versioned defaults, including project trust) with the default provider
-// and model set on top.
+// versioned defaults, including project trust), then the user's override,
+// then the default provider and model.
 func RenderSettings(base []byte, s Settings) ([]byte, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
 		return nil, fmt.Errorf("base pi settings: %w", err)
 	}
+	cfg = override.Merge(cfg, s.Override)
 	cfg["defaultProvider"] = ProviderID
 	cfg["defaultModel"] = s.Models.Default
 	return json.MarshalIndent(cfg, "", "  ")

@@ -80,6 +80,62 @@ func TestRenderSettingsReplacesBaseDefaults(t *testing.T) {
 	}
 }
 
+func TestRenderSettingsOverride(t *testing.T) {
+	b := []byte(`{"defaultProjectTrust": "never", "terminal": {"showImages": true, "clearOnShrink": true}}`)
+	s := settings
+	s.Override = map[string]any{
+		"theme":        "light",
+		"terminal":     map[string]any{"showImages": false},
+		"defaultModel": "other",
+		"retry":        map[string]any{"maxRetries": 5.0},
+	}
+	data, err := RenderSettings(b, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	term := cfg["terminal"].(map[string]any)
+	if cfg["theme"] != "light" || term["showImages"] != false || term["clearOnShrink"] != true {
+		t.Errorf("settings = %v, want the override merged over the base", cfg)
+	}
+	// kota's own keys win, and the base's protections stay.
+	if cfg["defaultModel"] != "big" || cfg["defaultProvider"] != ProviderID || cfg["defaultProjectTrust"] != "never" {
+		t.Errorf("settings = %v", cfg)
+	}
+}
+
+func TestSettingsOverridePolicy(t *testing.T) {
+	p := SettingsOverride.Policy
+	if SettingsOverride.Name != "pi/settings.json" || p.AnyKey {
+		t.Errorf("override = %+v", SettingsOverride)
+	}
+	for _, k := range []string{"defaultThinkingLevel", "theme", "terminal", "markdown", "compaction", "retry", "steeringMode", "tuiMode"} {
+		if !slices.Contains(p.Allowed, k) {
+			t.Errorf("%s not allowed", k)
+		}
+	}
+	for _, k := range []string{"packages", "extensions", "skills", "prompts", "themes", "shellPath", "shellCommandPrefix", "npmCommand", "externalEditor",
+		"defaultProjectTrust", "enableInstallTelemetry", "enableAnalytics", "httpProxy", "transport",
+		"defaultProvider", "defaultModel", "enabledModels", "defaultTools", "sessionDir"} {
+		if slices.Contains(p.Allowed, k) || p.Refused[k] == "" {
+			t.Errorf("%s not refused with a reason", k)
+		}
+	}
+	// Everything the bundled base sets stays out of reach.
+	cfg := map[string]any{}
+	if err := json.Unmarshal(base(t), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for k := range cfg {
+		if slices.Contains(p.Allowed, k) {
+			t.Errorf("base key %s can be overridden", k)
+		}
+	}
+}
+
 func TestRenderSettingsBadBase(t *testing.T) {
 	if _, err := RenderSettings([]byte("{"), settings); err == nil {
 		t.Error("no error for invalid base")

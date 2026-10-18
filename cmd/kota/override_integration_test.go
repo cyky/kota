@@ -139,3 +139,62 @@ true`)
 		}
 	}
 }
+
+// TestPiSettingsInShell opens a pi shell Session with a settings override,
+// and checks pi's own settings manager sees the override's settings next to
+// kota's model and the base's project trust.
+func TestPiSettingsInShell(t *testing.T) {
+	requireBaseImage(t)
+	config := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(config, "gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	file := filepath.Join(config, "kota", "pi", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(`{"$schema": "https://pi.dev/schemas/settings.schema.json", "theme": "light", "defaultThinkingLevel": "high", "terminal": {"showImages": false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(cache, "kota-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ = filepath.EvalSymlinks(root)
+	t.Cleanup(func() { os.RemoveAll(root) })
+	t.Setenv("KOTA_ALLOWED_ROOT", root)
+	project := filepath.Join(root, "app")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostGit(t, project, "init", "-q")
+
+	sa := sessionArgs{agent: pi.Agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
+	var out string
+	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
+		out, err = ds.Capture("bash", "-c", `exec 2>&1
+node --input-type=module -e '
+const root = (await import("node:child_process")).execSync("npm root -g").toString().trim();
+const { SettingsManager } = await import(root + "/@earendil-works/pi-coding-agent/dist/core/settings-manager.js");
+const s = SettingsManager.create(process.cwd(), process.env.PI_CODING_AGENT_DIR);
+console.log("theme=" + s.getTheme());
+console.log("thinking=" + s.getDefaultThinkingLevel());
+console.log("showImages=" + s.getShowImages());
+console.log("provider=" + s.getDefaultProvider());
+console.log("trust=" + s.getDefaultProjectTrust());
+'`)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+	})
+	t.Logf("inside:\n%s", out)
+	for _, want := range []string{"theme=light", "thinking=high", "showImages=false", "provider=" + pi.ProviderID, "trust=never"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pi's settings lack %s:\n%s", want, out)
+		}
+	}
+}
