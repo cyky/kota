@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"kota/internal/agent"
 	"kota/internal/changereport"
 	"kota/internal/deps"
 	"kota/internal/engine"
@@ -87,7 +88,7 @@ func TestShellEngineSession(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
 	fakeEngine(t, project, []string{"postgres:16-alpine"})
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project, shell: true, engine: true}
+	sa := sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project, shell: true, engine: true}
 	sess, err := prepareTestSession(sa, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +129,7 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 	t.Run("not wanted", func(t *testing.T) {
 		project := fakeHome(t, map[string]string{engine.ConfigFile: engineYAML})
 		fakeEngine(t, project, []string{"postgres:16-alpine"})
-		sess, err := prepareTestSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
+		sess, err := prepareTestSession(sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +140,7 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 	})
 	t.Run("no engine section", func(t *testing.T) {
 		project := fakeHome(t, map[string]string{"README.md": "x"})
-		sess, err := prepareTestSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project, shell: true, engine: true}, sandbox.ModeRun)
+		sess, err := prepareTestSession(sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project, shell: true, engine: true}, sandbox.ModeRun)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +154,7 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 	})
 	t.Run("broken config without engine history", func(t *testing.T) {
 		project := fakeHome(t, map[string]string{engine.ConfigFile: "prep: [\n"})
-		sess, err := prepareShellSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project, shell: true, engine: true})
+		sess, err := prepareShellSession(sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project, shell: true, engine: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -410,7 +411,7 @@ func TestEngineSessionRefusals(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			project := fakeHome(t, map[string]string{engine.ConfigFile: c.yaml})
 			fakeEngine(t, project, []string{"postgres:16-alpine"}, c.missing...)
-			_, err := prepareShellSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project, shell: true, engine: true})
+			_, err := prepareShellSession(sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project, shell: true, engine: true})
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want it to mention %q", err, c.want)
 			}
@@ -425,7 +426,7 @@ func TestEngineSessionRefusals(t *testing.T) {
 func TestCheckShowsEngine(t *testing.T) {
 	t.Setenv("KOTA_GATEWAY_KEY", "")
 	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	check := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, engine: true, engineOptional: true}
+	check := sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, engine: true, engineOptional: true}
 	cases := []struct {
 		name, yaml string
 		missing    []string

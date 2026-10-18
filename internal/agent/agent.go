@@ -43,7 +43,7 @@ type adapter struct {
 	env     map[string]string
 	command []string
 	// overrides are the Agent override files the agent reads.
-	overrides []override.File
+	overrides []overrideFile
 	// overrideEnv, when set, returns environment variables carrying the
 	// loaded overrides, for an agent that takes its config inline.
 	overrideEnv func(ov map[string]map[string]any) (map[string]string, error)
@@ -61,6 +61,19 @@ type adapter struct {
 	// agent's bundled extensions (assets agents/<name>/extensions) are
 	// mounted there read-only, as a directory, so none can be added.
 	extensions string
+}
+
+// overrideFile is an Agent override file with what the usage text says
+// about it.
+type overrideFile struct {
+	override.File
+	// over is what the override is merged over.
+	over string
+	// note, when set, follows the allowed keys.
+	note string
+	// anyKey says what the override may set when its policy allows any
+	// key.
+	anyKey string
 }
 
 // Agent is one agent with the user's Agent overrides loaded.

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"kota/internal/agent"
 	"kota/internal/docker"
 	"kota/internal/hostdata"
 	"kota/internal/sandbox"
@@ -100,7 +101,7 @@ git commit -q -m agent && echo COMMITTED`)
 			t.Errorf("the session saw %q", leak)
 		}
 	}
-	if want := []string{sandbox.StateVolume(project, defaultAgent+sandbox.NoHistoryState)}; !slices.Equal(run.states, want) {
+	if want := []string{sandbox.StateVolume(project, agent.Default+sandbox.NoHistoryState)}; !slices.Equal(run.states, want) {
 		t.Errorf("state volumes = %q, want %q", run.states, want)
 	}
 	branch := "kota/shell-" + run.start.Format(hostdata.TimeFormat)
@@ -165,7 +166,7 @@ func noHistorySession(t *testing.T, project, gateway, script string) noHistoryRu
 	t.Helper()
 	var run noHistoryRun
 	var report bytes.Buffer
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: gateway, dir: project, shell: true, noHistory: true}
+	sa := sessionArgs{agent: agent.Default, gatewayURL: gateway, dir: project, shell: true, noHistory: true}
 	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
 		run.copy = sess.project
 		t.Cleanup(func() { os.RemoveAll(run.copy) })
@@ -188,7 +189,7 @@ func noHistorySession(t *testing.T, project, gateway, script string) noHistoryRu
 		}
 		commits.finish()
 		commits.where = " in the copy"
-		ret := returnWork(sess, commits, returnName(sa, defaultAgent), run.start)
+		ret := returnWork(sess, commits, returnName(sa, agent.Default), run.start)
 		commits.report(&report, sess.layout, nil)
 		ret.report(&report)
 	})

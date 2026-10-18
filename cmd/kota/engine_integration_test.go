@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"kota/assets"
+	"kota/internal/agent"
 	"kota/internal/docker"
 	"kota/internal/engine"
 	"kota/internal/enginevm"
@@ -244,7 +245,7 @@ func prepEngineProject(t *testing.T, project string, caches func(*sandbox.Compos
 // returns.
 func withShellSession(t *testing.T, project, gateway string, caches func(*sandbox.Compose), fn func(*session, *docker.Session)) {
 	t.Helper()
-	withSession(t, sessionArgs{agent: defaultAgent, gatewayURL: gateway, dir: project, shell: true, engine: true}, caches, fn)
+	withSession(t, sessionArgs{agent: agent.Default, gatewayURL: gateway, dir: project, shell: true, engine: true}, caches, fn)
 }
 
 // withSession is withShellSession for any session args, e.g. a run of an

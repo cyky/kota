@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"kota/internal/agent"
 	"kota/internal/changereport"
 	"kota/internal/docker"
 	"kota/internal/mask"
@@ -95,7 +96,7 @@ func TestAgentCommit(t *testing.T) {
 	}
 	var layout mask.Layout
 	var inside string
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
+	sa := sessionArgs{agent: agent.Default, gatewayURL: stubModelGateway(t), dir: project, shell: true}
 	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
 		layout = sess.layout
 		inside, err = ds.Capture("bash", "-c", `exec 2>&1

@@ -112,7 +112,10 @@ var opencode = adapter{
 	noteScratch: []string{path.Dir(opencodeConfigDir), opencodeConfigDir},
 	env:         opencodeEnv(opencodeConfigPath),
 	command:     []string{"opencode"},
-	overrides:   []override.File{opencodeConfigOverride, opencodeCLIOverride},
+	overrides: []overrideFile{
+		{File: opencodeConfigOverride, over: "opencode's bundled config", note: "keybinds and theme go in cli.json"},
+		{File: opencodeCLIOverride, over: "opencode's bundled terminal settings"},
+	},
 	// opencode writes cli.json when settings change in the TUI, so the CLI
 	// config goes inline instead of in a read-only file.
 	overrideEnv: func(ov map[string]map[string]any) (map[string]string, error) {

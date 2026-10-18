@@ -50,7 +50,6 @@ const (
 	baseImage      = "kota-base:latest"
 	forwarderImage = "kota-forwarder:latest"
 	defaultGateway = "http://host.docker.internal:8686"
-	defaultAgent   = agent.Default
 	// engineHostAlias is the host as the engine forwarder reaches it, where
 	// QEMU's port forwards listen on 127.0.0.1.
 	engineHostAlias = "host.docker.internal"
@@ -58,7 +57,7 @@ const (
 	engineBootTimeout = 60 * time.Second
 )
 
-const usage = `usage: kota <command> [flags]
+var usage = `usage: kota <command> [flags]
 
 commands:
   build                 build the sandbox images and, with QEMU installed,
@@ -81,15 +80,11 @@ commands:
                         override
 
 flags:
-  --agent NAME          opencode (default) or pi; pi has no permission
-                        system and always runs in full auto
-  --gateway URL         model gateway (default $KOTA_GATEWAY or ` + defaultGateway + `)
+` + flagHelp("--agent NAME", agent.AgentHelp()) + `  --gateway URL         model gateway (default $KOTA_GATEWAY or ` + defaultGateway + `)
   --model ID            model to start with (default: models.yaml's default);
                         the agent is offered every model the gateway serves
   --ro PATH             mount PATH read-only at ` + sandbox.ReadOnlyRoot + `/<name> (repeatable)
-  --auto                run only: opencode approves edits and commands without
-                        asking; on uncommitted changes, asks you to type y
-  --unsafe-skip-check   run only: start without the containment probes
+` + flagHelp("--auto", "run only: "+agent.AutoHelp()+"; on uncommitted changes, asks you to type y") + `  --unsafe-skip-check   run only: start without the containment probes
   --no-engine           run and shell: start without the project's Engine VM;
                         the agent is told tests needing containers can't run
   --no-history          run and shell: run on a copy that keeps only the last
@@ -103,23 +98,34 @@ flags:
 dir must be inside the allowed root ($KOTA_ALLOWED_ROOT, default ~/Projects).
 $XDG_CONFIG_HOME/kota/instructions.md (default ~/.config/kota/instructions.md),
 when present, replaces the built-in working style for every project.
-$XDG_CONFIG_HOME/kota/opencode/cli.json, when present, is merged over
-opencode's bundled terminal settings in every session; it may set keybinds,
-leader, theme, animations, cursor, mouse, scroll, prompt, session, tabs,
-diffs, terminal, mini and highlights. $XDG_CONFIG_HOME/kota/opencode/opencode.json
-is merged over opencode's bundled config; it may set compaction (keybinds
-and theme go in cli.json). $XDG_CONFIG_HOME/kota/pi/settings.json
-is merged over pi's bundled settings; it may set defaultThinkingLevel,
-modelThinkingLevels, thinkingBudgets, hideThinkingBlock, steeringMode,
-followUpMode, doubleEscapeAction, treeFilterMode, compaction, branchSummary,
-retry, theme, quietStartup, tuiMode, fullscreenExitOutput,
-fullscreenScrollbar, fullscreenCopyOnSelect, fullscreenWheelScrollLines,
-editorPaddingX, outputPad, autocompleteMaxVisible, showHardwareCursor,
-terminal, images and markdown. $XDG_CONFIG_HOME/kota/pi/keybindings.json
-rebinds any of pi's actions.
-A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
+` + wrap("", 0, 76, agent.OverrideHelp()) + `A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
 the file named by $KOTA_GATEWAY_KEY_FILE.
 `
+
+// flagHelp is one flag's entry in the usage text, its description wrapped
+// in a column.
+func flagHelp(flag, text string) string {
+	return wrap(fmt.Sprintf("  %-22s", flag), 24, 79, text)
+}
+
+// wrap breaks text into lines of at most width columns, where they fit: the
+// first starting with first, the rest indented by indent spaces.
+func wrap(first string, indent, width int, text string) string {
+	var b strings.Builder
+	line, empty := first, true
+	for _, word := range strings.Fields(text) {
+		if !empty && len(line)+1+len(word) > width {
+			b.WriteString(line + "\n")
+			line, empty = strings.Repeat(" ", indent), true
+		}
+		if !empty {
+			line += " "
+		}
+		line, empty = line+word, false
+	}
+	b.WriteString(line + "\n")
+	return b.String()
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -456,7 +462,7 @@ func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
 	fset := flag.NewFlagSet(name, flag.ContinueOnError)
-	agent := fset.String("agent", defaultAgent, "agent `NAME`: opencode or pi")
+	agentName := fset.String("agent", agent.Default, "agent `NAME`: "+strings.Join(agent.Names(), ", "))
 	gw := fset.String("gateway", envOr("KOTA_GATEWAY", defaultGateway), "model gateway URL")
 	model := fset.String("model", "", "model `ID` to start with")
 	var ro stringList
@@ -483,7 +489,7 @@ func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) 
 		args = fset.Args()[1:]
 	}
 
-	sa := sessionArgs{agent: *agent, gatewayURL: *gw, model: *model, dir: ".", ro: ro, command: command}
+	sa := sessionArgs{agent: *agentName, gatewayURL: *gw, model: *model, dir: ".", ro: ro, command: command}
 	switch len(dirs) {
 	case 0:
 	case 1:

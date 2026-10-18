@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"kota/internal/agent"
 	"kota/internal/engine"
 	"kota/internal/hostdata"
 	"kota/internal/prepgate"
@@ -279,7 +280,7 @@ func TestCleanNoHistoryCopies(t *testing.T) {
 func TestCleanRefusesActiveProject(t *testing.T) {
 	project := fakeHome(t, map[string]string{"README.md": "test"})
 	log := fakeVolumeDocker(t, nil)
-	lease, err := lockProject(sessionArgs{dir: project, agent: defaultAgent}, "run")
+	lease, err := lockProject(sessionArgs{dir: project, agent: agent.Default}, "run")
 	if err != nil {
 		t.Fatal(err)
 	}

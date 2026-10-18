@@ -61,12 +61,15 @@ func checkBinding(v any) error {
 // pi has no permission system: it edits files and runs commands without
 // asking, so the sandbox is its only boundary.
 var pi = adapter{
-	name:      "pi",
-	asks:      false,
-	configs:   []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piAgentDir + "/" + piKeybindings},
-	scratch:   []string{piAgentDir},
-	overrides: []override.File{piSettingsOverride, piKeybindingsOverride},
-	notePath:  piAgentDir + "/" + piAppendSystem,
+	name:    "pi",
+	asks:    false,
+	configs: []string{piAgentDir + "/settings.json", piAgentDir + "/models.json", piAgentDir + "/" + piKeybindings},
+	scratch: []string{piAgentDir},
+	overrides: []overrideFile{
+		{File: piSettingsOverride, over: "pi's bundled settings"},
+		{File: piKeybindingsOverride, over: "pi's default keybindings", anyKey: "rebind any of pi's actions to a key or a list of keys"},
+	},
+	notePath: piAgentDir + "/" + piAppendSystem,
 	facts: []string{"After you commit a finished ticket and mark it done, call the ticket_done tool with the ticket and the commit. " +
 		"It clears your context, so the next ticket starts fresh; your state is in the tickets and git history."},
 	extensions: piAgentDir + "/extensions",

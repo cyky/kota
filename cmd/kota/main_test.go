@@ -167,6 +167,31 @@ func TestAgentMountsProbedReadOnly(t *testing.T) {
 	}
 }
 
+// TestUsageFromAgentModule checks the usage text carries the agent
+// module's help, wrapped, and no line is wider than 79 columns.
+func TestUsageFromAgentModule(t *testing.T) {
+	flat := strings.Join(strings.Fields(usage), " ")
+	for _, help := range []string{agent.AgentHelp(), agent.AutoHelp(), agent.OverrideHelp()} {
+		if !strings.Contains(flat, strings.Join(strings.Fields(help), " ")) {
+			t.Errorf("usage lacks %q", help)
+		}
+	}
+	for _, line := range strings.Split(usage, "\n") {
+		// The gateway default is one unbreakable line.
+		if len(line) > 79 && !strings.Contains(line, defaultGateway) {
+			t.Errorf("line too long (%d): %q", len(line), line)
+		}
+	}
+}
+
+func TestWrap(t *testing.T) {
+	got := wrap("  -f  ", 6, 20, "one two three four five six")
+	want := "  -f  one two three\n      four five six\n"
+	if got != want {
+		t.Errorf("wrap = %q, want %q", got, want)
+	}
+}
+
 // TestOverrideSource checks the "agent override:" line.
 func TestOverrideSource(t *testing.T) {
 	if got := overrideSource(nil); got != "none (bundled config)" {
@@ -194,7 +219,7 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sess, err := prepareTestSession(sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
+	sess, err := prepareTestSession(sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project}, sandbox.ModeRun)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +409,7 @@ func TestBrokenManifestSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}
+	sa := sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project}
 	paths, err := resolveSessionPaths(sa)
 	if err != nil {
 		t.Fatal(err)
@@ -789,7 +814,7 @@ func TestParseSessionArgs(t *testing.T) {
 			continue
 		}
 		if c.agent == "" {
-			c.agent = defaultAgent
+			c.agent = agent.Default
 		}
 		if sa.agent != c.agent || sa.dir != c.dir || sa.model != c.model || !slices.Equal(sa.ro, c.ro) || !slices.Equal(sa.command, c.command) {
 			t.Errorf("%q: got agent=%q dir=%q model=%q ro=%q command=%q", c.args, sa.agent, sa.dir, sa.model, sa.ro, sa.command)
@@ -975,7 +1000,7 @@ func TestShellRejectsRunOnlyOptions(t *testing.T) {
 
 func TestCommandsRefuseBusyProjectBeforePreparation(t *testing.T) {
 	project := fakeHome(t, map[string]string{"package.json": "{}"})
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: project}
+	sa := sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project}
 	lease, err := lockProject(sa, "run")
 	if err != nil {
 		t.Fatal(err)
@@ -1095,7 +1120,7 @@ func TestLockedSessionKeepsResolvedPaths(t *testing.T) {
 	if err := os.Symlink(refA, refAlias); err != nil {
 		t.Fatal(err)
 	}
-	sa := sessionArgs{agent: defaultAgent, gatewayURL: defaultGateway, dir: alias, ro: []string{refAlias}}
+	sa := sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: alias, ro: []string{refAlias}}
 	lease, err := lockProject(sa, "run")
 	if err != nil {
 		t.Fatal(err)
