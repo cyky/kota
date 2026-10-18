@@ -30,7 +30,7 @@ kota run --agent pi [dir] -- pi -c # continue the project's last pi session
 kota shell [dir]                   # interactive Bash in the same offline sandbox
 kota shell --ro ../specs [dir]     # shell with a read-only reference mount
 kota run --no-engine [dir]         # without the project's Engine VM (also for shell)
-kota run --no-history [dir]        # on a copy of the last commit, without git history (also for shell)
+kota run --no-history [dir]        # on a copy that keeps only the last commit (also for shell)
 kota check [dir]                   # show mounts, the Engine VM and run the containment probes
 kota clean [dir]                   # remove project state/dependency volumes and engine data after confirmation
 kota clean --shared-caches [dir]   # also reset shared caches; requires all sessions idle
@@ -151,7 +151,7 @@ Secrets are masked: inside the sandbox they read as an empty file or directory a
 
 - Masks are computed at launch. A secret created on the host during a session isn't masked until the next one.
 - Dependency and build directories (`node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`, ...) aren't searched, to keep launch fast.
-- Masks don't reach git. A secret that is tracked, or was ever committed, can be read from `.git` inside the sandbox (`git log -p -- .env`), and a commit made there would record a tracked one emptied. `run`, `shell`, `check` and `prep` warn about masked files that are tracked now, but history isn't checked. A commit that empties one is reported after the session (see below). To fix it, remove the file from the index (`git rm --cached`) and from history (for example with `git filter-repo`), and rotate the secret, since earlier clones and pushes still have it. To keep the history out of a session, use `--no-history` (see [Sessions without git history](#sessions-without-git-history)).
+- Masks don't reach git. A secret that is tracked, or was ever committed, can be read from `.git` inside the sandbox (`git log -p -- .env`), and a commit made there would record a tracked one emptied. `run`, `shell`, `check` and `prep` warn about masked files that are tracked now, but history isn't checked. A commit that empties one is reported after the session (see below). To fix it, remove the file from the index (`git rm --cached`) and from history (for example with `git filter-repo`), and rotate the secret, since earlier clones and pushes still have it. To keep the older history out of a session, use `--no-history` (see [Sessions without git history](#sessions-without-git-history)); it keeps the last commit, so a masked file that is tracked now is still readable there.
 - `--ro` paths aren't masked.
 
 Other files that run things can't be locked without breaking normal work, so `run` reports them instead. It records them before the session and, when it ends, lists any that were added, modified or deleted. The list covers, at any depth, `package.json`, `go.mod`, `Makefile`, `*.nix`, `flake.lock`, `.envrc`, mise's `mise.toml`, `.mise.toml`, `mise.local.toml` and `.tool-versions`, `.gitattributes`, `.gitmodules`, `build.rs`, `justfile` and `Justfile`, `Taskfile.yml`, `.pre-commit-config.yaml`, and the `.cargo/` and `.idea/` directories. It also covers the `.github/workflows/`, `.vscode/`, `.devcontainer/`, `.husky/` and `.githooks/` directories (`changereport.Watched`). Content is compared by hash, so restoring a timestamp doesn't hide an edit. Permission changes and symlink targets count too. Under each file the report says what changed, or how to see it:
@@ -188,6 +188,10 @@ None of this changes kota's exit status, and kota never amends, reverts or block
 
 Inside a normal session the agent can read the project's whole git history, including a secret that was committed once and is masked or deleted now. `kota run --no-history [dir]` (or `shell --no-history`) runs the session on a copy of the project's last commit instead: a working git repository with that one commit, and no older commits, remotes, git config, hooks or reflog of the original. The project must be the top of a git repository with at least one commit.
 
+The last commit is kept as it is. `git log` in the copy shows it with its hash, message, author, email and date, and every file in it is readable through git, masked or not: masks only hide files on disk, so `git show HEAD:old/config.py` reads a masked file that is tracked. `--no-history` hides older commits, not the current one. To keep a path and its history away from the agent, it must not be in the last commit.
+
+In a monorepo, you can instead point kota at the subdirectory you work in (`kota run ~/Projects/mono/new-app`). Only that directory is mounted, and the repository's `.git` is above it, so the agent gets no git history at all, and nothing outside the directory. Without `.git` the agent can't commit: its work stays as uncommitted changes in your working tree, for you to review and commit. Code the project needs from elsewhere in the monorepo, such as shared libraries or a root workspace file, isn't there either.
+
 The copy is made by `git clone --depth 1` in a throwaway container of the base image, offline, with the project mounted read-only, so git never runs on the host against the project. It lives in `copies/` in kota's data dir (`~/Library/Caches/kota/copies/<project>-<YYYY-MM-DDTHHMMSS>` on macOS) and must pass the same path rules as a project, with that directory as its allowed root. The session runs on the copy with the usual masks, protections, probes and Engine VM.
 
 The copy holds only what is committed. Before it is made, kota lists what won't be in it, and asks you to type `y`:
@@ -199,7 +203,7 @@ Ignored files (`.env`, local overrides) aren't listed, and aren't in the copy ei
 
 Everything else belongs to the original project: `.kotaignore`, `kota.yaml` and `kota.Dockerfile` are taken from it, even when they aren't committed, so an untracked `.kotaignore` still masks a tracked secret in the copy. They are read-only in the copy, as in a normal session. `prep` runs on the original as usual, and the session uses its dependency volumes, prep record, project image and Engine VM, and its git identity. Only the agent's state is separate (see above), so transcripts from normal sessions, which may hold `git log -p` output, don't reach the copy. The project's lease is held for the whole session.
 
-What the copy doesn't hide: the last commit itself, so a secret that is tracked now is still readable through git (kota warns about tracked masked files as usual), and anything the agent learned in an earlier normal session and wrote into the project.
+What the copy doesn't hide: the last commit itself, as above (kota warns about tracked masked files as usual), and anything the agent learned in an earlier normal session and wrote into the project.
 
 After the session, the commits on the copy's `HEAD` are brought back into the project as a branch, `kota/<agent>-<YYYY-MM-DDTHHMMSS>` (`kota/shell-...` after `shell`), named after the session's start. It is never checked out or merged: your working tree and current branch stay as they were, and you review and merge the branch yourself. Only `HEAD` comes back. Other branches and tags made in the copy are listed as not brought back.
 

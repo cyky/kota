@@ -111,9 +111,11 @@ flags:
   --unsafe-skip-check   run only: start without the containment probes
   --no-engine           run and shell: start without the project's Engine VM;
                         the agent is told tests needing containers can't run
-  --no-history          run and shell: run on a copy of the last commit, with
-                        no older git history, remotes or git config; its new
-                        commits come back as the branch kota/<agent>-<time>
+  --no-history          run and shell: run on a copy that keeps only the last
+                        commit (its files, message, author and date), with no
+                        older commits, remotes or git config; masked files are
+                        still readable from that commit; its new commits come
+                        back as the branch kota/<agent>-<time>
   --shared-caches       clean only: also reset shared caches; all sessions
                         must be idle
 
@@ -957,7 +959,7 @@ func parseOfflineArgs(name string, args []string, register func(*flag.FlagSet)) 
 	var noEngine, noHistory bool
 	sa, err := parseSessionArgs(name, args, func(f *flag.FlagSet) {
 		f.BoolVar(&noEngine, "no-engine", false, "start without the project's Engine VM")
-		f.BoolVar(&noHistory, "no-history", false, "run on a copy of the last commit, without the git history")
+		f.BoolVar(&noHistory, "no-history", false, "run on a copy that keeps only the last commit, without older history")
 		if register != nil {
 			register(f)
 		}
@@ -1298,7 +1300,7 @@ func makeNoHistoryCopy(project string, start time.Time) (string, error) {
 		os.RemoveAll(dest)
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "no-history: the session runs on a copy of the last commit, without git history, at %s\n", copied)
+	fmt.Fprintf(os.Stderr, "no-history: the session runs on a copy that keeps only the last commit, its message, author and date included, at %s\n", copied)
 	return copied, nil
 }
 
