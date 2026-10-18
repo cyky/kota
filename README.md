@@ -88,6 +88,27 @@ pi alone is also told to call `ticket_done` after it commits a finished ticket (
 
 `kota instructions` prints parts 1 and 2 as they are in effect to stdout, and says on stderr whether they are the `built-in default` or `override: <path>`. `kota instructions > ~/.config/kota/instructions.md` gives you a starting point. `check` shows the source too.
 
+### Your own agent settings
+
+Keybindings, theme and similar preferences can be set per user, for every session in every project, with an agent override: a file under `$XDG_CONFIG_HOME/kota/` (`~/.config/kota/` by default) in the agent's own format. Without one, the bundled config is used as is. An override is read on the host when the session starts, merged over the bundled config (objects key by key, other values replaced), and never mounted, so the agent can't change it. Only the keys listed below are allowed. Anything else, invalid JSON, a file that isn't a regular file or one over 64 KiB stops `run`, `shell` and `check` with the file and key. `$schema` is always accepted and dropped. `run` and `check` print `agent override:` with the files in use, or `none (bundled config)`.
+
+| File | Agent setting | Allowed keys |
+|---|---|---|
+| `opencode/cli.json` | opencode v2's terminal preferences (`~/.config/opencode/cli.json`) | `keybinds`, `leader`, `theme`, `animations`, `cursor`, `mouse`, `scroll`, `prompt`, `session`, `tabs`, `diffs`, `terminal`, `mini`, `highlights` |
+
+For example, to move opencode's session delete off `ctrl+d`:
+
+```json
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "keybinds": {
+    "session.delete": "ctrl+shift+d"
+  }
+}
+```
+
+The rendered settings reach opencode through `OPENCODE_CLI_CONFIG_CONTENT`, which opencode merges over its global `cli.json` and keeps authoritative. opencode has no project-level `cli.json`, so the project can't change them. Settings you change in the TUI go to the session's `~/.config/opencode/cli.json` on its tmpfs and are lost after the session; put lasting ones in the override. `plugins` (loads code), `attention` (takes sound file paths; notifications can't leave the sandbox), `debug` and `experimental` are refused.
+
 ### Clearing pi's context between tickets
 
 pi has a `ticket_done` tool (pi only; opencode relies on its own `/compact`). The agent calls it with the ticket and the commit once a ticket is done and committed. When that turn ends, the conversation is replaced by a short fixed note: the ticket is done in that commit, the agent's state is in the tickets and git history, so re-read `AGENTS.md` and the tracker, take the next ticket, and keep working unattended if you asked for that. None of the earlier conversation is kept, and the model writes no summary. pi then carries on with the next ticket in the same session. In the interactive UI the clear shows as a compaction, and the full transcript stays in the state volume.

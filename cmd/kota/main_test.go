@@ -56,7 +56,7 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 		{
 			agent:   opencode.Agent,
 			configs: []string{opencodeConfigPath},
-			env:     map[string]string{"OPENCODE_DISABLE_PROJECT_CONFIG": "1"},
+			env:     map[string]string{"OPENCODE_DISABLE_PROJECT_CONFIG": "1", opencode.CLIEnv: "{}"},
 			command: []string{"opencode"},
 		},
 		{
@@ -558,6 +558,114 @@ func TestInstructionsOverrideRefused(t *testing.T) {
 	if entries, _ := os.ReadDir(filepath.Join(cache, "kota", "sessions")); len(entries) > 0 {
 		t.Errorf("session dir left: %v", entries)
 	}
+}
+
+// writeOverride writes an Agent override named name under the fake HOME's
+// ~/.config/kota, and returns its path.
+func writeOverride(t *testing.T, name, content string) string {
+	t.Helper()
+	file := filepath.Join(os.Getenv("HOME"), ".config", "kota", filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// cliConfig returns the CLI config sess passes opencode inline.
+func cliConfig(t *testing.T, sess *session) map[string]any {
+	t.Helper()
+	content, ok := sess.spec.Services[sandbox.AgentService].Environment[opencode.CLIEnv]
+	if !ok {
+		t.Fatalf("%s not set", opencode.CLIEnv)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(content), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// TestAgentOverrideCLI checks opencode gets the bundled cli.json without an
+// override, and the override's keybinds merged in with one.
+func TestAgentOverrideCLI(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	sa, err := parseOfflineArgs("run", []string{project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := prepareTestSession(sa, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg := cliConfig(t, sess); len(cfg) != 0 || len(sess.overrideFiles) != 0 {
+		t.Errorf("without an override: cli config = %v, files %v", cfg, sess.overrideFiles)
+	}
+	if got := overrideSource(sess.overrideFiles); got != "none (bundled config)" {
+		t.Errorf("source = %q", got)
+	}
+	sess.cleanup()
+
+	file := writeOverride(t, "opencode/cli.json", `{"$schema": "https://opencode.ai/v2/cli.json", "keybinds": {"session.delete": "ctrl+backspace"}}`)
+	sess, err = prepareTestSession(sa, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.cleanup()
+	cfg := cliConfig(t, sess)
+	keys, _ := cfg["keybinds"].(map[string]any)
+	if keys["session.delete"] != "ctrl+backspace" || cfg["$schema"] != nil {
+		t.Errorf("cli config = %v, want the override's keybind without $schema", cfg)
+	}
+	if !slices.Equal(sess.overrideFiles, []string{file}) || overrideSource(sess.overrideFiles) != file {
+		t.Errorf("override files = %v", sess.overrideFiles)
+	}
+
+	// pi doesn't read opencode's override.
+	sa.agent = pi.Agent
+	piSess, err := prepareTestSession(sa, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer piSess.cleanup()
+	if len(piSess.overrideFiles) != 0 {
+		t.Errorf("pi override files = %v", piSess.overrideFiles)
+	}
+}
+
+// TestAgentOverrideRefused checks an override with a key that isn't
+// allowed stops startup with its path and the key, before anything is
+// created; prep, which runs no agent, isn't affected.
+func TestAgentOverrideRefused(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	file := writeOverride(t, "opencode/cli.json", `{"plugins": [{"package": "./evil.ts"}]}`)
+	for _, cmd := range []string{"run", "shell"} {
+		sa, err := parseOfflineArgs(cmd, []string{project}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sa.shell = cmd == "shell"
+		_, err = prepareTestSession(sa, sandbox.ModeRun)
+		if err == nil || !strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), `"plugins"`) {
+			t.Errorf("%s: err = %v, want it to name %s and the key", cmd, err, file)
+		}
+	}
+	cache, _ := os.UserCacheDir()
+	if entries, _ := os.ReadDir(filepath.Join(cache, "kota", "sessions")); len(entries) > 0 {
+		t.Errorf("session dir left: %v", entries)
+	}
+	sess, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep)
+	if err != nil {
+		t.Fatalf("prep: %v", err)
+	}
+	sess.cleanup()
 }
 
 // TestReportChangesDetails replays the issue 17 trial run: the session adds

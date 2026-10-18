@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"kota/internal/models"
+	"kota/internal/override"
 )
 
 // Agent is the agent name, used for its state volume and config directory.
@@ -16,6 +17,32 @@ const ProviderID = "kota"
 
 // BaseConfig is the path of the base config in assets.Agents.
 const BaseConfig = "agents/opencode/opencode.json"
+
+// BaseCLI is the path of the base CLI config in assets.Agents: opencode
+// v2's terminal preferences (keybinds, theme), kept apart from
+// opencode.json.
+const BaseCLI = "agents/opencode/cli.json"
+
+// CLIEnv carries the rendered CLI config. opencode merges it over its
+// global cli.json, which it writes itself when settings change in the
+// TUI, and keeps it authoritative while set. opencode has no project-level
+// CLI config.
+const CLIEnv = "OPENCODE_CLI_CONFIG_CONTENT"
+
+// CLIOverride is the user's Agent override of cli.json. Its settings only
+// change how the terminal UI looks and which keys do what.
+var CLIOverride = override.File{
+	Name: "opencode/cli.json",
+	Policy: override.Policy{
+		Allowed: []string{"keybinds", "leader", "theme", "animations", "cursor", "mouse", "scroll", "prompt", "session", "tabs", "diffs", "terminal", "mini", "highlights"},
+		Refused: map[string]string{
+			"plugins":      "loads code",
+			"attention":    "its sounds take file paths, and notifications can't leave the sandbox",
+			"debug":        "diagnostics, not a preference",
+			"experimental": "unreviewed features",
+		},
+	},
+}
 
 // autoAllowed are the permissions Auto switches from ask to allow.
 var autoAllowed = []string{"edit", "bash"}
@@ -79,6 +106,17 @@ func Render(base []byte, s Settings) ([]byte, error) {
 		},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// RenderCLI returns the CLI config for a session, for CLIEnv: base with
+// the user's override, from CLIOverride, merged on top. over may be nil.
+func RenderCLI(base []byte, over map[string]any) (string, error) {
+	cfg := map[string]any{}
+	if err := json.Unmarshal(base, &cfg); err != nil {
+		return "", fmt.Errorf("base opencode cli config: %w", err)
+	}
+	data, err := json.Marshal(override.Merge(cfg, over))
+	return string(data), err
 }
 
 // Env returns environment variables that keep opencode offline-friendly and

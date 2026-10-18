@@ -141,6 +141,50 @@ func TestEnvIgnoresProjectConfig(t *testing.T) {
 	}
 }
 
+func TestRenderCLI(t *testing.T) {
+	b := []byte(`{"keybinds": {"leader": "ctrl+x", "session.delete": "ctrl+d"}, "theme": {"name": "system"}}`)
+	over := map[string]any{"keybinds": map[string]any{"session.delete": "ctrl+backspace"}}
+	content, err := RenderCLI(b, over)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(content), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	keys := cfg["keybinds"].(map[string]any)
+	if keys["session.delete"] != "ctrl+backspace" || keys["leader"] != "ctrl+x" || cfg["theme"].(map[string]any)["name"] != "system" {
+		t.Errorf("cli config = %v", cfg)
+	}
+
+	bundled, err := assets.Agents.ReadFile(BaseCLI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RenderCLI(bundled, nil); err != nil {
+		t.Errorf("bundled cli.json without an override: %v", err)
+	}
+	if _, err := RenderCLI([]byte("{"), nil); err == nil {
+		t.Error("no error for invalid base")
+	}
+}
+
+func TestCLIOverridePolicy(t *testing.T) {
+	if CLIOverride.Name != "opencode/cli.json" {
+		t.Errorf("name = %q", CLIOverride.Name)
+	}
+	for _, k := range []string{"keybinds", "leader", "theme", "scroll", "cursor", "mouse"} {
+		if !slices.Contains(CLIOverride.Policy.Allowed, k) {
+			t.Errorf("%s not allowed", k)
+		}
+	}
+	for _, k := range []string{"plugins", "attention", "debug", "experimental"} {
+		if slices.Contains(CLIOverride.Policy.Allowed, k) || CLIOverride.Policy.Refused[k] == "" {
+			t.Errorf("%s not refused with a reason", k)
+		}
+	}
+}
+
 func TestRenderPermissions(t *testing.T) {
 	cases := []struct {
 		name string

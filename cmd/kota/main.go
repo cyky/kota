@@ -39,6 +39,7 @@ import (
 	"kota/internal/models"
 	"kota/internal/nohistory"
 	"kota/internal/opencode"
+	"kota/internal/override"
 	"kota/internal/pathpolicy"
 	"kota/internal/pi"
 	"kota/internal/prepgate"
@@ -119,6 +120,10 @@ flags:
 dir must be inside the allowed root ($KOTA_ALLOWED_ROOT, default ~/Projects).
 $XDG_CONFIG_HOME/kota/instructions.md (default ~/.config/kota/instructions.md),
 when present, replaces the built-in working style for every project.
+$XDG_CONFIG_HOME/kota/opencode/cli.json, when present, is merged over
+opencode's bundled terminal settings in every session; it may set keybinds,
+leader, theme, animations, cursor, mouse, scroll, prompt, session, tabs,
+diffs, terminal, mini and highlights.
 A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
 the file named by $KOTA_GATEWAY_KEY_FILE.
 `
@@ -299,9 +304,16 @@ type agentSetup struct {
 	scratch []string
 	env     map[string]string
 	command []string
+	// overrides are the Agent override files the agent reads, loaded on
+	// the host before the session starts.
+	overrides []override.File
+	// overrideEnv, when set, returns environment variables carrying the
+	// loaded overrides, for an agent that takes its config inline.
+	overrideEnv func(ov map[string]map[string]any) (map[string]string, error)
 	// render returns the content of each of configs, in order. keyEnv,
-	// when set, names the variable holding the gateway key.
-	render func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error)
+	// when set, names the variable holding the gateway key. ov holds the
+	// loaded overrides by override.File.Name, without those not found.
+	render func(c models.Catalog, auto bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error)
 	// notePath is where the agent reads kota's instructions, mounted
 	// read-only, with noteScratch around it.
 	notePath    string
@@ -327,7 +339,18 @@ func agentFor(name string) (agentSetup, error) {
 			noteScratch: []string{path.Dir(opencodeConfigDir), opencodeConfigDir},
 			env:         opencode.Env(opencodeConfigPath),
 			command:     []string{"opencode"},
-			render: func(c models.Catalog, auto bool, keyEnv string) ([][]byte, error) {
+			overrides:   []override.File{opencode.CLIOverride},
+			// opencode writes cli.json when settings change in the TUI, so
+			// the CLI config goes inline instead of in a read-only file.
+			overrideEnv: func(ov map[string]map[string]any) (map[string]string, error) {
+				base, err := assets.Agents.ReadFile(opencode.BaseCLI)
+				if err != nil {
+					return nil, err
+				}
+				content, err := opencode.RenderCLI(base, ov[opencode.CLIOverride.Name])
+				return map[string]string{opencode.CLIEnv: content}, err
+			},
+			render: func(c models.Catalog, auto bool, keyEnv string, _ map[string]map[string]any) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(opencode.BaseConfig)
 				if err != nil {
 					return nil, err
@@ -353,7 +376,7 @@ func agentFor(name string) (agentSetup, error) {
 			extensions: piAgentDir + "/extensions",
 			env:        pi.Env(piAgentDir, piSessionDir),
 			command:    []string{"pi"},
-			render: func(c models.Catalog, _ bool, keyEnv string) ([][]byte, error) {
+			render: func(c models.Catalog, _ bool, keyEnv string, _ map[string]map[string]any) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(pi.BaseSettings)
 				if err != nil {
 					return nil, err
@@ -418,6 +441,10 @@ type session struct {
 	// style is the working style the agent's note starts with; unset for
 	// prep.
 	style instructions.Style
+	// overrides are the agent's loaded Agent overrides, for render, and
+	// overrideFiles their host paths, for the user; both unset for prep.
+	overrides     map[string]map[string]any
+	overrideFiles []string
 }
 
 // loadStyle reads the user's working style override, or returns the
@@ -432,6 +459,38 @@ func loadStyle() (instructions.Style, error) {
 		return instructions.Style{}, err
 	}
 	return instructions.Load(instructions.OverridePath(os.Getenv, home), builtin)
+}
+
+// loadOverrides reads the user's Agent overrides of files, returning those
+// found by name and their paths, in files' order.
+func loadOverrides(files []override.File) (map[string]map[string]any, []string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, nil, err
+	}
+	config := instructions.ConfigHome(os.Getenv, home)
+	loaded := map[string]map[string]any{}
+	var found []string
+	for _, f := range files {
+		file := override.Path(config, f.Name)
+		over, ok, err := override.Load(file, f.Policy)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ok {
+			loaded[f.Name] = over
+			found = append(found, file)
+		}
+	}
+	return loaded, found, nil
+}
+
+// overrideSource says which Agent override files the session uses.
+func overrideSource(files []string) string {
+	if len(files) == 0 {
+		return "none (bundled config)"
+	}
+	return strings.Join(files, ", ")
 }
 
 // engineNote is the agent's instruction about the Engine VM: none for a
@@ -638,12 +697,17 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	prep := mode == sandbox.ModePrep
 	var agent agentSetup
 	var style instructions.Style
+	var overrides map[string]map[string]any
+	var overrideFiles []string
 	var err error
 	if !prep {
 		if agent, err = agentFor(sa.agent); err != nil {
 			return nil, err
 		}
 		if style, err = loadStyle(); err != nil {
+			return nil, err
+		}
+		if overrides, overrideFiles, err = loadOverrides(agent.overrides); err != nil {
 			return nil, err
 		}
 	}
@@ -702,7 +766,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		return nil, err
 	}
 
-	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: agent, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image, style: style}
+	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: agent, gatewayKey: apiKey, cfgFiles: cfgFiles, deps: depPlan, image: image, style: style, overrides: overrides, overrideFiles: overrideFiles}
 	var engineRoute *sandbox.EngineRoute
 	if !prep {
 		opts, err := engineOptions()
@@ -778,6 +842,14 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 
 	env := map[string]string{}
 	maps.Copy(env, agent.env)
+	if agent.overrideEnv != nil {
+		ovEnv, err := agent.overrideEnv(overrides)
+		if err != nil {
+			os.RemoveAll(sessionDir)
+			return nil, err
+		}
+		maps.Copy(env, ovEnv)
+	}
 	maps.Copy(env, gitEnv(key))
 	command := sa.command
 	if len(command) == 0 {
@@ -1259,6 +1331,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 			fmt.Fprintln(os.Stderr, "starting an interactive Bash shell (no agent)")
 		} else {
 			fmt.Fprintln(os.Stderr, "approval:", sess.agent.approval(auto))
+			fmt.Fprintln(os.Stderr, "agent override:", overrideSource(sess.overrideFiles))
 		}
 		if skipCheck {
 			fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
@@ -1505,6 +1578,7 @@ func cmdCheck(args []string) error {
 	printMounts(os.Stdout, sess.spec)
 	printMasks(os.Stdout, sess.layout)
 	fmt.Fprintf(os.Stdout, "instructions: %s ('kota instructions' prints them)\n", sess.style.Source)
+	fmt.Fprintln(os.Stdout, "agent override:", overrideSource(sess.overrideFiles))
 	sess.printWarnings(os.Stdout)
 	engineErr := printEngine(os.Stdout, sess)
 
@@ -2032,7 +2106,7 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 	if s.gatewayKey != "" {
 		keyEnv = sandbox.GatewayKeyEnv
 	}
-	contents, err := s.agent.render(catalog, auto, keyEnv)
+	contents, err := s.agent.render(catalog, auto, keyEnv, s.overrides)
 	if err != nil {
 		return models.Catalog{}, err
 	}
