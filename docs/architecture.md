@@ -1,6 +1,6 @@
 # Architecture
 
-How kota is put together, as diagrams. The pages linked from the README describe each behaviour in detail; terms are as in `CONTEXT.md`, and the Engine VM decision is in `docs/adr/0001-engine-vm-for-agent-containers.md`.
+How kota is put together, as diagrams. The pages linked from the README describe each behaviour in detail; terms are as in `CONTEXT.md`, and the Engine VM decision is in [ADR 0001](adr/0001-engine-vm-for-agent-containers.md).
 
 ## Runtime view
 
@@ -71,12 +71,13 @@ flowchart LR
 ```mermaid
 flowchart TD
     start(["kota run / shell"]) --> lease["Take the project lease<br/>(stop orphaned containers and Engine VM)"]
-    lease --> validate["Validate agent, models.yaml,<br/>dependency plan"]
-    validate --> auto{"run, full auto,<br/>uncommitted changes?"}
-    auto -- "yes" --> ask["List changes, ask for y"]
+    lease --> validate["Validate agent, models.yaml,<br/>dependency plan, instructions,<br/>agent overrides"]
+    validate --> auto{"--no-history, or full auto<br/>with uncommitted changes?"}
+    auto -- "yes" --> ask["List what won't be in the copy,<br/>or the changes; ask for y"]
     ask -- "no" --> abort(["abort"])
-    ask -- "y" --> prepare
-    auto -- "no" --> prepare["Prepare the session:<br/>mask plan and protections,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
+    ask -- "y" --> copy
+    auto -- "no" --> copy["With --no-history: clone HEAD<br/>into a copy, offline"]
+    copy --> prepare["Prepare the session:<br/>mask plan and protections,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
     prepare --> snap["Snapshot watched files"]
     snap --> vmstart["Start the Engine VM<br/>(boots while the sandbox starts)"]
     vmstart --> compose["docker compose up:<br/>forwarders + sandbox"]
@@ -87,8 +88,9 @@ flowchart TD
     probes -- "all passed" --> agent["Agent or Bash runs<br/>in /workspace"]
     agent --> teardown["Teardown: containers, Engine VM,<br/>placeholders, session dir"]
     refuse --> teardown
-    teardown --> report["Report changed files<br/>that run things"]
-    report --> release(["release the lease"])
+    teardown --> report["Report changed files<br/>that run things, and commits"]
+    report --> back["With --no-history: bring HEAD back<br/>as a branch, remove the copy"]
+    back --> release(["release the lease"])
 ```
 
 The order from "Start the Engine VM" to the probes, and the teardown on any failure or signal, is in `internal/lifecycle`, shared by `run`, `shell` and `check`. Without an `engine:` section the Engine VM steps are skipped. With `--no-engine` they're skipped too, and the agent is told its container **Gates** can't run. Ctrl-C at any step leads to the same teardown.
@@ -108,7 +110,7 @@ flowchart TD
     vols --> fetch["Fetch phase: caches writable,<br/>no project code runs"]
     fetch --> eimg["Download new or moved Engine images<br/>by digest, into the archive cache"]
     eimg --> install["Install phase: caches read-only,<br/>lifecycle scripts and prep.command run"]
-    install --> report["Report changed files<br/>that run things"]
+    install --> report["Report changed files<br/>that run things, and commits"]
     report --> record(["Save the prep record"])
 ```
 
@@ -134,6 +136,8 @@ flowchart TD
         opencode["opencode"]
         pi["pi"]
         gatewaykey["gatewaykey"]
+        instructions["instructions<br/>what the agent is told"]
+        override["override<br/>agent overrides"]
     end
 
     subgraph verify["Verification and reports"]
@@ -162,8 +166,8 @@ flowchart TD
     main --> policy & spec & verify & eng & runtime
     mask --> deps & projectimage & sandbox
     pathpolicy --> sandbox
-    nohistory --> approval & mask & deps & projectimage
-    opencode & pi --> models
+    nohistory --> approval & mask & deps & projectimage & changereport & hostdata
+    opencode & pi --> models & override
     check --> docker & probe & sandbox
     probe --> sandbox
     prepgate --> changereport & deps
