@@ -1,7 +1,9 @@
-# 35 — Agent override for opencode's tui.json
+# DONE — 35 — Agent override for opencode's terminal settings (cli.json)
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
+
+Resolved in: 9e26661
 
 ## Parent
 
@@ -9,35 +11,33 @@ Category: enhancement
 
 ## What to build
 
-The first **Agent override**, and the mechanism the others reuse. A user who puts a `tui.json` in `$XDG_CONFIG_HOME/kota/opencode/` (default `~/.config/kota/opencode/tui.json`) gets its allowed settings in every opencode **Session**, in every project. The motivating case: opencode binds `session_delete` to `ctrl+d`, which Raycast takes globally, so sessions can't be deleted. With `{"keybinds": {"session_delete": "ctrl+backspace"}}` in the override, they can.
+The first **Agent override**, and the mechanism the others reuse. A user who puts a `cli.json` in `$XDG_CONFIG_HOME/kota/opencode/` (default `~/.config/kota/opencode/cli.json`) gets its allowed settings in every opencode **Session**, in every project. The motivating case: opencode binds `session.delete` to `ctrl+d`, which Raycast takes globally, so sessions can't be deleted. With `{"keybinds": {"session.delete": "ctrl+shift+d"}}` in the override, they can.
 
-Today opencode in the **Sandbox** gets no `tui.json` at all: `~/.config/opencode` is on the session's tmpfs, and the project's opencode config is ignored.
+(First written for `tui.json`. opencode 2.0.25, the pinned version, reads its terminal preferences from `cli.json` instead and only migrates an old `tui.json` into it; see Comments.)
 
 Behaviour:
-- kota ships a bundled `tui.json` (it may be empty) and renders the session's `tui.json` from it: the bundled base, with the override's allowed keys merged on top. Objects merge key by key, so `keybinds` keeps every default the user doesn't name; lists and scalars replace the base value.
-- The rendered file is mounted read-only in the **Sandbox**, like `opencode.json`, and opencode is pointed at it with `OPENCODE_TUI_CONFIG`.
-- Without an override file, the bundled `tui.json` is used as is.
-- Allowed keys: `keybinds`, `theme`, `leader_timeout`, `scroll_speed`, `scroll_acceleration`, `diff_style`, `cursor`, `mouse`. `$schema` is always allowed and dropped before merging. Everything else is refused, notably `attention` (its sound settings take file paths, and desktop notifications can't leave the container).
-- A refused key, invalid JSON, a path that isn't a regular file or a file over a size cap makes the **Session** refuse to start, with an error naming the file and the key, why it's refused if known, and the allowed keys. Follow how the instructions override (`internal/instructions`) refuses.
-- `kota run` prints which **Agent override** files are in use, next to the approval line, for example `agent override: ~/.config/kota/opencode/tui.json`, or `agent override: none (bundled config)`. `shell` and `prep` don't.
+- kota ships a bundled `cli.json` (empty for now) and renders the session's CLI config from it: the bundled base, with the override's allowed keys merged on top. Objects merge key by key, so `keybinds` keeps every default the user doesn't name; lists and scalars replace the base value.
+- The rendered config reaches opencode in `OPENCODE_CLI_CONFIG_CONTENT`, which opencode merges over its global `cli.json` and keeps authoritative while set. It isn't a read-only file, because opencode writes `cli.json` itself when settings change in the TUI.
+- Without an override file, the bundled config is used as is.
+- Allowed keys: `keybinds`, `leader`, `theme`, `animations`, `cursor`, `mouse`, `scroll`, `prompt`, `session`, `tabs`, `diffs`, `terminal`, `mini`, `highlights`. `$schema` is always allowed and dropped before merging. Everything else is refused, with a reason for `plugins` (loads code), `attention` (sound file paths, notifications), `debug` and `experimental`.
+- A refused key, invalid JSON, a path that isn't a regular file or a file over 64 KiB makes the **Session** refuse to start, with an error naming the file and the key, why it's refused if known, and the allowed keys.
+- `kota run` prints `agent override:` with the files in use, or `none (bundled config)`, after the approval line; `kota check` prints it after the instructions line. `prep` doesn't load overrides.
 - Overrides are read at **Session** start; editing the file affects the next **Session**.
-- A project `tui.json` must not load in the **Sandbox** (an **Agent override** belongs to the user, not the project, and the agent can write the project). The opencode docs don't say whether `OPENCODE_DISABLE_PROJECT_CONFIG` covers `tui.json`; check it with `opencode debug config` (or an equivalent observation) in a real session, the way issue 07 checked `opencode.json`, and suppress it if it does load.
+- A project `cli.json` must not load in the **Sandbox**.
 
 Design decisions (from the grilling on 2026-10-18; see **Agent override** in `CONTEXT.md`): per user only, no project-level override; an allowlist, not a denylist, so new agent keys stay refused until reviewed; layered over the bundled config, never replacing it; files mirror the agent's own names and format.
 
-Docs: the usage text and the README/`docs/` page that mentions `instructions.md` name the override directory, the `tui.json` file and its allowed keys.
-
 ## Acceptance criteria
 
-- [ ] With `~/.config/kota/opencode/tui.json` setting `keybinds.session_delete`, opencode in a **Session** uses that binding, and other keybinds keep their defaults
-- [ ] Without the file, the **Session** gets the bundled `tui.json` and starts as before
-- [ ] A disallowed key (for example `attention`) or invalid JSON refuses the **Session** with an error naming the file and key and listing the allowed keys
-- [ ] `$schema` in the override is accepted
-- [ ] The rendered `tui.json` is read-only in the **Sandbox**
-- [ ] A `tui.json` in the project root does not change opencode's settings in the **Session** (verified in a real session, with the result noted on this issue)
-- [ ] `kota run` prints the override files in use, or `none (bundled config)`
-- [ ] Usage text and docs describe the override path and allowed keys
-- [ ] Tests use a fake HOME / XDG_CONFIG_HOME, never the real one
+- [x] With `~/.config/kota/opencode/cli.json` setting `keybinds."session.delete"`, opencode in a **Session** gets that binding, and other keybinds keep their defaults
+- [x] Without the file, the **Session** gets the bundled config and starts as before
+- [x] A disallowed key (for example `plugins`) or invalid JSON refuses the **Session** with an error naming the file and key and listing the allowed keys
+- [x] `$schema` in the override is accepted
+- [x] The agent can't change the override for a later **Session** (it is read on the host and passed in the environment, not mounted)
+- [x] A `cli.json` in the project root does not change opencode's settings in the **Session**
+- [x] `kota run` prints the override files in use, or `none (bundled config)`
+- [x] Usage text and docs describe the override path and allowed keys
+- [x] Tests use a fake HOME / XDG_CONFIG_HOME, never the real one
 
 ## Blocked by
 
@@ -50,3 +50,16 @@ None - can start immediately.
 > *This was generated by AI during a grilling session.*
 
 Swapped ahead of the pi keybindings slice because it fixes the actual problem (Raycast owns `ctrl+d`).
+
+### 2026-10-18 (implementation)
+
+Changed from `tui.json` to `cli.json` after reading opencode 2.0.25 itself. Its binary has no `OPENCODE_TUI_CONFIG` at all. Its embedded docs say terminal preferences live in the global `~/.config/opencode/cli.json`, that "there is no project-local CLI configuration", and that `OPENCODE_CLI_CONFIG_CONTENT` merges inline JSON over it. The `opencode.ai/docs/keybinds` page used during the grilling describes v1; the v2 pages are under `opencode.ai/v2/docs/cli/`. The v2 keybind ids are dotted (`session.delete`, `app.exit`, `input.delete`).
+
+Verified:
+- Unit tests: loading, refusals (refused and unknown keys, invalid JSON, trailing data, non-object, directory, size), merging, the rendered environment with and without an override, refusal before a session dir is created, prep unaffected.
+- `TestAgentOverrideInShell` (integration, real Sandbox, 75 probes passed): opencode's environment holds the override as written, `$` included, with a `cli.json` in the project.
+- From the 2.0.25 source: `cli.config.get` merges the decoded `OPENCODE_CLI_CONFIG_CONTENT` over the file's config. A value that doesn't decode against opencode's schema makes opencode drop the whole inline config silently (no log line), so the allowlist checks keys but can't catch a bad value.
+
+Not verified: pressing the rebound key in a real opencode TUI. Left to the user with their own override (`ctrl+shift+d`). That key is also `input.delete.line` by default, and many terminals send it as plain `ctrl+d` unless they speak the kitty keyboard protocol. `<leader>d` is unused if it doesn't work.
+
+Unrelated: `TestInstructionsInShell/pi` is flaky on `HEAD` before this change too (1 or 5 read-only `/workspace` probes fail, then it passes on a re-run).
