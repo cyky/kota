@@ -1,68 +1,100 @@
 # Sessions
 
-How a `run` or `shell` **Session** is set up and torn down, and how `clean` removes what it leaves. What this protects against is in [The sandbox](sandbox.md).
+A **Session** is one `kota run` (an agent) or `kota shell` (Bash) in the sandbox, for one project. This page covers what happens in one, the options that change it, and how `clean` removes what sessions leave behind. Why each part is there is in [The sandbox](sandbox.md).
 
-## Shell
+## What happens in a session
 
-`kota shell [dir]` opens interactive Bash in `/workspace` as your UID, without starting an agent. It shares `run`'s project image, mounts, secret masks, dependency volumes, gateway access and containment probes. The probes must pass before the shell opens. Use `--agent pi` to select pi's config and state volume (opencode is the default); `--model`, `--gateway`, `--ro`, `--no-engine` and `--no-history` work as for `run`. Agent configuration is rendered from the gateway's model list as usual, so the gateway must be available. Shell startup skips Bash profile and rc files. On exit, changed files that can run code on the host are reported, as for `run`. `--auto`, `--unsafe-skip-check` and command overrides are only available on `run`.
-
-## Project and `--ro` paths
-
-The project must be inside the allowed root, `~/Projects` by default (set `KOTA_ALLOWED_ROOT` to change it). Paths are resolved through symlinks first. `$HOME`, `/` and the allowed root itself are refused. `--ro PATH` (repeatable) can point anywhere except at or around `$HOME`, the project, `~/.ssh`, `~/.config`, other credential directories, or Docker socket locations. Each `--ro` path is mounted at `/ro/<name>`.
-
-## Gateway key
-
-If llama-swap has `apiKeys` enabled, give kota the key with `KOTA_GATEWAY_KEY`, or with `KOTA_GATEWAY_KEY_FILE` pointing to a file that contains it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. The key is handed to `docker compose` in its environment only: the compose file names the variable without a value, so the key isn't written to disk or put on a command line. Inside the sandbox it is `$KOTA_GATEWAY_KEY`, which the agent configs refer to by name (`{env:...}` for opencode, `$...` for pi), and the model list fetch and gateway probe send it as `Authorization: Bearer`. The agent can read it, so use a key meant only for the gateway. `check` shows whether a key is configured, never its value. If the gateway answers 401, `run` and `check` say so and point to these variables. `prep` never gets the key, so install scripts can't use your models through it.
-
-## Network
-
-The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway. Inside the sandbox the gateway is `http://gateway:8080`. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
+1. kota checks the project path, takes the project's lease (one command per project at a time), and asks any confirmations, before anything is written or started.
+2. It reads the model list from the gateway and renders the agent's config.
+3. It starts the containers: the agent's, on a network whose only way out is a forwarder to the gateway, and the project's [Engine VM](engine-vm.md) if it has one.
+4. It runs the containment probes. Any failure stops the session here.
+5. The agent (or Bash) runs in `/workspace`, as your UID.
+6. When it exits, kota tears everything down and prints the change report: files that can run code on your machine, and commits (see [Protecting the host](protections.md)).
 
 ## Approval
 
-By default opencode asks before it edits a file or runs a shell command. `--auto` approves both, so it works without interruption. In a non-interactive `opencode run`, a request that needs approval is rejected. Before a full-auto session in a git project with uncommitted changes (modified, staged or untracked files inside the project), `run` lists them and asks you to type `y`. Anything else aborts before a container starts, so you can commit or stash first. Non-git projects aren't asked. The check doesn't run git on the host, where a filter or fsmonitor that an agent configured (in a repository it created, or through `.gitattributes`) would run. kota finds the repository by looking for `.git` in the project and the directories above it, then runs `git status` in a throwaway container of the base image, with no network, no capabilities and read-only mounts of only the project and its git directory at their host paths. For a linked worktree or submodule checkout, that includes the git dir its `.git` file points to, which must pass the same path rules as `--ro`.
+By default opencode asks before it edits a file or runs a shell command. `--auto` approves both, so it works without interruption; in a non-interactive `opencode run`, a request that needs approval is rejected. pi has no permission system: it always acts without asking, and `run --agent pi` says so at startup. Either way, the sandbox is then the only boundary.
 
-pi has no permission system: it always edits files and runs commands without asking, so the sandbox is its only boundary. `run --agent pi` says so at startup, and the uncommitted-changes confirmation above always applies to it. The containment probes run before pi sessions as for opencode.
+Before a full-auto session (pi, or opencode with `--auto`) in a git project with uncommitted changes, `run` lists them and asks you to type `y`. Anything else aborts before a container starts, so you can commit or stash first, and the agent's work doesn't mix with yours. Non-git projects aren't asked.
+
+The check doesn't run git on the host, where a filter or fsmonitor the agent configured (in a repository it created, or through `.gitattributes`) would run. It runs `git status` in a throwaway container of the base image, offline, without capabilities, with only the project and its git directory mounted read-only. For a linked worktree or submodule checkout, that includes the git dir its `.git` file points to, which must pass the same path rules as `--ro`.
 
 ## Models
 
-Models come from the gateway. At launch, `run` reads `/v1/models` through the sandbox's forwarder, so a model added to llama-swap shows up in the agent without editing anything. `assets/models.yaml` adds what llama-swap doesn't report:
-- the context window, maximum output and tool-call support per model;
-- `agent: false` to hide a model (`zeta2.1`, a completion model);
-- the default model (`qwen3.6-coder`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`). pi has no small model.
+Models come from the gateway: at launch, kota reads its `/v1/models`, so a model added to llama-swap shows up in the agent without editing anything. `--model ID` picks another default for one session; an ID the gateway doesn't serve is refused with the list of available ones. `kota check` shows the list.
 
-Models not listed there get conservative values from its `unknown` entry. `--model ID` picks another default for one session; an ID the gateway doesn't serve, or a hidden one, is refused with the list of available models. `kota check` shows the resolved list. The generated config is written per session and mounted read-only.
+`assets/models.yaml` adds what llama-swap doesn't report: each model's context window, maximum output and tool-call support, `agent: false` to hide a model (`zeta2.1`, a completion model), the default model (`qwen3.6-coder`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`; pi has none). Models not listed there get conservative values from its `unknown` entry.
 
-When a new agent session resolves a different model than another active agent session, startup warns that llama-swap will swap models back and forth. The comparison uses the model selected at startup, including `--model`; changes made later inside an agent aren't tracked. Errors recording or scanning models print a warning and the session continues. Registry entries that disappear during a scan are skipped. `shell`, `prep`, `check` and `clean` reserve the project but do not count as model users.
+When a session starts with a different model than another running session, kota warns that llama-swap will swap models back and forth. It compares the models chosen at startup only; a model changed later inside the agent isn't seen. `shell`, `prep`, `check` and `clean` don't count as model users.
+
+## Shell
+
+`kota shell [dir]` opens interactive Bash in `/workspace`, without an agent, in the same sandbox as `run`: the same image, mounts, masks, dependency volumes, gateway access and probes. The change report runs when you exit. Startup skips Bash profile and rc files.
+
+`--agent pi` selects pi's config and state volume (opencode is the default). `--model`, `--gateway`, `--ro`, `--no-engine` and `--no-history` work as for `run`; `--auto`, `--unsafe-skip-check` and a command after `--` don't. The gateway must be available, since the agent's config is rendered as for `run`.
+
+## Project and `--ro` paths
+
+The project must be inside the allowed root, `~/Projects` by default (`KOTA_ALLOWED_ROOT`). Paths are resolved through symlinks first, and `$HOME`, `/` and the allowed root itself are refused.
+
+`--ro PATH` (repeatable) mounts a reference directory read-only at `/ro/<name>`. It can point anywhere except at or around `$HOME`, the project, `~/.ssh`, `~/.config`, other credential directories or Docker socket locations. `--ro` paths aren't masked, so don't point it at secrets.
+
+## Gateway key
+
+If llama-swap has `apiKeys` enabled, give kota the key with `KOTA_GATEWAY_KEY`, or with `KOTA_GATEWAY_KEY_FILE` naming a file that holds it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. If the gateway answers 401, `run` and `check` say so. `check` shows whether a key is set, never its value.
+
+The agent can read the key: inside the sandbox it is `$KOTA_GATEWAY_KEY`, which the agent configs refer to by name. So use a key meant only for the gateway. It is passed to `docker compose` in the environment only, never written to disk or put on a command line. `prep` never gets it, so install scripts can't use your models.
+
+## Network
+
+The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway, which is `http://gateway:8080` inside the sandbox. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
 
 ## Agent config
 
-The agent's config is versioned in this repo (`assets/agents/opencode/opencode.json`: permissions and defaults). Each session gets that config plus the gateway provider and model, mounted read-only at `/etc/kota/opencode.json`. Your host `~/.config/opencode`, and any other host agent config, is never mounted. The agent's `HOME` is an empty tmpfs that is discarded when the session ends. opencode ignores the project's `opencode.json` and `.opencode/` directory inside the sandbox, because the agent could write them to change its own permissions. pi's config is versioned the same way (`assets/agents/pi/settings.json`). Each session renders `settings.json` (default model) and `models.json` (the gateway provider and its models), mounted read-only into pi's config directory `~/.pi/agent`. That directory is its own tmpfs, writable because pi creates lock files there, and discarded after the session. The base settings set `defaultProjectTrust` to `never`, so pi doesn't load the project's `.pi/` (settings, extensions, skills, system prompt), which the agent could write for a later session; a `.pi/` of your own isn't used in the sandbox either. `AGENTS.md` and other context files still load. pi's sessions are stored in its state volume via `PI_CODING_AGENT_SESSION_DIR`, which also outranks a `sessionDir` in the project's settings.
+The agent's config is versioned in this repo and rendered for each session with the gateway provider and models, then mounted read-only. Your host's agent config (`~/.config/opencode`, `~/.pi`) is never mounted, and the agent's `HOME` is an empty tmpfs thrown away after the session.
 
-Your own preferences for the agents, and what kota tells them, are in [The agents](agent-setup.md).
+The project can't change the agent's config either, since the agent could write it there for a later session:
+
+- opencode gets its config at `/etc/kota/opencode.json`, and ignores the project's `opencode.json` and `.opencode/` directory, which could change its own permissions.
+- pi gets `settings.json` and `models.json` in its config directory `~/.pi/agent`, its own tmpfs (writable because pi creates lock files there). The settings set `defaultProjectTrust` to `never`, so pi doesn't load the project's `.pi/` (settings, extensions, skills, system prompt), yours included. pi's sessions are stored in its state volume through `PI_CODING_AGENT_SESSION_DIR`, which a `sessionDir` in the project can't override.
+
+`AGENTS.md` and other context files in the project still load. What kota tells the agents, and your own preferences for them, are in [The agents](agent-setup.md).
 
 ## Agent state
 
-Agent state (sessions, logs, caches) lives in a Docker volume per agent per project, `kota-state-<agent>-<hash of the project path>`, mounted at `/var/lib/kota/state`. `--no-history` sessions have their own, `kota-state-<agent>-nohistory-<hash>`. So a later `run` of the same project can resume its sessions, and other projects can't see them. The XDG cache dir is in the volume too, so tool caches such as Go's build cache persist per project. Volumes stay until you remove them with `kota clean [dir]`. If the "state writable" probe fails after upgrading, run `kota build` and remove the project's state volume, which an older image created owned by root.
+Each agent has a Docker volume per project for its sessions, logs and caches, `kota-state-<agent>-<hash of the project path>`, mounted at `/var/lib/kota/state`. A later session of the same project can resume its conversations (`kota run [dir] -- opencode -c`, `-- pi -c`), and other projects can't see them. Tool caches such as Go's build cache live there too. `--no-history` sessions have their own volume, so transcripts of normal sessions, which may hold git history, don't reach them. Volumes stay until `kota clean [dir]`.
 
-## One command per project
-
-Only one `run`, `shell`, `prep`, `check` or `clean` can use a project at a time. The registry validates the project and read-only mount paths once, locks that resolved project before creating mount placeholders or touching dependency volumes, and uses those same validated paths for preparation. It holds the lease through confirmations, startup, teardown and the change report. A second command is refused with the running operation, agent, host PID and start time. Symlink aliases share the same lock. Different projects can run concurrently.
-
-Registry records live outside the sandbox in `kota/registry/` under the host user cache directory. OS file locks release automatically when a host process dies; the next command for that project removes its orphaned Compose containers (including one-off and stopped containers) before starting. Recovery holds the per-project lock while calling Docker and releases the shared registry guard, allowing other projects to keep using the registry during a slow recovery. If Docker recovery fails, startup is refused and the stale record stays for the next attempt. State/dependency volumes and other projects' containers are preserved. Empty lock files remain after a clean exit; keep them in place, since deleting a lock file while it is in use can allow a second owner.
-
-## Interrupts
-
-Ctrl-C, `kill` (SIGTERM) or a closed terminal (SIGHUP) doesn't leave anything behind. Every confirmation is asked before anything is written to the host or a sandbox container starts, and Ctrl-C at a prompt counts as no. Once a session is starting, a signal stops it at the next step: Docker commands in progress are stopped, the agent is never started after an interrupted startup, and the containers, networks, placeholders and session directory are removed as on an error. The change report still runs, and the lease is released. kota then exits with status 130. Inside the agent's terminal session, Ctrl-C goes to the agent as usual. Only a process killed outright (SIGKILL, a crash) skips this. Recovery then removes its containers, but not its session directory or the placeholders and seeded files it left in the project (`git status --ignored` shows them).
+If the "state writable" probe fails after upgrading kota, run `kota build` and remove the project's state volume, which an older image created owned by root.
 
 ## Containment probes
 
-Before every `run` and `shell`, containment probes run in a fresh agent container. They try to reach the internet over IPv4 and IPv6, external DNS (A and AAAA lookups), the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN gateway, and check that the gateway, `/workspace` and the state volume work and that every `--ro` mount and the agent config reject writes. For a project with an Engine VM, its own probes follow (see [Engine VM](engine-vm.md)). Any failure blocks the session; `--unsafe-skip-check` overrides that with a warning.
+Before every `run` and `shell`, probes run in a fresh agent container. They must fail to reach the internet over IPv4 and IPv6, external DNS, the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN gateway. They must succeed in reaching the gateway and writing `/workspace` and the state volume, and every read-only mount (`--ro` paths, the agent config, protected git files) must reject writes, and every masked secret must read as empty. An [Engine VM](engine-vm.md) has its own probes after these.
+
+Any failure stops the session. `--unsafe-skip-check` starts it anyway, with a warning. `kota check` runs the probes and shows the mounts and masks without starting an agent.
+
+## One command per project
+
+Only one `run`, `shell`, `prep`, `check` or `clean` can use a project at a time. A second is refused with the operation, agent, host PID and start time of the one running. Symlinked paths to the same project count as the same project. Different projects can run at the same time.
+
+The lease is held from the path checks, through confirmations, startup and teardown, to the end of the change report. It is an OS file lock in `kota/registry/` under the user cache dir, so it is released when kota exits, however it exits. The next command for a project whose kota died removes its leftover containers first; if that fails, it refuses to start and tries again next time. Don't delete the lock files, even when no session is running.
+
+## Interrupts
+
+Ctrl-C, `kill` (SIGTERM) or a closed terminal (SIGHUP) leaves nothing behind. Confirmations come before anything is written or started, and Ctrl-C at a prompt counts as no. Once a session is starting, a signal stops it at the next step: the agent isn't started, and the containers, networks, placeholders and session directory are removed as on an error. The change report still runs, and kota exits with status 130. Inside the agent's terminal, Ctrl-C goes to the agent as usual.
+
+Only a process killed outright (SIGKILL, a crash) skips this. The next command for the project then removes its containers, but not the placeholders and seeded files it left in the project (`git status --ignored` shows them) or its session directory.
 
 ## Cleanup
 
-`kota clean [dir]` lists the project's existing agent state and dependency volumes, then asks you to type `y`. Declining or reaching end of input leaves them in place. It removes state for both agents and dependency volumes for directories no longer mentioned in the current configuration. The selected volume names must match the exact hash of the resolved project path. It also resets the host's prep confirmation record, so the next `prep` asks for approval again, removes the project's Engine VM data (see [Engine VM](engine-vm.md)) and the copies kept after `--no-history` sessions, with any work in them that wasn't brought back. When there are no volumes, prep record or engine data, it reports that there is nothing to clean.
+`kota clean [dir]` lists what kota keeps for the project, and removes it after you type `y`:
 
-Cleanup holds the project's session lease through listing, confirmation and removal. It refuses while a run, shell, prep or check is using that project. It works without a model gateway and without parsing the project's dependency configuration, so it can clean up after manifests or configuration have been removed or broken. After cleanup, `run` creates fresh state and empty dependency volumes; run `prep` again to restore dependencies. Project images and source files are preserved.
+- both agents' state volumes, and its dependency volumes, including those of directories the configuration no longer mentions;
+- the prep record, so the next `prep` asks for approval again;
+- its Engine VM data, including the downloaded images (see [Engine VM](engine-vm.md));
+- copies kept after `--no-history` sessions, with any work in them that wasn't brought back.
 
-Shared caches are retained by default. `kota clean --shared-caches [dir]` includes the Go module cache, corepack releases and pnpm store in the confirmed list. It requires exclusive access: any starting, running or finishing session prevents the reset, and a reset in progress prevents new sessions from starting. The cache reservation covers confirmations and gaps between prep containers too. Other projects keep their own state and dependency volumes, but need `prep` again to refill shared caches. Docker refuses removal of a volume still attached to a container. If listing or removal fails, clean reports the error and retains the prep confirmation record; a removal error can occur after some of the listed volumes were already deleted.
+Project images, source files and the shared caches are kept. Afterwards, run `prep` again to restore the dependencies. `clean` needs no gateway and doesn't parse the project's configuration, so it works when the configuration is broken or gone. It refuses while another command is using the project.
+
+`kota clean --shared-caches [dir]` also resets the caches all projects share: the Go module cache, corepack's releases and the pnpm store. It needs every session of every project to be idle, and blocks new ones until it is done. Other projects then need `prep` again to refill them.
+
+If listing or removal fails, `clean` reports it and keeps the prep record. A removal can fail after some volumes are already gone, and Docker refuses to remove a volume a container still uses.
