@@ -736,6 +736,52 @@ func TestAgentOverridePiSettings(t *testing.T) {
 	}
 }
 
+// TestAgentOverrideOpencodeConfig checks opencode.json gets compaction from
+// the override and keeps kota's model, the base's sharing and update
+// settings and --auto's permissions, and that keybinds and mcp stop the
+// session with why.
+func TestAgentOverrideOpencodeConfig(t *testing.T) {
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	sa, err := parseOfflineArgs("run", []string{project}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configFile := writeOverride(t, "opencode/opencode.json", `{"$schema": "https://opencode.ai/config.json", "compaction": {"auto": false}}`)
+	cliFile := writeOverride(t, "opencode/cli.json", `{}`)
+	sess, err := prepareTestSession(sa, sandbox.ModeRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := sess.agent.render(models.Catalog{Models: []models.Model{{ID: "m"}}, Default: "m"}, true, "", sess.overrides)
+	sess.cleanup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(contents[slices.Index(sess.agent.configs, opencodeConfigPath)], &cfg); err != nil {
+		t.Fatal(err)
+	}
+	compaction, _ := cfg["compaction"].(map[string]any)
+	perm, _ := cfg["permission"].(map[string]any)
+	if compaction["auto"] != false || cfg["model"] != opencode.ProviderID+"/m" || cfg["share"] != "disabled" || cfg["autoupdate"] != false ||
+		perm["edit"] != "allow" || perm["webfetch"] != "deny" {
+		t.Errorf("opencode.json = %v", cfg)
+	}
+	if !slices.Equal(sess.overrideFiles, []string{configFile, cliFile}) {
+		t.Errorf("override files = %v, want opencode.json then cli.json", sess.overrideFiles)
+	}
+
+	for key, why := range map[string]string{"keybinds": "cli.json next to this file", "mcp": "runs code"} {
+		writeOverride(t, "opencode/opencode.json", `{"`+key+`": {}}`)
+		_, err = prepareTestSession(sa, sandbox.ModeRun)
+		if err == nil || !strings.Contains(err.Error(), configFile) || !strings.Contains(err.Error(), `"`+key+`"`) || !strings.Contains(err.Error(), why) {
+			t.Errorf("%s: err = %v, want it to name %s, the key and %q", key, err, configFile, why)
+		}
+	}
+}
+
 // TestAgentOverrideRefused checks an override with a key that isn't
 // allowed stops startup with its path and the key, before anything is
 // created; prep, which runs no agent, isn't affected.

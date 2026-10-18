@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -196,5 +197,86 @@ console.log("trust=" + s.getDefaultProjectTrust());
 		if !strings.Contains(out, want) {
 			t.Errorf("pi's settings lack %s:\n%s", want, out)
 		}
+	}
+}
+
+// TestOpencodeConfigInShell opens an opencode shell Session with an
+// opencode.json override, and checks opencode's own config loader reads the
+// override's compaction next to the base's sharing, update and permission
+// settings.
+func TestOpencodeConfigInShell(t *testing.T) {
+	requireBaseImage(t)
+	config := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(config, "gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	file := filepath.Join(config, "kota", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(`{"$schema": "https://opencode.ai/config.json", "compaction": {"auto": false, "keep": {"tokens": 4000}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(cache, "kota-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ = filepath.EvalSymlinks(root)
+	t.Cleanup(func() { os.RemoveAll(root) })
+	t.Setenv("KOTA_ALLOWED_ROOT", root)
+	project := filepath.Join(root, "app")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostGit(t, project, "init", "-q")
+
+	sa := sessionArgs{agent: opencode.Agent, gatewayURL: stubModelGateway(t), dir: project, shell: true}
+	var out string
+	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
+		out, err = ds.Capture("bash", "-c", `opencode debug config 2>&1`)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+	})
+	t.Logf("inside:\n%s", out)
+	type rule struct {
+		Action string `json:"action"`
+		Effect string `json:"effect"`
+	}
+	type source struct {
+		Path string `json:"path"`
+		Info struct {
+			Update      string `json:"update"`
+			Share       string `json:"share"`
+			Permissions []rule `json:"permissions"`
+			Compaction  struct {
+				Auto *bool `json:"auto"`
+				Keep struct {
+					Tokens int `json:"tokens"`
+				} `json:"keep"`
+			} `json:"compaction"`
+		} `json:"info"`
+	}
+	var sources []source
+	if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &sources); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	i := slices.IndexFunc(sources, func(s source) bool { return s.Path == opencodeConfigPath })
+	if i < 0 {
+		t.Fatalf("opencode doesn't read %s:\n%s", opencodeConfigPath, out)
+	}
+	info := sources[i].Info
+	if info.Compaction.Auto == nil || *info.Compaction.Auto || info.Compaction.Keep.Tokens != 4000 {
+		t.Errorf("compaction = %+v, want the override's", info.Compaction)
+	}
+	if info.Update != "disable" || info.Share != "disabled" {
+		t.Errorf("update = %q, share = %q, want the base's", info.Update, info.Share)
+	}
+	if !slices.Contains(info.Permissions, rule{Action: "edit", Effect: "ask"}) {
+		t.Errorf("permissions = %+v, want edits to ask", info.Permissions)
 	}
 }

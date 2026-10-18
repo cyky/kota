@@ -123,7 +123,9 @@ when present, replaces the built-in working style for every project.
 $XDG_CONFIG_HOME/kota/opencode/cli.json, when present, is merged over
 opencode's bundled terminal settings in every session; it may set keybinds,
 leader, theme, animations, cursor, mouse, scroll, prompt, session, tabs,
-diffs, terminal, mini and highlights. $XDG_CONFIG_HOME/kota/pi/settings.json
+diffs, terminal, mini and highlights. $XDG_CONFIG_HOME/kota/opencode/opencode.json
+is merged over opencode's bundled config; it may set compaction (keybinds
+and theme go in cli.json). $XDG_CONFIG_HOME/kota/pi/settings.json
 is merged over pi's bundled settings; it may set defaultThinkingLevel,
 modelThinkingLevels, thinkingBudgets, hideThinkingBlock, steeringMode,
 followUpMode, doubleEscapeAction, treeFilterMode, compaction, branchSummary,
@@ -347,7 +349,7 @@ func agentFor(name string) (agentSetup, error) {
 			noteScratch: []string{path.Dir(opencodeConfigDir), opencodeConfigDir},
 			env:         opencode.Env(opencodeConfigPath),
 			command:     []string{"opencode"},
-			overrides:   []override.File{opencode.CLIOverride},
+			overrides:   []override.File{opencode.ConfigOverride, opencode.CLIOverride},
 			// opencode writes cli.json when settings change in the TUI, so
 			// the CLI config goes inline instead of in a read-only file.
 			overrideEnv: func(ov map[string]map[string]any) (map[string]string, error) {
@@ -358,12 +360,12 @@ func agentFor(name string) (agentSetup, error) {
 				content, err := opencode.RenderCLI(base, ov[opencode.CLIOverride.Name])
 				return map[string]string{opencode.CLIEnv: content}, err
 			},
-			render: func(c models.Catalog, auto bool, keyEnv string, _ map[string]map[string]any) ([][]byte, error) {
+			render: func(c models.Catalog, auto bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error) {
 				base, err := assets.Agents.ReadFile(opencode.BaseConfig)
 				if err != nil {
 					return nil, err
 				}
-				cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto, APIKeyEnv: keyEnv})
+				cfg, err := opencode.Render(base, opencode.Settings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto, APIKeyEnv: keyEnv, Override: ov[opencode.ConfigOverride.Name]})
 				return [][]byte{cfg}, err
 			},
 			approval: func(auto bool) string {

@@ -44,6 +44,57 @@ var CLIOverride = override.File{
 	},
 }
 
+// ConfigOverride is the user's Agent override of opencode.json. Only
+// compaction is allowed: the rest is gateway wiring, the approval model,
+// code or paths opencode loads, or terminal settings that belong in
+// cli.json. opencode 2 still reads v1 names and maps them to v2 ones, so
+// both are refused.
+var ConfigOverride = override.File{
+	Name: "opencode/opencode.json",
+	Policy: override.Policy{
+		Allowed: []string{"compaction"},
+		Refused: map[string]string{
+			"plugin":             "loads code",
+			"plugins":            "loads code",
+			"mcp":                "runs code",
+			"lsp":                "runs code",
+			"formatter":          "runs code",
+			"command":            "runs code",
+			"commands":           "runs code",
+			"agent":              "runs code",
+			"agents":             "runs code",
+			"mode":               "runs code",
+			"shell":              "runs code",
+			"instructions":       "reads paths",
+			"watcher":            "reads paths",
+			"skills":             "reads paths",
+			"reference":          "reads paths",
+			"references":         "reads paths",
+			"worktree":           "reads paths",
+			"provider":           "kota sets the gateway provider",
+			"providers":          "kota sets the gateway provider",
+			"model":              "use --model",
+			"small_model":        "kota sets the small model",
+			"enabled_providers":  "kota sets the gateway provider",
+			"disabled_providers": "kota sets the gateway provider",
+			"permission":         "--auto sets what opencode may do without asking",
+			"permissions":        "--auto sets what opencode may do without asking",
+			"tools":              "--auto sets what opencode may do without asking",
+			"policies":           "kota sets the gateway provider",
+			"websearch":          "the gateway is the only network route",
+			"share":              "sharing stays off",
+			"autoshare":          "sharing stays off",
+			"enterprise":         "sharing stays off",
+			"autoupdate":         "updates stay off",
+			"update":             "updates stay off",
+			"server":             "kota runs opencode's terminal UI",
+			"experimental":       "unreviewed features",
+			"keybinds":           "terminal settings go in cli.json next to this file",
+			"theme":              "terminal settings go in cli.json next to this file",
+		},
+	},
+}
+
 // autoAllowed are the permissions Auto switches from ask to allow.
 var autoAllowed = []string{"edit", "bash"}
 
@@ -58,17 +109,22 @@ type Settings struct {
 	// APIKeyEnv, when set, names the environment variable holding the
 	// gateway key. The config refers to it, so the key isn't written out.
 	APIKeyEnv string
+	// Override is the user's Agent override of opencode.json, from
+	// ConfigOverride, or nil.
+	Override map[string]any
 }
 
 // Render returns the opencode.json content for a session: base (the
-// versioned permissions and defaults) with the gateway provider, its models
-// and the default and small model set on top. With Auto, edits and shell
-// commands are allowed; other permissions keep their base values.
+// versioned permissions and defaults), then the user's override, then the
+// gateway provider, its models and the default and small model. With Auto,
+// edits and shell commands are allowed; other permissions keep their base
+// values.
 func Render(base []byte, s Settings) ([]byte, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
 		return nil, fmt.Errorf("base opencode config: %w", err)
 	}
+	cfg = override.Merge(cfg, s.Override)
 	offered := map[string]any{}
 	for _, m := range s.Models.Models {
 		offered[m.ID] = map[string]any{

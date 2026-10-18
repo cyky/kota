@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"kota/assets"
@@ -181,6 +182,67 @@ func TestCLIOverridePolicy(t *testing.T) {
 	for _, k := range []string{"plugins", "attention", "debug", "experimental"} {
 		if slices.Contains(CLIOverride.Policy.Allowed, k) || CLIOverride.Policy.Refused[k] == "" {
 			t.Errorf("%s not refused with a reason", k)
+		}
+	}
+}
+
+func TestRenderOverride(t *testing.T) {
+	data, err := Render(base(t), Settings{
+		GatewayURL: "http://gateway:8080",
+		Models:     catalog,
+		Auto:       true,
+		Override: map[string]any{
+			"compaction": map[string]any{"auto": false, "keep": map[string]any{"tokens": 4000.0}},
+			"model":      "other/model",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	compaction := cfg["compaction"].(map[string]any)
+	if compaction["auto"] != false || compaction["keep"].(map[string]any)["tokens"] != 4000.0 {
+		t.Errorf("compaction = %v, want the override's", compaction)
+	}
+	// kota's own keys win, --auto still applies, and the base's settings
+	// stay.
+	perm := cfg["permission"].(map[string]any)
+	if cfg["model"] != ProviderID+"/big" || perm["edit"] != "allow" || perm["bash"] != "allow" || perm["webfetch"] != "deny" ||
+		cfg["share"] != "disabled" || cfg["autoupdate"] != false {
+		t.Errorf("config = %v", cfg)
+	}
+}
+
+func TestConfigOverridePolicy(t *testing.T) {
+	p := ConfigOverride.Policy
+	if ConfigOverride.Name != "opencode/opencode.json" || p.AnyKey || !slices.Equal(p.Allowed, []string{"compaction"}) {
+		t.Errorf("override = %+v", ConfigOverride)
+	}
+	// v1 names, which opencode 2 still reads, and their v2 names.
+	for _, k := range []string{"plugin", "plugins", "mcp", "lsp", "formatter", "command", "commands", "agent", "agents", "mode", "shell",
+		"instructions", "watcher", "skills", "reference", "references", "worktree",
+		"provider", "providers", "model", "small_model", "enabled_providers", "disabled_providers", "permission", "permissions", "tools", "policies", "websearch",
+		"share", "autoshare", "enterprise", "autoupdate", "update", "server", "experimental", "keybinds", "theme"} {
+		if p.Refused[k] == "" {
+			t.Errorf("%s not refused with a reason", k)
+		}
+	}
+	for _, k := range []string{"keybinds", "theme"} {
+		if !strings.Contains(p.Refused[k], "cli.json next to this file") {
+			t.Errorf("%s refusal = %q, want a pointer to cli.json", k, p.Refused[k])
+		}
+	}
+	// Everything the bundled base sets stays out of reach.
+	cfg := map[string]any{}
+	if err := json.Unmarshal(base(t), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for k := range cfg {
+		if slices.Contains(p.Allowed, k) {
+			t.Errorf("base key %s can be overridden", k)
 		}
 	}
 }
