@@ -48,6 +48,10 @@ _Avoid_: shallow clone, workspace copy, mirror
 The branch `kota/<agent>-<YYYY-MM-DDTHHMMSS>` that brings the **No-history copy**'s `HEAD` back into the original project after the **Session**. It is never checked out.
 _Avoid_: agent branch, result branch
 
+**Agent override**:
+A user's own settings for an agent (keybindings, theme and similar), kept on the host in the kota config dir in the agent's own file format, and layered over kota's bundled agent config in every **Session**. Only settings kota allows can be overridden; without an override file, the bundled config is used as is.
+_Avoid_: user config, custom config, project config
+
 ## Relationships
 
 - A **Session** runs in exactly one **Sandbox**, for exactly one project
@@ -64,6 +68,8 @@ _Avoid_: agent branch, result branch
 - A **No-history copy** belongs to exactly one **Session**. It takes its project's **Prep**, dependency volumes, **Engine VM** and kota config, but has its own agent state, so transcripts from normal **Sessions** never reach it
 - A **No-history copy** is deleted after its **Session**, unless it has uncommitted changes, refs that were not returned, or its **Returned branch** could not be made
 - Only the **No-history copy**'s `HEAD` becomes a **Returned branch**. The clone and the return run in offline containers, and the return never runs git in the copy with the original writable
+
+- An **Agent override** belongs to the user, not a project: it applies to every **Session** in every project, and nothing the agent writes in a **Session** can change it
 
 ## Example dialogue
 
