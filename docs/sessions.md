@@ -2,6 +2,18 @@
 
 How a `run` or `shell` **Session** is set up and torn down, and how `clean` removes what it leaves. What this protects against is in [The sandbox](sandbox.md).
 
+## Shell
+
+`kota shell [dir]` opens interactive Bash in `/workspace` as your UID, without starting an agent. It shares `run`'s project image, mounts, secret masks, dependency volumes, gateway access and containment probes. The probes must pass before the shell opens. Use `--agent pi` to select pi's config and state volume (opencode is the default); `--model`, `--gateway`, `--ro`, `--no-engine` and `--no-history` work as for `run`. Agent configuration is rendered from the gateway's model list as usual, so the gateway must be available. Shell startup skips Bash profile and rc files. On exit, changed files that can run code on the host are reported, as for `run`. `--auto`, `--unsafe-skip-check` and command overrides are only available on `run`.
+
+## Project and `--ro` paths
+
+The project must be inside the allowed root, `~/Projects` by default (set `KOTA_ALLOWED_ROOT` to change it). Paths are resolved through symlinks first. `$HOME`, `/` and the allowed root itself are refused. `--ro PATH` (repeatable) can point anywhere except at or around `$HOME`, the project, `~/.ssh`, `~/.config`, other credential directories, or Docker socket locations. Each `--ro` path is mounted at `/ro/<name>`.
+
+## Gateway key
+
+If llama-swap has `apiKeys` enabled, give kota the key with `KOTA_GATEWAY_KEY`, or with `KOTA_GATEWAY_KEY_FILE` pointing to a file that contains it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. The key is handed to `docker compose` in its environment only: the compose file names the variable without a value, so the key isn't written to disk or put on a command line. Inside the sandbox it is `$KOTA_GATEWAY_KEY`, which the agent configs refer to by name (`{env:...}` for opencode, `$...` for pi), and the model list fetch and gateway probe send it as `Authorization: Bearer`. The agent can read it, so use a key meant only for the gateway. `check` shows whether a key is configured, never its value. If the gateway answers 401, `run` and `check` say so and point to these variables. `prep` never gets the key, so install scripts can't use your models through it.
+
 ## Network
 
 The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway. Inside the sandbox the gateway is `http://gateway:8080`. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
