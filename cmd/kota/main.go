@@ -316,8 +316,9 @@ type session struct {
 	// gatewayKey is the gateway API key, empty when none is configured. It
 	// only reaches the sandbox through docker compose's environment.
 	gatewayKey string
-	// mounts are what the probes verify.
-	mounts check.Mounts
+	// expect is what the probes verify about the agent container, from the
+	// spec's own volumes.
+	expect sandbox.Expect
 	// deps is how prep installs the project's dependencies.
 	deps deps.Plan
 	// mountPoints are directories Docker creates on the host for the
@@ -653,22 +654,6 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		return nil, err
 	}
 	cfgMounts = append(cfgMounts, sandbox.Mount{Source: excludes, Target: sandbox.GitExcludes})
-	sess.mounts.Pinned, sess.mounts.ReadOnly, sess.mounts.Masked = layout.Targets()
-	if sess.prepared != nil {
-		for _, m := range sess.prepared.ReadOnly {
-			sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
-		}
-	}
-	sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, sandbox.GitExcludes)
-	if !prep {
-		sess.mounts.State = sandbox.StateDir
-	}
-	for _, m := range paths.ReadOnly {
-		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, m.Target)
-	}
-	if engineRoute != nil {
-		sess.mounts.ReadOnly = append(sess.mounts.ReadOnly, sandbox.EngineCertDir)
-	}
 
 	maps.Copy(env, gitEnv(key))
 	if len(sa.command) > 0 {
@@ -708,11 +693,11 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		Engine:         engineRoute,
 		EngineOff:      sess.engineOff,
 	}
-	sess.spec = sandbox.Build(in)
+	sess.spec, sess.expect = sandbox.Build(in)
 	if prep {
 		in.Mode = sandbox.ModeFetch
 		in.Command = []string{"sh", "-c", depPlan.FetchScript()}
-		sess.fetchSpec = sandbox.Build(in)
+		sess.fetchSpec, _ = sandbox.Build(in)
 	}
 	return sess, nil
 }
@@ -1123,7 +1108,7 @@ func runSession(sess *session, lease *sessionregistry.Lease, model string, auto,
 // order. stop tears both down; on an error, nothing is left running.
 func startSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) (*docker.Session, func(), error) {
 	sess.printWarnings(os.Stderr)
-	if n := len(sess.mounts.Masked); n > 0 {
+	if n := len(sess.expect.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'kota check' to list them\n", n)
 	}
 	var catalog models.Catalog
@@ -1157,7 +1142,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 			fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
 			return nil
 		}
-		results, err := check.Run(ds, sess.gateway, sess.mounts)
+		results, err := check.Run(ds, sess.gateway, sess.expect)
 		if err != nil {
 			return fmt.Errorf("containment probes: %w", err)
 		}
@@ -1420,7 +1405,7 @@ func cmdCheck(args []string) error {
 	}
 	st.Verify = func(ds *docker.Session) error {
 		start := time.Now()
-		results, err := check.Run(ds, sess.gateway, sess.mounts)
+		results, err := check.Run(ds, sess.gateway, sess.expect)
 		if err != nil {
 			return fmt.Errorf("containment probes: %w", err)
 		}
@@ -1813,7 +1798,7 @@ func readYes(r io.Reader) bool {
 // The containers are gone when it returns.
 func runPrep(sess *session, cache engineimages.Cache, images *engine.ImagePlan) error {
 	sess.printWarnings(os.Stderr)
-	if n := len(sess.mounts.Masked); n > 0 {
+	if n := len(sess.expect.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); install scripts can't read them\n", n)
 	}
 	for _, d := range sess.deps.Dirs {

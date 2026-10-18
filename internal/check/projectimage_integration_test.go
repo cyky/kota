@@ -81,9 +81,8 @@ func TestProjectImagePackageInRun(t *testing.T) {
 	if err := layout.Prepare(project); err != nil {
 		t.Fatal(err)
 	}
-	var m Mounts
-	m.Pinned, m.ReadOnly, m.Masked = layout.Targets()
 	in := sandbox.Inputs{ProjectDir: project, Pinned: pinned, ReadOnly: ro}
+	_, m := sandbox.Build(in)
 	s, gw := startInputs(t, in, func(spec *sandbox.Compose) {
 		agent := spec.Services[sandbox.AgentService]
 		agent.Image = tag

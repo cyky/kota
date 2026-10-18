@@ -115,11 +115,6 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 			if len(configs) != len(c.configs) || !state {
 				t.Errorf("configs mounted = %v, state mounted = %v in %+v", configs, state, agent.Volumes)
 			}
-			for _, cfg := range c.configs {
-				if !slices.Contains(sess.mounts.ReadOnly, cfg) {
-					t.Errorf("probes don't check %s is read-only", cfg)
-				}
-			}
 			want := sandbox.StateVolume(filepath.Join(home, "Projects/app"), c.agent)
 			if got := sess.spec.Volumes["state"].Name; got != want {
 				t.Errorf("state volume = %q, want %q", got, want)
@@ -133,37 +128,6 @@ func TestSessionMountsNoHostAgentConfig(t *testing.T) {
 				t.Errorf("command = %q, want %q", agent.Command, c.command)
 			}
 		})
-	}
-}
-
-// TestAgentMountsProbedReadOnly checks every read-only mount the agent asks
-// for is in the spec, read-only from the session dir, and probed read-only,
-// for run and shell.
-func TestAgentMountsProbedReadOnly(t *testing.T) {
-	t.Setenv("KOTA_GATEWAY_KEY", "")
-	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
-	project := fakeHome(t, map[string]string{"README.md": "x"})
-	for _, name := range agent.Names() {
-		for _, shell := range []bool{false, true} {
-			sess, err := prepareTestSession(sessionArgs{agent: name, gatewayURL: defaultGateway, dir: project, shell: shell}, sandbox.ModeRun)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(sess.prepared.ReadOnly) == 0 {
-				t.Errorf("%s: no read-only mounts", name)
-			}
-			volumes := sess.spec.Services[sandbox.AgentService].Volumes
-			for _, m := range sess.prepared.ReadOnly {
-				i := slices.IndexFunc(volumes, func(v sandbox.Volume) bool { return v.Target == m.Target })
-				if i < 0 || volumes[i].Source != m.Source || !volumes[i].ReadOnly || !strings.HasPrefix(m.Source, sess.sessionDir+"/") {
-					t.Errorf("%s (shell %v): %+v not mounted read-only from the session dir", name, shell, m)
-				}
-				if !slices.Contains(sess.mounts.ReadOnly, m.Target) {
-					t.Errorf("%s (shell %v): probes don't check %s is read-only", name, shell, m.Target)
-				}
-			}
-			sess.cleanup()
-		}
 	}
 }
 
@@ -602,8 +566,8 @@ func TestTicketDoneOnlyForPi(t *testing.T) {
 			if !told {
 				t.Errorf("pi (override %v) isn't told to call ticket_done:\n%s", withOverride, note)
 			}
-			if ext == nil || ext.Target != piAgentDir+"/extensions" || !ext.ReadOnly || !slices.Contains(sess.mounts.ReadOnly, ext.Target) {
-				t.Fatalf("pi extensions mount = %+v, want read-only at %s/extensions and probed", ext, piAgentDir)
+			if ext == nil || ext.Target != piAgentDir+"/extensions" || !ext.ReadOnly {
+				t.Fatalf("pi extensions mount = %+v, want read-only at %s/extensions", ext, piAgentDir)
 			}
 			want, _ := assets.Agents.ReadFile("agents/pi/extensions/ticket-done.ts")
 			got, err := os.ReadFile(filepath.Join(ext.Source, "ticket-done.ts"))
@@ -906,8 +870,9 @@ func TestDockerfileReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(sess.cleanup)
-	if !slices.Contains(sess.mounts.ReadOnly, sandbox.Workspace+"/"+projectimage.File) {
-		t.Errorf("%s is not among the probed read-only mounts %v", projectimage.File, sess.mounts.ReadOnly)
+	volumes := sess.spec.Services[sandbox.AgentService].Volumes
+	if !slices.ContainsFunc(volumes, func(v sandbox.Volume) bool { return v.Target == sandbox.Workspace+"/"+projectimage.File && v.ReadOnly }) {
+		t.Errorf("%s is not mounted read-only: %+v", projectimage.File, volumes)
 	}
 }
 
@@ -928,7 +893,7 @@ func TestShellMatchesRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Save the spec before cleanup removes protection placeholders.
-			runSpec, runMounts, runDir := run.spec, run.mounts, run.sessionDir
+			runSpec, runExpect, runDir := run.spec, run.expect, run.sessionDir
 			run.cleanup()
 			sa.shell = true
 			shell, err := prepareTestSession(sa, sandbox.ModeRun)
@@ -952,7 +917,7 @@ func TestShellMatchesRun(t *testing.T) {
 			if string(got) != string(want) {
 				t.Errorf("shell spec differs beyond command:\ngot %s\nwant %s", got, want)
 			}
-			if !reflect.DeepEqual(shell.mounts, runMounts) || shell.gateway != run.gateway || shell.gatewayKey != run.gatewayKey {
+			if !reflect.DeepEqual(shell.expect, runExpect) || shell.gateway != run.gateway || shell.gatewayKey != run.gatewayKey {
 				t.Error("shell containment inputs differ from run")
 			}
 		})

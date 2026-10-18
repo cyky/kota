@@ -23,8 +23,89 @@ func testInputs() Inputs {
 	}
 }
 
+// compose is Build's spec alone.
+func compose(in Inputs) Compose {
+	spec, _ := Build(in)
+	return spec
+}
+
+// TestExpectMatchesAgentVolumes checks, across modes and inputs, that the
+// probes expect exactly the agent's read-only, pinned and masked volumes and
+// its state volume: a mount added to the spec can't be left unprobed.
+func TestExpectMatchesAgentVolumes(t *testing.T) {
+	full := func(mode Mode) Inputs {
+		in := testInputs()
+		in.Mode = mode
+		in.ReadOnly = append(in.ReadOnly,
+			Mount{Source: "/tmp/empty-file", Target: "/workspace/.env", Mask: true},
+			Mount{Source: "/Users/me/Projects/foo/.envrc", Target: "/workspace/.envrc"},
+			Mount{Source: "/Users/me/Projects/ref", Target: ReadOnlyRoot + "/ref"})
+		in.Pinned = append(in.Pinned, Mount{Source: "/tmp/empty-dir", Target: "/workspace/.ssh", Mask: true})
+		in.StateVolume = "kota-state-opencode-x"
+		in.Deps = []Mount{{Source: "kota-deps-x-1", Target: "/workspace/node_modules"}}
+		in.Engine = &EngineRoute{Host: "host.docker.internal", APIPort: 2376, Forwards: []PortForward{{Listen: 2376, Target: 50000}}, CertDir: "/tmp/certs"}
+		return in
+	}
+	cases := []struct {
+		name string
+		in   Inputs
+		want Expect
+	}{
+		{"plain run", testInputs(), Expect{
+			ReadOnly: []string{"/etc/kota/opencode.json", GoModCache, CorepackHome},
+			Pinned:   []string{"/workspace/.git"},
+		}},
+		{"full run", full(ModeRun), Expect{
+			ReadOnly: []string{"/etc/kota/opencode.json", "/workspace/.env", "/workspace/.envrc", ReadOnlyRoot + "/ref", GoModCache, CorepackHome, EngineCertDir},
+			Pinned:   []string{"/workspace/.git", "/workspace/.ssh"},
+			Masked:   []string{"/workspace/.ssh", "/workspace/.env"},
+			State:    StateDir,
+		}},
+		{"full prep", full(ModePrep), Expect{
+			ReadOnly: []string{"/etc/kota/opencode.json", "/workspace/.env", "/workspace/.envrc", ReadOnlyRoot + "/ref", GoModCache, CorepackHome, PnpmStore},
+			Pinned:   []string{"/workspace/.git", "/workspace/.ssh"},
+			Masked:   []string{"/workspace/.ssh", "/workspace/.env"},
+			State:    StateDir,
+		}},
+		{"full fetch", full(ModeFetch), Expect{
+			ReadOnly: []string{"/etc/kota/opencode.json", "/workspace/.env", "/workspace/.envrc", ReadOnlyRoot + "/ref"},
+			Pinned:   []string{"/workspace/.git", "/workspace/.ssh"},
+			Masked:   []string{"/workspace/.ssh", "/workspace/.env"},
+			State:    StateDir,
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec, got := Build(c.in)
+			if !slices.Equal(got.ReadOnly, c.want.ReadOnly) || !slices.Equal(got.Pinned, c.want.Pinned) ||
+				!slices.Equal(got.Masked, c.want.Masked) || got.State != c.want.State {
+				t.Errorf("expect = %+v\nwant     %+v", got, c.want)
+			}
+			// Every volume of the agent is accounted for: read-only, pinned,
+			// the state, one of the writable workspace and dependencies, or
+			// in fetch, the caches it fills.
+			for _, v := range spec.Services[AgentService].Volumes {
+				switch {
+				case v.ReadOnly:
+					if !slices.Contains(got.ReadOnly, v.Target) {
+						t.Errorf("read-only %s not probed", v.Target)
+					}
+				case v.Type == "bind" && v.Target != Workspace:
+					if !slices.Contains(got.Pinned, v.Target) {
+						t.Errorf("pinned %s not probed", v.Target)
+					}
+				case v.Target == StateDir, v.Target == Workspace, v.Target == "/workspace/node_modules":
+				case c.in.Mode == ModeFetch && slices.Contains([]string{GoModCache, CorepackHome, PnpmStore}, v.Target):
+				default:
+					t.Errorf("volume %+v not accounted for", v)
+				}
+			}
+		})
+	}
+}
+
 func TestAgentIsOnlyOnInternalNetwork(t *testing.T) {
-	spec := Build(testInputs())
+	spec := compose(testInputs())
 	agent := spec.Services[AgentService]
 
 	if len(agent.Networks) != 1 {
@@ -42,7 +123,7 @@ func TestAgentIsOnlyOnInternalNetwork(t *testing.T) {
 }
 
 func TestForwarderBridgesToGatewayOnly(t *testing.T) {
-	spec := Build(testInputs())
+	spec := compose(testInputs())
 	fwd := spec.Services[ForwarderService]
 
 	var internal, external int
@@ -69,7 +150,7 @@ func TestForwarderBridgesToGatewayOnly(t *testing.T) {
 func TestGatewayIsConfigurable(t *testing.T) {
 	in := testInputs()
 	in.Gateway = Gateway{Host: "10.0.0.5", Port: 9292}
-	fwd := Build(in).Services[ForwarderService]
+	fwd := compose(in).Services[ForwarderService]
 
 	if got := fwd.Command[len(fwd.Command)-1]; got != "TCP:10.0.0.5:9292" {
 		t.Errorf("forwarder target = %q", got)
@@ -77,7 +158,7 @@ func TestGatewayIsConfigurable(t *testing.T) {
 }
 
 func TestServicesAreHardened(t *testing.T) {
-	spec := Build(testInputs())
+	spec := compose(testInputs())
 	for name, svc := range spec.Services {
 		if !slices.Equal(svc.CapDrop, []string{"ALL"}) {
 			t.Errorf("%s cap_drop = %v", name, svc.CapDrop)
@@ -92,7 +173,7 @@ func TestServicesAreHardened(t *testing.T) {
 }
 
 func TestAgentRunsAsHostUserInWorkspace(t *testing.T) {
-	agent := Build(testInputs()).Services[AgentService]
+	agent := compose(testInputs()).Services[AgentService]
 
 	if agent.User != "501:20" {
 		t.Errorf("user = %q", agent.User)
@@ -111,7 +192,7 @@ func TestAgentRunsAsHostUserInWorkspace(t *testing.T) {
 func TestScratchDirsAreAgentOwnedTmpfs(t *testing.T) {
 	in := testInputs()
 	in.Scratch = []string{Home + "/.pi/agent"}
-	agent := Build(in).Services[AgentService]
+	agent := compose(in).Services[AgentService]
 
 	want := []string{
 		Home + ":uid=501,gid=20,mode=0700",
@@ -123,7 +204,7 @@ func TestScratchDirsAreAgentOwnedTmpfs(t *testing.T) {
 }
 
 func TestMounts(t *testing.T) {
-	agent := Build(testInputs()).Services[AgentService]
+	agent := compose(testInputs()).Services[AgentService]
 
 	want := []Volume{
 		{Type: "bind", Source: "/Users/me/Projects/foo", Target: Workspace},
@@ -136,12 +217,12 @@ func TestMounts(t *testing.T) {
 }
 
 func TestCommandOverride(t *testing.T) {
-	if cmd := Build(testInputs()).Services[AgentService].Command; cmd != nil {
+	if cmd := compose(testInputs()).Services[AgentService].Command; cmd != nil {
 		t.Errorf("default command = %v, want image default", cmd)
 	}
 	in := testInputs()
 	in.Command = []string{"opencode", "run", "hi"}
-	if cmd := Build(in).Services[AgentService].Command; !slices.Equal(cmd, in.Command) {
+	if cmd := compose(in).Services[AgentService].Command; !slices.Equal(cmd, in.Command) {
 		t.Errorf("command = %v", cmd)
 	}
 }
@@ -163,7 +244,7 @@ func TestKeyNamesComposeProject(t *testing.T) {
 	in := testInputs()
 	in.ProjectDir = "/cache/kota/copies/foo-copy"
 	in.Key = "/Users/me/Projects/foo"
-	spec := Build(in)
+	spec := compose(in)
 	if spec.Name != ProjectName(in.Key) {
 		t.Errorf("compose project = %q, want the key's %q", spec.Name, ProjectName(in.Key))
 	}
@@ -220,7 +301,7 @@ func TestStateVolume(t *testing.T) {
 func TestStateVolumeMount(t *testing.T) {
 	in := testInputs()
 	in.StateVolume = StateVolume(in.ProjectDir, "opencode")
-	spec := Build(in)
+	spec := compose(in)
 	agent := spec.Services[AgentService]
 
 	var found bool
@@ -245,7 +326,7 @@ func TestStateVolumeMount(t *testing.T) {
 		}
 	}
 
-	if spec := Build(testInputs()); spec.Volumes[stateKey].Name != "" || spec.Services[AgentService].Environment["XDG_DATA_HOME"] != "" {
+	if spec := compose(testInputs()); spec.Volumes[stateKey].Name != "" || spec.Services[AgentService].Environment["XDG_DATA_HOME"] != "" {
 		t.Errorf("state volume without StateVolume: %+v", spec.Volumes)
 	}
 }
@@ -256,7 +337,7 @@ func TestLiteralEscapesDollars(t *testing.T) {
 	in.Env = map[string]string{"GIT_CONFIG_VALUE_1": "Pay$al"}
 	in.Command = []string{"sh", "-c", "echo $HOME ${USER}"}
 	in.StateVolume = StateVolume(in.ProjectDir, "opencode")
-	spec := Build(in)
+	spec := compose(in)
 	lit := spec.Literal()
 	agent := lit.Services[AgentService]
 
@@ -307,7 +388,7 @@ func TestGatewayKeyOnlyInRunMode(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			in := testInputs()
 			in.Mode, in.GatewayKey = c.mode, c.key
-			spec := Build(in)
+			spec := compose(in)
 			agent := spec.Services[AgentService]
 			if got := slices.Contains(agent.PassEnv, GatewayKeyEnv); got != c.wantKey {
 				t.Errorf("key passed = %v, want %v", got, c.wantKey)
@@ -362,7 +443,7 @@ func TestPrepHasNetworkButNoGateway(t *testing.T) {
 }
 
 func testNetworkNoGateway(t *testing.T, mode Mode) {
-	spec := Build(depInputs(mode))
+	spec := compose(depInputs(mode))
 	agent := spec.Services[AgentService]
 
 	if _, ok := spec.Services[ForwarderService]; ok {
@@ -390,7 +471,7 @@ func testNetworkNoGateway(t *testing.T, mode Mode) {
 }
 
 func TestRunIsOfflineForPackageManagers(t *testing.T) {
-	env := Build(depInputs(ModeRun)).Services[AgentService].Environment
+	env := compose(depInputs(ModeRun)).Services[AgentService].Environment
 	if env["GOPROXY"] != "off" || env["COREPACK_ENABLE_NETWORK"] != "0" {
 		t.Errorf("run environment = %v", env)
 	}
@@ -399,7 +480,7 @@ func TestRunIsOfflineForPackageManagers(t *testing.T) {
 func TestDependencyVolumes(t *testing.T) {
 	for _, mode := range []Mode{ModeRun, ModePrep} {
 		in := depInputs(mode)
-		spec := Build(in)
+		spec := compose(in)
 		for _, d := range in.Deps {
 			v, named, ok := volumeAt(spec, AgentService, d.Target)
 			if !ok || v.Type != "volume" || v.ReadOnly || named.Name != d.Source || named.External {
@@ -428,7 +509,7 @@ func TestSharedCaches(t *testing.T) {
 		{ModeRun, PnpmStore, "", false, false},
 	}
 	for _, c := range cases {
-		spec := Build(depInputs(c.mode))
+		spec := compose(depInputs(c.mode))
 		v, named, ok := volumeAt(spec, AgentService, c.target)
 		if ok != c.mounted {
 			t.Errorf("mode %d: %s mounted = %v, want %v", c.mode, c.target, ok, c.mounted)
@@ -447,12 +528,12 @@ func TestSharedCaches(t *testing.T) {
 }
 
 func TestVolumesServiceOnlyChowns(t *testing.T) {
-	if _, ok := Build(testInputs()).Services[VolumesService]; ok {
+	if _, ok := compose(testInputs()).Services[VolumesService]; ok {
 		t.Error("volumes service without dependency volumes")
 	}
 	for _, mode := range []Mode{ModeRun, ModePrep} {
 		in := depInputs(mode)
-		spec := Build(in)
+		spec := compose(in)
 		s, ok := spec.Services[VolumesService]
 		if !ok {
 			t.Fatalf("mode %d: no %s service", mode, VolumesService)
@@ -483,7 +564,7 @@ func TestProjectImageOnlyForAgent(t *testing.T) {
 	for _, mode := range []Mode{ModeRun, ModePrep, ModeFetch} {
 		in := depInputs(mode)
 		in.AgentImage, in.HelperImage = "kota-project-abc:latest", "kota-base:latest"
-		spec := Build(in)
+		spec := compose(in)
 		if got := spec.Services[AgentService].Image; got != in.AgentImage {
 			t.Errorf("mode %d: agent image = %s", mode, got)
 		}

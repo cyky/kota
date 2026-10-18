@@ -28,13 +28,13 @@ var engineEnv = map[string]string{
 }
 
 func TestEngineEnvOnlyForEngineProjects(t *testing.T) {
-	agent := Build(engineInputs()).Services[AgentService]
+	agent := compose(engineInputs()).Services[AgentService]
 	for k, v := range engineEnv {
 		if agent.Environment[k] != v {
 			t.Errorf("%s = %q, want %q", k, agent.Environment[k], v)
 		}
 	}
-	plain := Build(testInputs())
+	plain := compose(testInputs())
 	for k := range engineEnv {
 		if _, ok := plain.Services[AgentService].Environment[k]; ok {
 			t.Errorf("%s set without an engine", k)
@@ -63,7 +63,7 @@ func TestEngineAvailabilitySignal(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			spec := Build(c.in)
+			spec := compose(c.in)
 			env := spec.Services[AgentService].Environment
 			got, ok := env[EngineEnv]
 			if got != c.want || ok != (c.want != "") {
@@ -112,14 +112,14 @@ func TestEngineNote(t *testing.T) {
 func TestEngineEnvWinsOverInputs(t *testing.T) {
 	in := engineInputs()
 	in.Env = map[string]string{"DOCKER_HOST": "unix:///var/run/docker.sock", "TESTCONTAINERS_RYUK_DISABLED": "false"}
-	env := Build(in).Services[AgentService].Environment
+	env := compose(in).Services[AgentService].Environment
 	if env["DOCKER_HOST"] != "tcp://engine:2376" || env["TESTCONTAINERS_RYUK_DISABLED"] != "true" {
 		t.Errorf("env = %v", env)
 	}
 }
 
 func TestEngineClientCertsReadOnly(t *testing.T) {
-	spec := Build(engineInputs())
+	spec := compose(engineInputs())
 	v, _, ok := volumeAt(spec, AgentService, EngineCertDir)
 	if !ok || !v.ReadOnly || v.Type != "bind" || v.Source != "/cache/sessions/x/engine-client" {
 		t.Errorf("cert mount = %+v (found %v)", v, ok)
@@ -127,7 +127,7 @@ func TestEngineClientCertsReadOnly(t *testing.T) {
 }
 
 func TestEngineForwarder(t *testing.T) {
-	spec := Build(engineInputs())
+	spec := compose(engineInputs())
 	fwd, ok := spec.Services[EngineService]
 	if !ok {
 		t.Fatal("no engine forwarder")
@@ -174,7 +174,7 @@ func TestEngineForwarder(t *testing.T) {
 // locked down as any: unprivileged, no added capabilities, offline, and
 // with no Docker socket.
 func TestEngineKeepsSandboxHardening(t *testing.T) {
-	spec := Build(engineInputs())
+	spec := compose(engineInputs())
 	data, err := json.Marshal(spec.Literal())
 	if err != nil {
 		t.Fatal(err)
@@ -206,9 +206,9 @@ func TestEngineIgnoredInPrep(t *testing.T) {
 		t.Run(strconv.Itoa(int(mode)), func(t *testing.T) {
 			in := engineInputs()
 			in.Mode = mode
-			spec := Build(in)
+			spec := compose(in)
 			in.Engine, in.EngineOff = nil, true
-			if _, ok := Build(in).Services[AgentService].Environment[EngineEnv]; ok {
+			if _, ok := compose(in).Services[AgentService].Environment[EngineEnv]; ok {
 				t.Errorf("%s in prep", EngineEnv)
 			}
 			if _, ok := spec.Services[EngineService]; ok {

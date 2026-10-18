@@ -46,7 +46,7 @@ Some caches are shared by all projects: the Go module cache (`kota-cache-gomod`)
 1. **Fetch**, with the caches writable: `corepack install`, `pnpm fetch --ignore-pnpmfile` and `go mod download`. No project code runs: no lifecycle scripts, pnpmfile or `yarnPath`. What is downloaded is checked against the lockfile, `go.sum` or the `packageManager` hash, and the caches are keyed by content or version.
 2. **Install**, with the caches read-only: `pnpm install --offline`, `yarn install`, `npm ci` and the `kota.yaml` command, which run lifecycle scripts.
 
-pnpm without a lockfile has nothing to fetch ahead, so its install uses a store of its own for that run. Sessions mount the Go module and corepack caches read-only, with `GOPROXY=off` and `COREPACK_ENABLE_NETWORK=0`, so a missing dependency fails at once. `kota clean --shared-caches` resets them (see [Cleanup](sessions.md#cleanup)).
+pnpm without a lockfile has nothing to fetch ahead, so its install uses a store of its own for that run. Sessions mount the Go module and corepack caches read-only, which the probes check, with `GOPROXY=off` and `COREPACK_ENABLE_NETWORK=0`, so a missing dependency fails at once. `kota clean --shared-caches` resets them (see [Cleanup](sessions.md#cleanup)).
 
 ## Limits
 

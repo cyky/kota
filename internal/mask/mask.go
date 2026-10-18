@@ -579,6 +579,7 @@ func (l Layout) Bind(project, scratch string) (pinned, readOnly []sandbox.Mount,
 		mount := sandbox.Mount{
 			Source: filepath.Join(project, filepath.FromSlash(m.Path)),
 			Target: sandbox.Workspace + "/" + m.Path,
+			Mask:   m.Mask,
 		}
 		switch {
 		case (m.Placeholder || m.Mask) && m.Dir:
@@ -593,25 +594,6 @@ func (l Layout) Bind(project, scratch string) (pinned, readOnly []sandbox.Mount,
 		}
 	}
 	return pinned, readOnly, nil
-}
-
-// Targets returns the in-sandbox paths the probes check: pinned paths must
-// be mount points, every other mount must reject writes, and masks must
-// read as empty.
-func (l Layout) Targets() (pinned, readOnly, masked []string) {
-	for _, m := range l.Mounts {
-		target := sandbox.Workspace + "/" + m.Path
-		switch {
-		case m.Pin:
-			pinned = append(pinned, target)
-		default:
-			readOnly = append(readOnly, target)
-		}
-		if m.Mask {
-			masked = append(masked, target)
-		}
-	}
-	return pinned, readOnly, masked
 }
 
 // Prepare writes the seeded files to the host. Call Cleanup afterwards.

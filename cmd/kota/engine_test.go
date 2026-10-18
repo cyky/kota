@@ -104,9 +104,6 @@ func TestShellEngineSession(t *testing.T) {
 	if agent.Environment["DOCKER_HOST"] != "tcp://engine:2376" || agent.Environment["TESTCONTAINERS_RYUK_DISABLED"] != "true" {
 		t.Errorf("env = %v", agent.Environment)
 	}
-	if !slices.Contains(sess.mounts.ReadOnly, sandbox.EngineCertDir) {
-		t.Error("probes don't check the client certificates are read-only")
-	}
 	// Only the client side is mounted; the server key stays on the host.
 	for _, v := range agent.Volumes {
 		if strings.Contains(v.Source, "engine-server") {
@@ -355,9 +352,6 @@ func TestAgentEngineInstructions(t *testing.T) {
 				}
 				if !mounted || !v.ReadOnly || !strings.HasPrefix(v.Source, sess.sessionDir+"/") {
 					t.Fatalf("note mount = %+v (found %v), want read-only from the session dir", v, mounted)
-				}
-				if !slices.Contains(sess.mounts.ReadOnly, notes[name]) {
-					t.Error("probes don't check the note is read-only")
 				}
 				// The agent still writes its own state next to the note.
 				dir := path.Dir(notes[name])

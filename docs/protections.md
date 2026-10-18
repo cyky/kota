@@ -15,6 +15,8 @@ The agent can't plant code that git, direnv or kota runs on the host later. Thes
 
 Each is mounted read-only over itself. A missing one (no `.envrc`, no hooks directory, no `commondir`) gets an empty read-only placeholder for the session, so the agent can't create it either, and the placeholder is removed from the host afterwards. `.git`, and every other directory on the way to a protected path, is mounted over itself too, so it can't be renamed away and replaced. A protected path with a symlink anywhere along it is refused, because a read-only mount can't hold it in place. The probes check each of these mounts before the session.
 
+The shared Go module and corepack caches, which every project's sessions use, are read-only as well, so the agent can't plant code in another project's dependencies; the probes check them too, and `kota check` lists them. Only `prep`'s fetch step writes them (see [Shared caches](dependencies.md#shared-caches)).
+
 Git still works inside the sandbox. Commits use your host identity, passed in through `GIT_CONFIG_*`. Git's excludes file there is a read-only list of the session's placeholders and masks, so `git add -A` doesn't stage them. Your host's global excludes (`core.excludesFile`, `~/.config/git/ignore`) aren't passed in, since even their patterns can name private files; instead, kota warns when a commit adds a file they ignore (see [Commits](#commits)).
 
 Limits:

@@ -167,6 +167,43 @@ func SharedCacheVolumes() []string {
 type Mount struct {
 	Source string
 	Target string
+	// Mask hides a secret behind an empty file or directory, which the
+	// probes check reads as empty.
+	Mask bool
+}
+
+// Expect is what the containment probes verify about the agent container,
+// derived from its volumes.
+type Expect struct {
+	// ReadOnly must reject writes: every read-only volume.
+	ReadOnly []string
+	// Pinned must be mount points: every writable bind besides Workspace.
+	Pinned []string
+	// Masked must read as empty: every Mount with Mask.
+	Masked []string
+	// State is the agent's state directory, which must be writable. Empty
+	// skips the probe.
+	State string
+}
+
+// expect derives the probe expectations from the agent's volumes and the
+// targets of its masks.
+func expect(volumes []Volume, masks []string) Expect {
+	var e Expect
+	for _, v := range volumes {
+		switch {
+		case v.ReadOnly:
+			e.ReadOnly = append(e.ReadOnly, v.Target)
+		case v.Type == "volume" && v.Target == StateDir:
+			e.State = v.Target
+		case v.Type == "bind" && v.Target != Workspace:
+			e.Pinned = append(e.Pinned, v.Target)
+		}
+		if slices.Contains(masks, v.Target) {
+			e.Masked = append(e.Masked, v.Target)
+		}
+	}
+	return e
 }
 
 // EngineRoute is the agent's route to its project's Engine VM, whose port
@@ -325,8 +362,9 @@ func ProjectVolumes(projectDir string, available []string) []string {
 	return slices.Compact(volumes)
 }
 
-// Build produces the compose spec for a session.
-func Build(in Inputs) Compose {
+// Build produces the compose spec for a session, and what the probes
+// verify about its agent container.
+func Build(in Inputs) (Compose, Expect) {
 	hardening := Service{
 		CapDrop:     []string{"ALL"},
 		SecurityOpt: []string{"no-new-privileges:true"},
@@ -351,11 +389,18 @@ func Build(in Inputs) Compose {
 	}
 
 	volumes := []Volume{{Type: "bind", Source: in.ProjectDir, Target: Workspace}}
+	var masks []string
 	for _, m := range in.Pinned {
 		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target})
+		if m.Mask {
+			masks = append(masks, m.Target)
+		}
 	}
 	for _, m := range in.ReadOnly {
 		volumes = append(volumes, Volume{Type: "bind", Source: m.Source, Target: m.Target, ReadOnly: true})
+		if m.Mask {
+			masks = append(masks, m.Target)
+		}
 	}
 	named := map[string]NamedVolume{}
 	if in.StateVolume != "" {
@@ -433,11 +478,12 @@ func Build(in Inputs) Compose {
 		key = in.ProjectDir
 	}
 	spec := Compose{Name: ProjectName(key), Volumes: named, Services: services}
+	expected := expect(agent.Volumes, masks)
 	if prep {
 		agent.Networks = map[string]*NetworkAttach{egressNetwork: {}}
 		spec.Networks = map[string]Network{egressNetwork: {}}
 		services[AgentService] = agent
-		return spec
+		return spec, expected
 	}
 
 	forwarder := hardening
@@ -468,7 +514,7 @@ func Build(in Inputs) Compose {
 		}},
 		egressNetwork: {},
 	}
-	return spec
+	return spec, expected
 }
 
 // engineForwarder relays each of the route's ports from the internal

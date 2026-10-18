@@ -115,7 +115,7 @@ func startKeyed(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose), 
 	in.UID, in.GID = os.Getuid(), os.Getgid()
 	in.Gateway = gw
 	in.AgentImage, in.ForwarderImage = testAgentImage, testForwarderImage
-	spec := sandbox.Build(in)
+	spec, _ := sandbox.Build(in)
 	if mutate != nil {
 		mutate(&spec)
 	}
@@ -131,7 +131,7 @@ func TestContainedSandboxPassesAllProbes(t *testing.T) {
 	requireDocker(t)
 	s, gw := startSandbox(t, nil)
 
-	results, err := Run(s, gw, Mounts{})
+	results, err := Run(s, gw, sandbox.Expect{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestBrokenSandboxIsDetected(t *testing.T) {
 		spec.Services[sandbox.AgentService] = agent
 	})
 
-	results, err := Run(s, gw, Mounts{})
+	results, err := Run(s, gw, sandbox.Expect{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestReadOnlyMountRejectsWrites(t *testing.T) {
 			spec.Services[sandbox.AgentService] = agent
 		})
 
-		results, err := Run(s, gw, Mounts{ReadOnly: []string{target}})
+		results, err := Run(s, gw, sandbox.Expect{ReadOnly: []string{target}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -252,7 +252,7 @@ func gitRepo(t *testing.T) string {
 }
 
 // startProtected starts a sandbox for project with its mask layout applied.
-func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gateway, Mounts) {
+func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gateway, sandbox.Expect) {
 	t.Helper()
 	layout, err := mask.Plan(project, mask.DefaultRules)
 	if err != nil {
@@ -266,10 +266,10 @@ func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gate
 	if err != nil {
 		t.Fatal(err)
 	}
-	var m Mounts
-	m.Pinned, m.ReadOnly, m.Masked = layout.Targets()
-	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project, Pinned: pinned, ReadOnly: readOnly, Env: gitEnv}, nil)
-	return s, gw, m
+	in := sandbox.Inputs{ProjectDir: project, Pinned: pinned, ReadOnly: readOnly, Env: gitEnv}
+	_, e := sandbox.Build(in)
+	s, gw := startInputs(t, in, nil)
+	return s, gw, e
 }
 
 func requirePass(t *testing.T, results []probe.Result) {
@@ -440,7 +440,7 @@ func TestMissingProtectionIsDetected(t *testing.T) {
 	// Probe for the protections without applying them.
 	project := gitRepo(t)
 	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
-	results, err := Run(s, gw, Mounts{
+	results, err := Run(s, gw, sandbox.Expect{
 		ReadOnly: []string{"/workspace/.git/hooks", "/workspace/.git/config"},
 		Pinned:   []string{"/workspace/.git"},
 	})
@@ -515,7 +515,7 @@ func TestMissingMaskIsDetected(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
-	results, err := Run(s, gw, Mounts{Masked: []string{"/workspace/.env"}})
+	results, err := Run(s, gw, sandbox.Expect{Masked: []string{"/workspace/.env"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +526,7 @@ func TestMissingMaskIsDetected(t *testing.T) {
 
 // startWithState starts a sandbox for project with its opencode state volume
 // and a read-only agent config, as run does.
-func startWithState(t *testing.T, project string) (*docker.Session, sandbox.Gateway, Mounts) {
+func startWithState(t *testing.T, project string) (*docker.Session, sandbox.Gateway, sandbox.Expect) {
 	t.Helper()
 	cfg := filepath.Join(t.TempDir(), "opencode.json")
 	if err := os.WriteFile(cfg, []byte("{}"), 0o644); err != nil {
@@ -539,7 +539,7 @@ func startWithState(t *testing.T, project string) (*docker.Session, sandbox.Gate
 		ReadOnly:    []sandbox.Mount{{Source: cfg, Target: cfgTarget}},
 		StateVolume: vol,
 	}, nil)
-	return s, gw, Mounts{ReadOnly: []string{cfgTarget}, State: sandbox.StateDir}
+	return s, gw, sandbox.Expect{ReadOnly: []string{cfgTarget}, State: sandbox.StateDir}
 }
 
 // removeVolume deletes a state volume after the test, once its sessions are
@@ -606,7 +606,7 @@ func TestScratchDirWithReadOnlyConfig(t *testing.T) {
 	}
 	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t), ReadOnly: ro, Scratch: []string{agentDir}}, nil)
 
-	results, err := Run(s, gw, Mounts{ReadOnly: targets})
+	results, err := Run(s, gw, sandbox.Expect{ReadOnly: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +676,7 @@ func TestGatewayKey(t *testing.T) {
 				t.Errorf("error contains the key: %v", err)
 			}
 
-			results, err := Run(s, gw, Mounts{})
+			results, err := Run(s, gw, sandbox.Expect{})
 			if err != nil {
 				t.Fatal(err)
 			}

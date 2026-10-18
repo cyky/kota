@@ -18,27 +18,15 @@ import (
 // ssh, http(s), the Docker API and Kubernetes, which a Docker VM may expose.
 var extraHostPorts = []int{22, 80, 443, 2375, 6443}
 
-// Mounts are the in-sandbox paths whose mounts the probes verify.
-type Mounts struct {
-	// ReadOnly must reject writes.
-	ReadOnly []string
-	// Pinned must be mount points.
-	Pinned []string
-	// Masked must read as empty.
-	Masked []string
-	// State is the agent's state directory, which must be writable. Empty
-	// skips the probe.
-	State string
-}
-
 // Run discovers the addresses that lead out of the sandbox, runs the probe
-// suite in a fresh agent container and returns every result.
-func Run(s *docker.Session, gw sandbox.Gateway, m Mounts) ([]probe.Result, error) {
+// suite in a fresh agent container, checking its mounts against e, and
+// returns every result.
+func Run(s *docker.Session, gw sandbox.Gateway, e sandbox.Expect) ([]probe.Result, error) {
 	t := Targets(s, gw)
-	t.ReadOnly = m.ReadOnly
-	t.Pinned = m.Pinned
-	t.Masked = m.Masked
-	t.State = m.State
+	t.ReadOnly = e.ReadOnly
+	t.Pinned = e.Pinned
+	t.Masked = e.Masked
+	t.State = e.State
 	probes := probe.Suite(t)
 	out, err := s.Capture("bash", "-c", probe.Script(probes))
 	if err != nil {
