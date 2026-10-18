@@ -28,9 +28,9 @@ Limits:
 
 Secrets in the project are masked: inside the sandbox they read as an empty file or directory and can't be written, while the files on the host stay untouched. The default rules cover:
 
-- `.env` and `.env.*` (except `.env.example` and similar);
-- keys and certificates (`*.pem`, `*.key`, `id_rsa*`, ...);
-- `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials` and Terraform state;
+- `.env` and `.env.*`, except `.env.example`, `.env.sample`, `.env.template` and `.env.dist`;
+- keys and certificates: `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, and `id_rsa*`, `id_dsa*`, `id_ecdsa*` and `id_ed25519*` except public keys (`*.pub`);
+- `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, and Terraform state (`*.tfstate`, `*.tfstate.*`);
 - `.aws/`, `.ssh/` and `.gnupg/` directories.
 
 Add your own in `.kotaignore` at the project root, in gitignore syntax. It comes after the defaults, so `!` unmasks a default. It is read-only in the sandbox. `kota check` lists the masks.
