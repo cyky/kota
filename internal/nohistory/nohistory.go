@@ -18,9 +18,10 @@ import (
 	"slices"
 	"strings"
 
-	"kota/internal/approval"
 	"kota/internal/deps"
+	"kota/internal/interrupt"
 	"kota/internal/mask"
+	"kota/internal/offlinegit"
 	"kota/internal/projectimage"
 )
 
@@ -29,19 +30,10 @@ import (
 // .kotaignore that masks a tracked secret must mask it in the copy too.
 var ConfigFiles = []string{mask.IgnoreFile, deps.ConfigFile, projectimage.File}
 
-// WritableRunner is approval.Runner with writable also mounted at its own
-// host path, and writable there.
-type WritableRunner func(mounts []string, writable, dir string, cmd ...string) (string, error)
-
-// gitFunc runs git hardened as the change report does: no fsmonitor, no index
-// writes, no ownership check.
-const gitFunc = `g() { git -c 'safe.directory=*' -c core.fsmonitor=false --no-optional-locks "$@"; }
-`
-
 // inspectScript fails on a repository without commits, then lists the
 // tree at HEAD, a marker no tree entry can look like, and the paths stored
 // in Git LFS.
-const inspectScript = gitFunc + `g rev-parse -q --verify 'HEAD^{commit}' >/dev/null || { echo 'the repository has no commits yet' >&2; exit 1; }
+const inspectScript = `g rev-parse -q --verify 'HEAD^{commit}' >/dev/null || { echo 'the repository has no commits yet' >&2; exit 1; }
 g ls-tree -r -z --full-tree HEAD
 printf 'lfs\0'
 g ls-files -z -- ':(attr:filter=lfs)'`
@@ -65,12 +57,12 @@ func (m Missing) Empty() bool {
 
 // Inspect checks that project is the top of a git repository with at least
 // one commit, and returns what a copy of it would leave out.
-func Inspect(project string, run approval.Runner) (Missing, error) {
+func Inspect(project string, run offlinegit.Runner) (Missing, error) {
 	repo, err := repoOf(project)
 	if err != nil {
 		return Missing{}, err
 	}
-	out, err := run(repo.Mounts, project, "sh", "-c", inspectScript)
+	out, err := offlinegit.Script(run, offlinegit.Job{ReadOnly: repo.Mounts, Dir: project}, inspectScript)
 	if err != nil {
 		return Missing{}, fmt.Errorf("inspect the repository: %w", err)
 	}
@@ -78,7 +70,7 @@ func Inspect(project string, run approval.Runner) (Missing, error) {
 	if err != nil {
 		return Missing{}, err
 	}
-	status, err := approval.ReadStatus(project, run)
+	status, err := offlinegit.ReadStatus(project, run)
 	if err != nil {
 		return Missing{}, err
 	}
@@ -92,18 +84,16 @@ func Inspect(project string, run approval.Runner) (Missing, error) {
 
 // repoOf finds project's repository, which must have its .git in project
 // itself: the copy is a clone of the whole repository.
-func repoOf(project string) (approval.Repo, error) {
-	repo, ok, err := approval.FindRepo(project)
+func repoOf(project string) (offlinegit.Repo, error) {
+	repo, ok, err := offlinegit.FindRepo(project)
 	if err != nil {
-		return approval.Repo{}, err
+		return offlinegit.Repo{}, err
 	}
 	if !ok {
-		return approval.Repo{}, fmt.Errorf("--no-history needs a git repository, and %s isn't in one", project)
+		return offlinegit.Repo{}, fmt.Errorf("--no-history needs a git repository, and %s isn't in one", project)
 	}
-	if _, err := os.Lstat(filepath.Join(project, ".git")); errors.Is(err, fs.ErrNotExist) {
-		return approval.Repo{}, fmt.Errorf("%s is inside a larger git repository; --no-history copies whole repositories, so run it at the repository's top", project)
-	} else if err != nil {
-		return approval.Repo{}, err
+	if repo.Top != project {
+		return offlinegit.Repo{}, fmt.Errorf("%s is inside a larger git repository; --no-history copies whole repositories, so run it at the repository's top", project)
 	}
 	return repo, nil
 }
@@ -156,7 +146,7 @@ func Confirm(in io.Reader, out io.Writer, m Missing) bool {
 	list("submodules (empty in the copy)", m.Submodules)
 	list("Git LFS files (pointer files in the copy)", m.LFS)
 	fmt.Fprint(out, "Type y to start without them: ")
-	answer := strings.TrimSpace(approval.ReadLine(in))
+	answer := strings.TrimSpace(interrupt.ReadLine(in))
 	return answer == "y" || answer == "Y"
 }
 
@@ -164,9 +154,8 @@ func Confirm(in io.Reader, out io.Writer, m Missing) bool {
 // the remote and the reflog, which name the project's path, and keeps
 // kota's own files ($3...) out of git add when they are untracked.
 const cloneScript = `set -e
-g() { git -c 'safe.directory=*' -c core.fsmonitor=false -c protocol.file.allow=always "$@"; }
 src=$1 dest=$2; shift 2
-g clone -q --no-local --depth 1 --single-branch --no-tags --template= -- "$src" "$dest"
+g -c protocol.file.allow=always clone -q --no-local --depth 1 --single-branch --no-tags --template= -- "$src" "$dest"
 cd "$dest"
 g remote remove origin
 g reflog expire --expire=now --all
@@ -176,14 +165,14 @@ for f; do printf '/%s\n' "$f"; done > .git/info/exclude`
 // Clone clones the commit project's HEAD points at into dest, which must
 // not exist yet. dest's parent is the only writable mount. On an error,
 // the caller removes dest.
-func Clone(project, dest string, run WritableRunner) error {
+func Clone(project, dest string, run offlinegit.Runner) error {
 	repo, err := repoOf(project)
 	if err != nil {
 		return err
 	}
 	parent := filepath.Dir(dest)
-	args := append([]string{"sh", "-c", cloneScript, "sh", project, dest}, ConfigFiles...)
-	if _, err := run(repo.Mounts, parent, parent, args...); err != nil {
+	job := offlinegit.Job{ReadOnly: repo.Mounts, Writable: parent, Dir: parent}
+	if _, err := offlinegit.Script(run, job, cloneScript, append([]string{project, dest}, ConfigFiles...)...); err != nil {
 		return fmt.Errorf("copy the project: %w", err)
 	}
 	return nil

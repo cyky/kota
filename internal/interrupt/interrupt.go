@@ -6,6 +6,7 @@ package interrupt
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -54,4 +55,25 @@ func Ask(prompt func() bool) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// ReadLine reads up to a newline one byte at a time, for a prompt run by
+// Ask, so nothing after the answer is consumed: the rest of stdin belongs
+// to the agent.
+func ReadLine(in io.Reader) string {
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		n, err := in.Read(b)
+		if n == 1 {
+			if b[0] == '\n' {
+				break
+			}
+			line = append(line, b[0])
+		}
+		if err != nil {
+			break
+		}
+	}
+	return string(line)
 }

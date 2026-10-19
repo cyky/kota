@@ -4,25 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+
+	"kota/internal/offlinegit"
 )
-
-// Runner runs cmd with working directory dir in an offline container that
-// sees only mounts, each read-only at its own host path, and returns its
-// stdout. A non-zero exit is an error.
-//
-// git never runs on the host against the project's repository: a
-// repository the agent created has agent-written config, and git can run
-// what config and .gitattributes name.
-type Runner func(mounts []string, dir string, cmd ...string) (string, error)
-
-// gitPrefix is how every git command starts: no fsmonitor, no index
-// writes, and no ownership check, since the container runs as the host user.
-var gitPrefix = []string{"git", "-c", "safe.directory=*", "-c", "core.fsmonitor=false", "--no-optional-locks"}
 
 // Refs are a repository's branch and tag tips and its HEAD commit.
 type Refs struct {
@@ -39,16 +26,17 @@ var objectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 // unless project has its own .git directory: otherwise git can't work
 // inside the sandbox (a .git file points outside it), so nothing there can
 // make commits.
-func ReadRefs(project string, run Runner) (refs Refs, ok bool, err error) {
-	info, err := os.Lstat(filepath.Join(project, ".git"))
-	if errors.Is(err, os.ErrNotExist) || err == nil && !info.IsDir() {
-		return Refs{}, false, nil
-	} else if err != nil {
+//
+// git runs offline: a repository the agent created has agent-written
+// config, and git can run what config and .gitattributes name.
+func ReadRefs(project string, run offlinegit.Runner) (refs Refs, ok bool, err error) {
+	repo, ok, err := offlinegit.FindRepo(project)
+	if err != nil || !ok || repo.Top != project || repo.Linked {
 		return Refs{}, false, err
 	}
 	// show-ref exits 1 when there are no refs at all, as in a new repository.
-	cmd := append([]string{"sh", "-c", `"$@"; s=$?; [ "$s" -le 1 ]`, "sh"}, gitPrefix...)
-	out, err := run([]string{project}, project, append(cmd, "show-ref", "--head", "--heads", "--tags")...)
+	out, err := offlinegit.Script(run, offlinegit.Job{ReadOnly: []string{project}, Dir: project},
+		`g show-ref --head --heads --tags; s=$?; [ "$s" -le 1 ]`)
 	if err != nil {
 		return Refs{}, false, fmt.Errorf("git show-ref: %w", err)
 	}
@@ -130,8 +118,7 @@ var emptyBlobs = []string{
 
 // historyScript prints whether HEAD's old commit ($1) is still an ancestor
 // of its new one ($2), then runs git log with the remaining arguments.
-const historyScript = `g() { git -c 'safe.directory=*' -c core.fsmonitor=false --no-optional-locks "$@"; }
-old=$1 new=$2; shift 2
+const historyScript = `old=$1 new=$2; shift 2
 if [ -z "$old" ] || { [ -n "$new" ] && g merge-base --is-ancestor "$old" "$new"; }; then
   echo kept
 else
@@ -141,7 +128,7 @@ g log "$@"`
 
 // ReadHistory returns the commits made between before and after, on any
 // branch or tag or a detached HEAD, with the files each one changed.
-func ReadHistory(project string, run Runner, before, after Refs) (History, error) {
+func ReadHistory(project string, run offlinegit.Runner, before, after Refs) (History, error) {
 	if before.Equal(after) {
 		return History{}, nil
 	}
@@ -150,14 +137,14 @@ func ReadHistory(project string, run Runner, before, after Refs) (History, error
 		// Nothing is reachable now, so HEAD's old commit isn't either.
 		return History{Rewritten: before.Head != ""}, nil
 	}
-	cmd := []string{"sh", "-c", historyScript, "sh", before.Head, after.Head,
+	args := []string{before.Head, after.Head,
 		"--no-textconv", "--no-ext-diff", "--no-renames", "--no-abbrev", "--raw", "-z",
 		"--format=%x01%H%x00%s"}
-	cmd = append(cmd, positive...)
+	args = append(args, positive...)
 	if negative := tipIDs(before); len(negative) > 0 {
-		cmd = append(append(cmd, "--not"), negative...)
+		args = append(append(args, "--not"), negative...)
 	}
-	out, err := run([]string{project}, project, cmd...)
+	out, err := offlinegit.Script(run, offlinegit.Job{ReadOnly: []string{project}, Dir: project}, historyScript, args...)
 	if err != nil {
 		return History{}, fmt.Errorf("git log: %w", err)
 	}

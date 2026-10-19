@@ -116,7 +116,7 @@ flowchart TD
 
 ## Packages
 
-`cmd/kota` wires the commands together. The packages under `internal/` are mostly pure and table-tested. `docker` and `enginevm` are the thin adapters over the Docker CLI and QEMU.
+`cmd/kota` wires the commands together. The packages under `internal/` are mostly pure and table-tested. `docker` and `enginevm` are the thin adapters over the Docker CLI and QEMU. Every git command kota runs against a project's repository for the full-auto prompt, the **Change report** and the **No-history copy** goes through `offlinegit`, which runs it hardened in an offline container under the `--ro` path policy.
 
 ```mermaid
 flowchart TD
@@ -144,7 +144,7 @@ flowchart TD
         check["check<br/>run probes"]
         changereport["changereport<br/>watched files"]
         prepgate["prepgate<br/>prep confirmation"]
-        approval["approval<br/>uncommitted changes"]
+        approval["approval<br/>full-auto prompt"]
     end
 
     subgraph eng["Engine VM"]
@@ -157,6 +157,7 @@ flowchart TD
     subgraph runtime["Runtime"]
         lifecycle["lifecycle<br/>start and stop order,<br/>teardown on failure or signal"]
         docker["docker<br/>Docker CLI adapter"]
+        offlinegit["offlinegit<br/>git in offline containers:<br/>repository discovery, status"]
         sessionregistry["sessionregistry<br/>per-project lease"]
         hostdata["hostdata<br/>kota's directory on the host"]
         interrupt["interrupt<br/>signals"]
@@ -165,7 +166,10 @@ flowchart TD
     main --> policy & spec & verify & eng & runtime
     mask --> deps & projectimage & sandbox
     pathpolicy --> sandbox
-    nohistory --> approval & mask & deps & projectimage & changereport & hostdata
+    nohistory --> offlinegit & mask & deps & projectimage & changereport & hostdata & interrupt
+    approval --> offlinegit & interrupt
+    changereport --> offlinegit
+    offlinegit --> docker & pathpolicy
     agent --> models & override & sandbox & instructions
     check --> docker & probe & sandbox
     probe --> sandbox

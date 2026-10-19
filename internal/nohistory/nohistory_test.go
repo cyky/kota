@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"kota/internal/offlinegit"
 )
 
 func TestParseInspect(t *testing.T) {
@@ -43,8 +45,8 @@ func TestInspectLeavesOutConfigFiles(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	run := func(mounts []string, dir string, cmd ...string) (string, error) {
-		if slices.Contains(cmd, inspectScript) {
+	run := func(j offlinegit.Job) (string, error) {
+		if slices.ContainsFunc(j.Cmd, func(arg string) bool { return strings.HasSuffix(arg, inspectScript) }) {
 			return "lfs\x00", nil
 		}
 		return " M src/app.ts\n?? kota.yaml\n M .kotaignore\n?? notes.txt\n", nil
@@ -59,7 +61,7 @@ func TestInspectLeavesOutConfigFiles(t *testing.T) {
 }
 
 func TestInspectNeedsRepositoryTop(t *testing.T) {
-	run := func([]string, string, ...string) (string, error) {
+	run := func(offlinegit.Job) (string, error) {
 		t.Error("ran git outside a repository's top")
 		return "", nil
 	}

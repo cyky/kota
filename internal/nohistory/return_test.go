@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"kota/internal/changereport"
+	"kota/internal/offlinegit"
 )
 
 func TestBranchName(t *testing.T) {
@@ -37,10 +38,9 @@ func TestUnreturned(t *testing.T) {
 }
 
 func TestUncommittedLeavesOutConfigFiles(t *testing.T) {
-	var mounts []string
-	var cmd []string
-	run := func(m []string, dir string, c ...string) (string, error) {
-		mounts, cmd = m, c
+	var job offlinegit.Job
+	run := func(j offlinegit.Job) (string, error) {
+		job = j
 		return " M src/a.go\n M kota.yaml\n?? new.txt\n", nil
 	}
 	got, err := Uncommitted("/copies/app", "/sessions/x/git-excludes", run)
@@ -50,25 +50,34 @@ func TestUncommittedLeavesOutConfigFiles(t *testing.T) {
 	if want := []string{" M src/a.go", "?? new.txt"}; !slices.Equal(got, want) {
 		t.Errorf("uncommitted = %q, want %q", got, want)
 	}
-	if !slices.Equal(mounts, []string{"/copies/app", "/sessions/x/git-excludes"}) ||
-		!slices.Contains(cmd, "core.excludesFile=/sessions/x/git-excludes") {
-		t.Errorf("mounts %q, command %q", mounts, cmd)
+	if !slices.Equal(job.ReadOnly, []string{"/copies/app", "/sessions/x/git-excludes"}) || job.Writable != "" ||
+		!slices.Contains(job.Cmd, "core.excludesFile=/sessions/x/git-excludes") {
+		t.Errorf("job %+v", job)
 	}
 }
 
-func TestCommonDir(t *testing.T) {
+// The import writes only the original's common git dir, which for a
+// linked worktree lies outside it.
+func TestImportWritesOnlyTheCommonDir(t *testing.T) {
 	repo := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+	gitDir := filepath.Join(repo, ".git", "worktrees", "wt")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := commonDir(repo); err != nil || got != filepath.Join(repo, ".git") {
-		t.Errorf("repository: %s, %v", got, err)
-	}
 	wt := t.TempDir()
-	gitDir := filepath.Join(repo, ".git", "worktrees", "wt")
 	os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644)
 	os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o644)
-	if got, err := commonDir(wt); err != nil || got != filepath.Join(repo, ".git") {
-		t.Errorf("linked worktree: %s, %v", got, err)
+	id := strings.Repeat("a", 40)
+	for _, project := range []string{repo, wt} {
+		var job offlinegit.Job
+		run := func(j offlinegit.Job) (string, error) { job = j; return "returned " + id + " 1\n", nil }
+		r, err := Import(project, "/sessions/x/return-1/return.bundle", id, "refs/heads/kota/pi-x", run)
+		if err != nil || r.Commit != id {
+			t.Fatalf("%s: %+v, %v", project, r, err)
+		}
+		if want := filepath.Join(repo, ".git"); job.Writable != want || job.Dir != want ||
+			!slices.Equal(job.ReadOnly, []string{"/sessions/x/return-1"}) {
+			t.Errorf("%s: job %+v, want %s writable", project, job, want)
+		}
 	}
 }

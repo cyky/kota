@@ -38,6 +38,7 @@ import (
 	"kota/internal/mask"
 	"kota/internal/models"
 	"kota/internal/nohistory"
+	"kota/internal/offlinegit"
 	"kota/internal/pathpolicy"
 	"kota/internal/prepgate"
 	"kota/internal/probe"
@@ -939,7 +940,7 @@ func returnWork(sess *session, commits *commitCheck, name string, start time.Tim
 		r.keep = append(r.keep, r.none)
 		return r
 	}
-	uncommitted, err := nohistory.Uncommitted(sess.project, filepath.Join(sess.sessionDir, "git-excludes"), offlineRunner)
+	uncommitted, err := nohistory.Uncommitted(sess.project, filepath.Join(sess.sessionDir, "git-excludes"), offlineGit)
 	if err != nil {
 		r.keep = append(r.keep, fmt.Sprintf("could not read its status: %v", err))
 	} else if r.uncommitted = uncommitted; len(uncommitted) > 0 {
@@ -982,10 +983,10 @@ func bringBack(sess *session, base, branch string) (nohistory.Returned, error) {
 		return nohistory.Returned{}, err
 	}
 	bundle := filepath.Join(dir, "return.bundle")
-	if err := nohistory.Export(sess.project, base, bundle, writableRunner); err != nil {
+	if err := nohistory.Export(sess.project, base, bundle, offlineGit); err != nil {
 		return nohistory.Returned{}, err
 	}
-	return nohistory.Import(sess.key, bundle, base, branch, writableRunner)
+	return nohistory.Import(sess.key, bundle, base, branch, offlineGit)
 }
 
 // report prints the return part of the change report.
@@ -1044,7 +1045,7 @@ func offlinePaths(sa sessionArgs, lease *lockedProject, ag *agent.Agent, auto bo
 // validated path. start names it, as it names the Returned branch. Call it
 // under project's lease.
 func makeNoHistoryCopy(project string, start time.Time) (string, error) {
-	missing, err := nohistory.Inspect(project, offlineRunner)
+	missing, err := nohistory.Inspect(project, offlineGit)
 	if err != nil {
 		return "", err
 	}
@@ -1063,7 +1064,7 @@ func makeNoHistoryCopy(project string, start time.Time) (string, error) {
 		return "", fmt.Errorf("%s already exists; start again in a second", dest)
 	}
 	copied, err := func() (string, error) {
-		if err := nohistory.Clone(project, dest, writableRunner); err != nil {
+		if err := nohistory.Clone(project, dest, offlineGit); err != nil {
 			return "", err
 		}
 		if err := nohistory.TakeConfig(project, dest); err != nil {
@@ -1229,7 +1230,7 @@ type commitCheck struct {
 // project git can't work in from inside the container, and after a warning
 // when the refs can't be read: the command still runs.
 func startCommitCheck(w io.Writer, project string) *commitCheck {
-	refs, ok, err := changereport.ReadRefs(project, offlineRunner)
+	refs, ok, err := changereport.ReadRefs(project, offlineGit)
 	if err != nil {
 		fmt.Fprintf(w, "WARNING: could not record git refs, so commits made while it runs won't be checked: %v\n", err)
 		return nil
@@ -1248,9 +1249,9 @@ func (c *commitCheck) finish() {
 	if c == nil {
 		return
 	}
-	c.after, _, c.err = changereport.ReadRefs(c.project, offlineRunner)
+	c.after, _, c.err = changereport.ReadRefs(c.project, offlineGit)
 	if c.err == nil {
-		c.history, c.err = changereport.ReadHistory(c.project, offlineRunner, c.before, c.after)
+		c.history, c.err = changereport.ReadHistory(c.project, offlineGit, c.before, c.after)
 	}
 }
 
@@ -1925,7 +1926,7 @@ func confirmFullAuto(project, agent string, fullAuto, always bool) error {
 	if !fullAuto {
 		return nil
 	}
-	status, err := approval.ReadStatus(project, offlineRunner)
+	status, err := offlinegit.ReadStatus(project, offlineGit)
 	if err != nil {
 		return err
 	}
@@ -1942,41 +1943,15 @@ func confirmFullAuto(project, agent string, fullAuto, always bool) error {
 	return nil
 }
 
-// offlineRunner runs git for approval.ReadStatus and the commit check in
-// the base image, offline
-// and read-only, so filters or an fsmonitor the agent configured never run
-// on the host. Paths outside the project, such as a linked worktree's git
-// dir, must pass the --ro path policy.
-func offlineRunner(mounts []string, dir string, cmd ...string) (string, error) {
+// offlineGit runs git for the full-auto prompt, the commit check and the
+// No-history copy in the base image, offline, under the --ro path policy.
+func offlineGit(job offlinegit.Job) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	policy := pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT"))
-	for _, m := range mounts {
-		if err := policy.CheckReadOnly(m); err != nil {
-			return "", err
-		}
-	}
-	return docker.RunOffline(baseImage, os.Getuid(), os.Getgid(), mounts, dir, cmd...)
-}
-
-// writableRunner is offlineRunner with one writable mount: the copies dir
-// for the clone, the bundle's directory for the export, the original's git
-// dir for the import. Every mount, the writable one too, must pass the
-// --ro path policy.
-func writableRunner(mounts []string, writable, dir string, cmd ...string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	policy := pathpolicy.Default(home, os.Getenv("KOTA_ALLOWED_ROOT"))
-	for _, m := range append(slices.Clip(mounts), writable) {
-		if err := policy.CheckReadOnly(m); err != nil {
-			return "", err
-		}
-	}
-	return docker.RunOfflineWritable(baseImage, os.Getuid(), os.Getgid(), mounts, writable, dir, cmd...)
+	return offlinegit.Docker(baseImage, os.Getuid(), os.Getgid(), policy)(job)
 }
 
 func printModels(w io.Writer, c models.Catalog, err error) {

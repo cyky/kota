@@ -1,6 +1,6 @@
 //go:build integration
 
-package approval
+package offlinegit
 
 import (
 	"os"
@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"kota/internal/docker"
+	"kota/internal/pathpolicy"
 )
 
 const testImage = "kota-base:latest"
@@ -31,8 +31,15 @@ func cacheDir(t *testing.T) string {
 	return dir
 }
 
-func dockerRunner(mounts []string, dir string, cmd ...string) (string, error) {
-	return docker.RunOffline(testImage, os.Getuid(), os.Getgid(), mounts, dir, cmd...)
+// dockerRunner is the production adapter, with a policy whose allowed root
+// is the user cache dir the tests' repositories live in.
+func dockerRunner(t *testing.T) Runner {
+	t.Helper()
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Docker(testImage, os.Getuid(), os.Getgid(), pathpolicy.Default(t.TempDir(), cache))
 }
 
 // A repository the agent created can name a clean filter, which git status
@@ -58,7 +65,7 @@ func TestReadStatusRunsFiltersOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := ReadStatus(project, dockerRunner)
+	s, err := ReadStatus(project, dockerRunner(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +104,7 @@ func TestReadStatusLinkedWorktreeInContainer(t *testing.T) {
 	git(t, main, "worktree", "add", "-q", wt)
 	os.WriteFile(filepath.Join(wt, "new.txt"), []byte("x"), 0o644)
 
-	s, err := ReadStatus(wt, dockerRunner)
+	s, err := ReadStatus(wt, dockerRunner(t))
 	if err != nil || !s.Git || !slices.Equal(s.Changes, []string{"?? new.txt"}) {
 		t.Errorf("worktree status = %+v, %v", s, err)
 	}

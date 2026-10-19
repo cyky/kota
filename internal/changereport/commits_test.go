@@ -6,13 +6,15 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"kota/internal/offlinegit"
 )
 
-// localRun runs cmd directly, in place of the offline container: tests
+// localRun runs the job directly, in place of the offline container: tests
 // only point it at repositories they made.
-func localRun(mounts []string, dir string, cmd ...string) (string, error) {
-	c := exec.Command(cmd[0], cmd[1:]...)
-	c.Dir = dir
+func localRun(j offlinegit.Job) (string, error) {
+	c := exec.Command(j.Cmd[0], j.Cmd[1:]...)
+	c.Dir = j.Dir
 	out, err := c.Output()
 	return string(out), err
 }

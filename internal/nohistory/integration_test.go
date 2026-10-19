@@ -11,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"kota/internal/docker"
+	"kota/internal/offlinegit"
+	"kota/internal/pathpolicy"
 )
 
 const testImage = "kota-base:latest"
@@ -32,12 +33,15 @@ func cacheDir(t *testing.T) string {
 	return dir
 }
 
-func dockerRunner(mounts []string, dir string, cmd ...string) (string, error) {
-	return docker.RunOffline(testImage, os.Getuid(), os.Getgid(), mounts, dir, cmd...)
-}
-
-func dockerWritable(mounts []string, writable, dir string, cmd ...string) (string, error) {
-	return docker.RunOfflineWritable(testImage, os.Getuid(), os.Getgid(), mounts, writable, dir, cmd...)
+// dockerRunner is the production adapter, with a policy whose allowed root
+// is the user cache dir the tests' repositories live in.
+func dockerRunner(t *testing.T) offlinegit.Runner {
+	t.Helper()
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return offlinegit.Docker(testImage, os.Getuid(), os.Getgid(), pathpolicy.Default(t.TempDir(), cache))
 }
 
 func needDocker(t *testing.T) {
@@ -87,7 +91,7 @@ func TestCloneLeavesHistoryBehind(t *testing.T) {
 
 	copies := cacheDir(t)
 	dest := filepath.Join(copies, "app-copy")
-	if err := Clone(project, dest, dockerWritable); err != nil {
+	if err := Clone(project, dest, dockerRunner(t)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -144,7 +148,7 @@ func TestInspectRefusesUnbornHead(t *testing.T) {
 	needDocker(t)
 	project := cacheDir(t)
 	git(t, project, "init", "-q")
-	if _, err := Inspect(project, dockerRunner); err == nil || !strings.Contains(err.Error(), "no commits") {
+	if _, err := Inspect(project, dockerRunner(t)); err == nil || !strings.Contains(err.Error(), "no commits") {
 		t.Errorf("unborn HEAD: %v", err)
 	}
 }
@@ -172,7 +176,7 @@ func TestInspectFindsWhatTheCopyLacks(t *testing.T) {
 	os.WriteFile(filepath.Join(project, "README"), []byte("v2\n"), 0o644)
 	os.WriteFile(filepath.Join(project, "kota.yaml"), []byte("engine: {}\n"), 0o644)
 
-	m, err := Inspect(project, dockerRunner)
+	m, err := Inspect(project, dockerRunner(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +204,7 @@ func returnSetup(t *testing.T) (project, dest, base, bundle string) {
 	git(t, project, "commit", "-q", "-m", "start")
 	base = git(t, project, "rev-parse", "HEAD")
 	dest = filepath.Join(cacheDir(t), "copy")
-	if err := Clone(project, dest, dockerWritable); err != nil {
+	if err := Clone(project, dest, dockerRunner(t)); err != nil {
 		t.Fatal(err)
 	}
 	out := cacheDir(t)
@@ -233,11 +237,11 @@ func TestReturnBringsHeadBack(t *testing.T) {
 	userBranch := git(t, project, "symbolic-ref", "HEAD")
 
 	settle()
-	if err := Export(dest, base, bundle, dockerWritable); err != nil {
+	if err := Export(dest, base, bundle, dockerRunner(t)); err != nil {
 		t.Fatal(err)
 	}
 	branch := BranchName("pi", time.Date(2026, 10, 16, 14, 32, 5, 0, time.Local))
-	got, err := Import(project, bundle, base, branch, dockerWritable)
+	got, err := Import(project, bundle, base, branch, dockerRunner(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +267,7 @@ func TestReturnBringsHeadBack(t *testing.T) {
 	}
 
 	// The same name again: the branch isn't replaced.
-	if _, err := Import(project, bundle, base, branch, dockerWritable); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if _, err := Import(project, bundle, base, branch, dockerRunner(t)); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("second import: %v", err)
 	}
 
@@ -282,11 +286,11 @@ func TestReturnRefusesRewrittenHistory(t *testing.T) {
 	git(t, dest, "checkout", "-q", "--orphan", "fresh")
 	git(t, dest, "commit", "-q", "-m", "new root")
 	settle()
-	if err := Export(dest, base, bundle, dockerWritable); err != nil {
+	if err := Export(dest, base, bundle, dockerRunner(t)); err != nil {
 		t.Fatal(err)
 	}
 	branch := BranchName("pi", time.Now())
-	if _, err := Import(project, bundle, base, branch, dockerWritable); err != ErrRewritten {
+	if _, err := Import(project, bundle, base, branch, dockerRunner(t)); err != ErrRewritten {
 		t.Errorf("import = %v, want ErrRewritten", err)
 	}
 	if refs := git(t, project, "for-each-ref", "--format=%(refname)", "refs/kota-incoming", "refs/heads/kota"); refs != "" {
@@ -302,7 +306,7 @@ func TestUncommittedInCopy(t *testing.T) {
 	os.WriteFile(filepath.Join(dest, ".envrc"), nil, 0o644) // a placeholder
 	os.WriteFile(filepath.Join(dest, "kota.yaml"), []byte("{}\n"), 0o644)
 	os.WriteFile(filepath.Join(dest, "README"), []byte("changed\n"), 0o644)
-	got, err := Uncommitted(dest, excludes, dockerRunner)
+	got, err := Uncommitted(dest, excludes, dockerRunner(t))
 	if err != nil {
 		t.Fatal(err)
 	}
