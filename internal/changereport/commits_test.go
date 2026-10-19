@@ -53,7 +53,7 @@ func refs(t *testing.T, dir string) Refs {
 
 func history(t *testing.T, dir string, before, after Refs) History {
 	t.Helper()
-	h, err := ReadHistory(dir, localRun, before, after)
+	h, err := readHistory(dir, localRun, before, after)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestReadHistoryOtherBranchAndDetached(t *testing.T) {
 	if h.Rewritten {
 		t.Error("Rewritten set, but HEAD still contains main")
 	}
-	if got := HistoryLines(before, after, h); got[0] != "new branch wip" {
+	if got := historyLines(before, after, h); got[0] != "new branch wip" {
 		t.Errorf("first line %q, want the new branch", got[0])
 	}
 }
@@ -172,7 +172,7 @@ func TestReadHistoryAmend(t *testing.T) {
 	if got := subjects(h); !slices.Equal(got, []string{"start, amended"}) {
 		t.Errorf("subjects = %q", got)
 	}
-	lines := HistoryLines(before, after, h)
+	lines := historyLines(before, after, h)
 	if !slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, "git reset --hard "+before.Head[:7]) }) {
 		t.Errorf("no recovery hint in %q", lines)
 	}
@@ -244,13 +244,13 @@ func TestCheckCommits(t *testing.T) {
 			{"main.go", 'M', false},
 		}},
 	}
-	p := CommitPaths{
+	p := commitPaths{
 		Placeholders: []string{".envrc"},
 		Masked:       []string{".npmrc", ".env", "deploy/.aws/"},
 		Ignored:      func(rel string) bool { return strings.HasPrefix(rel, ".claude/") },
 		Reported:     []Change{{"package.json", Modified}},
 	}
-	got := CheckCommits(commits, p)
+	got := checkCommits(commits, p)
 	type row struct {
 		path    string
 		reason  Reason
@@ -273,17 +273,17 @@ func TestCheckCommits(t *testing.T) {
 		{".github/workflows/ci.yml", HiddenWatched, "modified@1111111"},
 	}
 	if !slices.Equal(rows, want) {
-		t.Errorf("CheckCommits =\n%v\nwant\n%v", rows, want)
+		t.Errorf("checkCommits =\n%v\nwant\n%v", rows, want)
 	}
 
-	lines := WarningLines(got)
+	lines := warningLines(got)
 	for _, want := range []string{
 		"  git rm --cached -- .envrc .env deploy/.aws/credentials",
 		"  git add -- .npmrc",
 		"  git commit",
 	} {
 		if !slices.Contains(lines, want) {
-			t.Errorf("WarningLines lacks %q:\n%s", want, strings.Join(lines, "\n"))
+			t.Errorf("warningLines lacks %q:\n%s", want, strings.Join(lines, "\n"))
 		}
 	}
 	if !slices.ContainsFunc(lines, func(l string) bool {
@@ -315,7 +315,7 @@ func TestHistoryLinesCapAndClean(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		h.Commits = append(h.Commits, Commit{ID: strings.Repeat("c", 40), Subject: "fix\x1b[2Jthings"})
 	}
-	lines := HistoryLines(Refs{}, Refs{}, h)
+	lines := historyLines(Refs{}, Refs{}, h)
 	if lines[0] != "25 new commit(s):" || len(lines) != 22 || lines[21] != "  ... and 5 more" {
 		t.Errorf("lines = %q", lines)
 	}

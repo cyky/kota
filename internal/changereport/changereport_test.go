@@ -75,7 +75,7 @@ func TestSnapshotWith(t *testing.T) {
 	write(t, root, "scripts/fsmonitor.sh", "original")
 	write(t, root, "build/tools/crypt", "original")
 	extra := []string{"scripts/fsmonitor.sh", "build/tools/crypt", "bin/fix"}
-	before, err := SnapshotWith(root, extra)
+	before, err := snapshotWith(root, extra)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,12 +83,12 @@ func TestSnapshotWith(t *testing.T) {
 	write(t, root, "build/tools/crypt", "changed")
 	write(t, root, "bin/fix", "new")
 	write(t, root, "scripts/other.sh", "not watched")
-	after, err := SnapshotWith(root, extra)
+	after, err := snapshotWith(root, extra)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []Change{{"bin/fix", Added}, {"build/tools/crypt", Modified}, {"scripts/fsmonitor.sh", Modified}}
-	if got := Diff(before, after); !slices.Equal(got, want) {
+	if got := diff(before, after); !slices.Equal(got, want) {
 		t.Errorf("changes = %v, want %v", got, want)
 	}
 }
@@ -107,7 +107,7 @@ func TestHostToolFilesModifiedAndDeleted(t *testing.T) {
 		{".cargo/config.toml", Deleted}, {".idea/runConfigurations/x.xml", Modified},
 		{"Justfile", Deleted}, {"crates/core/build.rs", Modified},
 	}
-	if got := Diff(before, snap(t, root)); !slices.Equal(got, want) {
+	if got := diff(before, snap(t, root)); !slices.Equal(got, want) {
 		t.Errorf("changes = %v, want %v", got, want)
 	}
 }
@@ -179,7 +179,7 @@ func TestDiff(t *testing.T) {
 			root := project(t)
 			before := snap(t, root)
 			c.change(t, root)
-			got := Diff(before, snap(t, root))
+			got := diff(before, snap(t, root))
 			if !slices.Equal(got, c.want) {
 				t.Errorf("Diff\n got %v\nwant %v", got, c.want)
 			}
@@ -201,7 +201,7 @@ func TestSymlinkTargetChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Change{{"Makefile", Modified}}
-	if got := Diff(before, snap(t, root)); !slices.Equal(got, want) {
+	if got := diff(before, snap(t, root)); !slices.Equal(got, want) {
 		t.Errorf("Diff = %v, want %v", got, want)
 	}
 }
@@ -228,7 +228,7 @@ func TestReport(t *testing.T) {
 	os.Remove(filepath.Join(root, "Makefile"))
 	after := snap(t, root)
 
-	got := Report("/home/u/my project", before, after, Diff(before, after))
+	got := reportLines("/home/u/my project", before, after, diff(before, after))
 	want := []string{
 		"added     .vscode/my tasks.json",
 		"    see: git -C '/home/u/my project' status -- '.vscode/my tasks.json'",
@@ -264,7 +264,7 @@ func TestReportUncomparableManifests(t *testing.T) {
 	write(t, root, "link/package.json", `{}`)
 	after := snap(t, root)
 
-	got := strings.Join(Report("/p", before, after, Diff(before, after)), "\n")
+	got := strings.Join(reportLines("/p", before, after, diff(before, after)), "\n")
 	for _, want := range []string{
 		"modified  big/package.json\n    could not compare the dependencies: not a regular file, or too large\n    see: git -C /p diff HEAD -- big/package.json",
 		"modified  link/package.json\n    could not compare the dependencies: not a regular file, or too large",
@@ -283,7 +283,7 @@ func TestReportControlCharacterPaths(t *testing.T) {
 	before := snap(t, root)
 	write(t, root, ".vscode/\x1b[2Jx.json", "{}")
 	write(t, root, ".vscode/a'; rm -rf ~ '.json", "{}")
-	got := strings.Join(Report("/p", before, snap(t, root), Diff(before, snap(t, root))), "\n")
+	got := strings.Join(reportLines("/p", before, snap(t, root), diff(before, snap(t, root))), "\n")
 	if strings.Contains(got, "\x1b") {
 		t.Errorf("raw escape in report:\n%q", got)
 	}

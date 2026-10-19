@@ -455,22 +455,6 @@ func (s *session) cleanup() {
 	os.RemoveAll(s.sessionDir)
 }
 
-// snapshot records the watched files for the change report, before the
-// session runs. The empty file placeholders kota created on the host are
-// left out: they were missing before, and cleanup removes them again.
-func (s *session) snapshot() (changereport.Files, error) {
-	before, err := changereport.SnapshotWith(s.project, s.layout.Watch)
-	if err != nil {
-		return nil, err
-	}
-	for _, m := range s.layout.Mounts {
-		if m.Placeholder && !m.Dir {
-			delete(before, m.Path)
-		}
-	}
-	return before, nil
-}
-
 // unlock clears the session's locks on the host, once. Call it after the
 // containers are gone; cleanup does. If it fails, the list stays for the
 // next command on the project to retry.
@@ -984,36 +968,39 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		discard()
 		return err
 	}
-	// Compare after cleanup has removed the placeholders, so they aren't
-	// reported.
-	before, err := sess.snapshot()
+	changes, err := changereport.Start(sess.project, sess.layout, offlineGit, changeOptions(sa.noHistory))
 	if err != nil {
 		sess.cleanup()
 		discard()
-		return fmt.Errorf("snapshot watched files: %w", err)
-	}
-	commits := startCommitCheck(os.Stderr, sess.project)
-	err = runSession(sess, lease.Lease, sa.model, auto, skipCheck)
-	commits.finish()
-	if !sa.noHistory {
-		sess.cleanup()
-		reported := reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
-		commits.report(os.Stderr, sess.layout, reported)
 		return err
 	}
-	if commits != nil {
-		commits.where = " in the copy"
+	err = runSession(sess, lease.Lease, sa.model, auto, skipCheck)
+	result := changes.Finish()
+	if !sa.noHistory {
+		sess.cleanup()
+		result.Report(os.Stderr)
+		return err
 	}
-	// Before cleanup, as commits.finish: the copy's status and export read
-	// its .git, where cleanup removes seeded files.
-	ret := returnWork(sess, commits, returnName(sa, ag.Name()), start)
+	// Before cleanup, as Finish: the copy's status and export read its
+	// .git, where cleanup removes seeded files.
+	ret := returnWork(sess, result, returnName(sa, ag.Name()), start)
 	sess.cleanup()
 	// The copy's working tree is discarded, so watched files changed in
 	// its commits are always flagged, and its changes are listed in full
 	// when it is kept.
-	commits.report(os.Stderr, sess.layout, nil)
+	result.Report(os.Stderr)
 	ret.report(os.Stderr)
 	return err
+}
+
+// changeOptions are the Change report's options: for a No-history copy
+// when copy is set.
+func changeOptions(copy bool) changereport.Options {
+	opts := changereport.Options{Copy: copy}
+	if home, err := os.UserHomeDir(); err == nil {
+		opts.ConfigHome = instructions.ConfigHome(os.Getenv, home)
+	}
+	return opts
 }
 
 // returnName names a Session's Returned branch: the agent, or "shell".
@@ -1044,11 +1031,12 @@ type returned struct {
 // lost. Call it once the containers are gone, before the session's
 // cleanup. git runs in offline containers only: in the copy only with its
 // bundle's directory writable, and in the original without the copy.
-func returnWork(sess *session, commits *commitCheck, name string, start time.Time) returned {
+func returnWork(sess *session, commits *changereport.Result, name string, start time.Time) returned {
 	// The copy's locked files couldn't be removed.
 	sess.unlock()
 	r := returned{copy: sess.project}
-	if commits == nil || commits.err != nil {
+	before, after, ok := commits.Refs()
+	if !ok {
 		r.none = "could not read the copy's commits"
 		r.keep = append(r.keep, r.none)
 		return r
@@ -1059,10 +1047,10 @@ func returnWork(sess *session, commits *commitCheck, name string, start time.Tim
 	} else if r.uncommitted = uncommitted; len(uncommitted) > 0 {
 		r.keep = append(r.keep, "uncommitted changes")
 	}
-	if r.unreturned = nohistory.Unreturned(commits.before, commits.after); len(r.unreturned) > 0 {
+	if r.unreturned = nohistory.Unreturned(before, after); len(r.unreturned) > 0 {
 		r.keep = append(r.keep, "branches or tags not brought back")
 	}
-	base, head := commits.before.Head, commits.after.Head
+	base, head := before.Head, after.Head
 	switch {
 	case head == base:
 		r.none = "no commits to bring back"
@@ -1306,174 +1294,6 @@ func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Sess
 	}
 }
 
-// reportChanges warns about watched files, and the files in watch, that the
-// session added, modified or deleted, says what changed in them or how to
-// see it, and returns them.
-func reportChanges(w io.Writer, project string, watch []string, before changereport.Files) []changereport.Change {
-	after, err := changereport.SnapshotWith(project, watch)
-	if err != nil {
-		fmt.Fprintf(w, "WARNING: could not check for changed files that run things: %v\n", err)
-		return nil
-	}
-	changes := changereport.Diff(before, after)
-	if len(changes) == 0 {
-		return nil
-	}
-	fmt.Fprintf(w, "WARNING: the session changed %d file(s) that can run code on the host. Review them before building, installing or opening the project in an editor:\n", len(changes))
-	for _, line := range changereport.Report(project, before, after, changes) {
-		fmt.Fprintln(w, "  "+line)
-	}
-	return changes
-}
-
-// commitCheck is a project's git refs, recorded before a command runs
-// project code in a container, to report the commits made while it ran.
-type commitCheck struct {
-	project string
-	// where says which repository the report is about, after "git
-	// history changed": "" for the project, " in the copy" for a
-	// No-history copy.
-	where  string
-	before changereport.Refs
-	// after, history and err are set by finish.
-	after   changereport.Refs
-	history changereport.History
-	err     error
-}
-
-// startCommitCheck records the refs of project. It returns nil for a
-// project git can't work in from inside the container, and after a warning
-// when the refs can't be read: the command still runs.
-func startCommitCheck(w io.Writer, project string) *commitCheck {
-	refs, ok, err := changereport.ReadRefs(project, offlineGit)
-	if err != nil {
-		fmt.Fprintf(w, "WARNING: could not record git refs, so commits made while it runs won't be checked: %v\n", err)
-		return nil
-	}
-	if !ok {
-		return nil
-	}
-	return &commitCheck{project: project, before: refs}
-}
-
-// finish reads the refs and the commits made since c was started. It runs
-// once the containers are gone but before the session's cleanup: git needs
-// the seeded files in .git, and Docker Desktop's file sharing can still
-// show a removed file as present.
-func (c *commitCheck) finish() {
-	if c == nil {
-		return
-	}
-	c.after, _, c.err = changereport.ReadRefs(c.project, offlineGit)
-	if c.err == nil {
-		c.history, c.err = changereport.ReadHistory(c.project, offlineGit, c.before, c.after)
-	}
-}
-
-// report lists the branches, tags and commits that finish found, and warns
-// about paths in those commits that need review. reported are the watched
-// files the working tree report already listed.
-func (c *commitCheck) report(w io.Writer, layout mask.Layout, reported []changereport.Change) {
-	if c == nil {
-		return
-	}
-	if c.err != nil {
-		fmt.Fprintf(w, "WARNING: could not check for new commits: %v\n", c.err)
-		return
-	}
-	h := c.history
-	lines := changereport.HistoryLines(c.before, c.after, h)
-	if len(lines) == 0 {
-		return
-	}
-	fmt.Fprintf(w, "git history changed%s:\n", c.where)
-	for _, line := range lines {
-		fmt.Fprintln(w, "  "+line)
-	}
-	paths := commitPaths(layout, reported)
-	ignored, err := globalExcludes()
-	if err != nil {
-		fmt.Fprintf(w, "WARNING: could not read your global git excludes, so commits aren't checked against them: %v\n", err)
-	}
-	paths.Ignored = ignored
-	warnings := changereport.CheckCommits(h.Commits, paths)
-	if len(warnings) == 0 {
-		return
-	}
-	fmt.Fprintf(w, "WARNING: %d path(s) in these commits need review before you push or merge them:\n", len(warnings))
-	for _, line := range changereport.WarningLines(warnings) {
-		fmt.Fprintln(w, "  "+line)
-	}
-}
-
-// commitPaths are the paths the commit check looks for: the layout's
-// placeholders and masks outside .git, and its extra watched files.
-func commitPaths(layout mask.Layout, reported []changereport.Change) changereport.CommitPaths {
-	p := changereport.CommitPaths{Watch: layout.Watch, Reported: reported}
-	for _, m := range layout.Mounts {
-		if mask.InGitDir(m.Path) {
-			continue
-		}
-		rel := m.Path
-		if m.Dir {
-			rel += "/"
-		}
-		switch {
-		case m.Placeholder:
-			p.Placeholders = append(p.Placeholders, rel)
-		case m.Mask:
-			p.Masked = append(p.Masked, rel)
-		}
-	}
-	return p
-}
-
-// maxGlobalExcludes caps the size of the global excludes file kota reads.
-const maxGlobalExcludes = 1 << 20
-
-// globalExcludes returns whether the host's global git excludes file
-// ignores a path, or nil when there is no such file. Only the user's global
-// config is read, from outside any repository: a repository config the
-// agent wrote could name any file. The file is matched on the host and
-// never reaches a container.
-func globalExcludes() (func(rel string) bool, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	cmd := exec.Command("git", "config", "--global", "--type=path", "--get", "core.excludesFile")
-	cmd.Dir = "/"
-	out, err := cmd.Output()
-	var exit *exec.ExitError
-	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
-		return nil, fmt.Errorf("git config --global core.excludesFile: %w", err)
-	}
-	file := strings.TrimSpace(string(out))
-	if file == "" {
-		file = filepath.Join(instructions.ConfigHome(os.Getenv, home), "git", "ignore")
-	}
-	info, err := os.Stat(file)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, nil
-	case err != nil:
-		return nil, err
-	case !info.Mode().IsRegular():
-		return nil, fmt.Errorf("%s is not a regular file", file)
-	case info.Size() > maxGlobalExcludes:
-		return nil, fmt.Errorf("%s is larger than %d bytes", file, maxGlobalExcludes)
-	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
-	ig, err := mask.ParseIgnore(data, file)
-	if err != nil {
-		return nil, err
-	}
-	return ig.Ignored, nil
-}
-
 func cmdCheck(args []string) error {
 	sa, err := parseSessionArgs("check", args, nil)
 	if err != nil {
@@ -1662,17 +1482,15 @@ func cmdPrep(args []string) error {
 	if err != nil {
 		return err
 	}
-	before, err := sess.snapshot()
+	changes, err := changereport.Start(sess.project, sess.layout, offlineGit, changeOptions(false))
 	if err != nil {
 		sess.cleanup()
-		return fmt.Errorf("snapshot watched files: %w", err)
+		return err
 	}
-	commits := startCommitCheck(os.Stderr, sess.project)
 	err = runPrep(sess, cache, images)
-	commits.finish()
+	result := changes.Finish()
 	sess.cleanup()
-	reported := reportChanges(os.Stderr, sess.project, sess.layout.Watch, before)
-	commits.report(os.Stderr, sess.layout, reported)
+	result.Report(os.Stderr)
 	if err != nil {
 		return err
 	}

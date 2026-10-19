@@ -77,16 +77,18 @@ flowchart TD
     ask -- "no" --> abort(["abort"])
     ask -- "y" --> copy
     auto -- "no" --> copy["With --no-history: clone HEAD<br/>into a copy, offline"]
-    copy --> prepare["Prepare the session:<br/>mask plan and protections,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
-    prepare --> snap["Snapshot watched files"]
+    copy --> prepare["Prepare the session:<br/>mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
+    prepare --> snap["Start the Change report:<br/>snapshot watched files, record refs"]
     snap --> vmstart["Start the Engine VM<br/>(boots while the sandbox starts)"]
-    vmstart --> compose["docker compose up:<br/>forwarders + sandbox"]
+    vmstart --> settle["Wait until the Docker VM sees<br/>the protected paths as the host does"]
+    settle --> compose["docker compose up:<br/>forwarders, mount witness, sandbox"]
     compose --> configure["Render agent config from<br/>the gateway's /v1/models"]
     configure --> ready["Wait for the Engine API,<br/>load image archives"]
     ready --> probes{"Sandbox probes,<br/>then Engine VM probes"}
     probes -- "a probe failed" --> refuse(["refuse to start"])
     probes -- "all passed" --> agent["Agent or Bash runs<br/>in /workspace"]
-    agent --> teardown["Teardown: containers, Engine VM,<br/>placeholders, session dir"]
+    agent --> held["Warn about protection mounts<br/>that are gone"]
+    held --> teardown["Teardown: containers, Engine VM;<br/>read commits; unlock files,<br/>remove placeholders, session dir"]
     refuse --> teardown
     teardown --> report["Report changed files<br/>that run things, and commits"]
     report --> back["With --no-history: bring HEAD back<br/>as a branch, remove the copy"]
@@ -142,7 +144,8 @@ flowchart TD
     subgraph verify["Verification and reports"]
         probe["probe<br/>probe definitions"]
         check["check<br/>run probes"]
-        changereport["changereport<br/>watched files"]
+        changereport["changereport<br/>Change report: watched files,<br/>commits; Start, Finish, Report"]
+        vmview["vmview<br/>wait for the Docker VM's view"]
         prepgate["prepgate<br/>prep confirmation"]
         approval["approval<br/>full-auto prompt"]
     end
@@ -159,6 +162,7 @@ flowchart TD
         docker["docker<br/>Docker CLI adapter"]
         offlinegit["offlinegit<br/>git in offline containers:<br/>repository discovery, status"]
         sessionregistry["sessionregistry<br/>per-project lease"]
+        hostlock["hostlock<br/>files locked on the host"]
         hostdata["hostdata<br/>kota's directory on the host"]
         interrupt["interrupt<br/>signals"]
     end
@@ -168,7 +172,7 @@ flowchart TD
     pathpolicy --> sandbox
     nohistory --> offlinegit & mask & deps & projectimage & changereport & hostdata & interrupt
     approval --> offlinegit & interrupt
-    changereport --> offlinegit
+    changereport --> offlinegit & mask
     offlinegit --> docker & pathpolicy
     agent --> models & override & sandbox & instructions
     check --> docker & probe & sandbox
@@ -193,6 +197,7 @@ Everything under `kota/` in the user cache dir comes from `internal/hostdata`, w
 | Dependency dirs | volumes `kota-deps-<hash>-<hash>` | `prep` (recreated), `clean` |
 | Shared caches (Go modules, corepack, pnpm store) | volumes `kota-cache-*` | `clean --shared-caches` |
 | Session lease records | `kota/registry/` in the user cache dir | kept (lock files) |
+| Files a session locked on the host | `kota/registry/*.locked-files` | end of session, or the next command on the project after a crash |
 | Prep confirmation record | `kota/prep/` | `clean` |
 | Session dir (agent config, engine certs, console log) | `kota/sessions/` | end of session, `clean` for leftovers |
 | No-history copies | `kota/copies/` | `clean` |

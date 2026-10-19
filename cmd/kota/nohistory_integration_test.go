@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"kota/internal/agent"
+	"kota/internal/changereport"
 	"kota/internal/docker"
 	"kota/internal/hostdata"
 	"kota/internal/sandbox"
@@ -180,17 +181,16 @@ func noHistorySession(t *testing.T, project, gateway, script string) noHistoryRu
 				run.states = append(run.states, v.Name)
 			}
 		}
-		commits := startCommitCheck(&report, run.copy)
-		if commits == nil {
-			t.Fatalf("no commit check: %s", report.String())
+		changes, err := changereport.Start(run.copy, sess.layout, offlineGit, changeOptions(true))
+		if err != nil {
+			t.Fatal(err)
 		}
 		if run.inside, err = ds.Capture("bash", "-c", "exec 2>&1\ncd /workspace\n"+script); err != nil {
 			t.Fatalf("%v\n%s", err, run.inside)
 		}
-		commits.finish()
-		commits.where = " in the copy"
-		ret := returnWork(sess, commits, returnName(sa, agent.Default), run.start)
-		commits.report(&report, sess.layout, nil)
+		result := changes.Finish()
+		ret := returnWork(sess, result, returnName(sa, agent.Default), run.start)
+		result.Report(&report)
 		ret.report(&report)
 	})
 	run.report = report.String()

@@ -126,9 +126,9 @@ else
 fi
 g log "$@"`
 
-// ReadHistory returns the commits made between before and after, on any
+// readHistory returns the commits made between before and after, on any
 // branch or tag or a detached HEAD, with the files each one changed.
-func ReadHistory(project string, run offlinegit.Runner, before, after Refs) (History, error) {
+func readHistory(project string, run offlinegit.Runner, before, after Refs) (History, error) {
 	if before.Equal(after) {
 		return History{}, nil
 	}
@@ -166,7 +166,7 @@ func tipIDs(r Refs) []string {
 	return slices.Compact(ids)
 }
 
-// parseLog reads git log output in the format ReadHistory asks for: per
+// parseLog reads git log output in the format readHistory asks for: per
 // commit, \x01, the ID, NUL, the subject, NUL, then raw entries of a status
 // line and a path, each NUL-terminated. It reads front to back, so a
 // subject can't pass for a commit or an entry.
@@ -231,15 +231,15 @@ const (
 	HiddenWatched Reason = "watched"
 )
 
-// CommitPaths says which paths in commits call for a warning.
-type CommitPaths struct {
+// commitPaths says which paths in commits call for a warning.
+type commitPaths struct {
 	// Placeholders and Masked are relative paths with forward slashes; a
 	// trailing slash marks a directory, which covers everything inside.
 	Placeholders, Masked []string
 	// Ignored reports whether the host's global excludes ignore a path.
 	// Nil when there are none.
 	Ignored func(rel string) bool
-	// Watch are extra watched files, as for SnapshotWith.
+	// Watch are extra watched files, as for snapshotWith.
 	Watch []string
 	// Reported are the paths the working tree report already listed.
 	Reported []Change
@@ -260,11 +260,11 @@ type CommitWarning struct {
 	Changes []PathChange
 }
 
-// CheckCommits returns a warning for each path in commits that touches a
+// checkCommits returns a warning for each path in commits that touches a
 // placeholder or masked path, adds a globally ignored file, or changes a
 // watched file the working tree report didn't list. Warnings are sorted by
 // reason, then path, and list the commits oldest first.
-func CheckCommits(commits []Commit, p CommitPaths) []CommitWarning {
+func checkCommits(commits []Commit, p commitPaths) []CommitWarning {
 	reported := map[string]bool{}
 	for _, c := range p.Reported {
 		reported[c.Path] = true
@@ -298,7 +298,7 @@ func CheckCommits(commits []Commit, p CommitPaths) []CommitWarning {
 	return out
 }
 
-func (p CommitPaths) reason(f File, reported map[string]bool) (Reason, bool) {
+func (p commitPaths) reason(f File, reported map[string]bool) (Reason, bool) {
 	switch {
 	case covers(p.Placeholders, f.Path):
 		return Placeholder, true
@@ -360,10 +360,10 @@ func IsWatched(rel string, extra []string) bool {
 // maxCommits is how many commits the report lists.
 const maxCommits = 20
 
-// HistoryLines formats the ref changes, a rewritten HEAD and the commits
+// historyLines formats the ref changes, a rewritten HEAD and the commits
 // for the user, one line each, without indentation. It returns nothing when
 // nothing changed.
-func HistoryLines(before, after Refs, h History) []string {
+func historyLines(before, after Refs, h History) []string {
 	var out []string
 	for _, c := range RefChanges(before, after) {
 		out = append(out, refLine(c))
@@ -409,9 +409,9 @@ var reasonText = map[Reason]string{
 	HiddenWatched:   "can run code on the host, change not in the working tree",
 }
 
-// WarningLines formats warnings, one path per line, followed by how to put
+// warningLines formats warnings, one path per line, followed by how to put
 // back placeholder and masked paths. It returns nothing for no warnings.
-func WarningLines(warnings []CommitWarning) []string {
+func warningLines(warnings []CommitWarning) []string {
 	var out, remove, restore []string
 	hidden := false
 	for _, w := range warnings {

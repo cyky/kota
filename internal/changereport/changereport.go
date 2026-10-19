@@ -109,10 +109,10 @@ func Snapshot(dir string) (Files, error) {
 	return snapshot(dir, Watched)
 }
 
-// SnapshotWith is Snapshot plus the files extra, relative to dir with
+// snapshotWith is Snapshot plus the files extra, relative to dir with
 // forward slashes, wherever they are. A missing one is left out, so
 // creating it counts as added.
-func SnapshotWith(dir string, extra []string) (Files, error) {
+func snapshotWith(dir string, extra []string) (Files, error) {
 	s, err := Snapshot(dir)
 	if err != nil {
 		return nil, err
@@ -275,10 +275,10 @@ func (s Files) record(root, rel string) error {
 	return nil
 }
 
-// Diff returns the watched files added, modified or deleted between before
+// diff returns the watched files added, modified or deleted between before
 // and after, sorted by path. A change of content, permissions or symlink
 // target counts as modified.
-func Diff(before, after Files) []Change {
+func diff(before, after Files) []Change {
 	return DiffDigests(before.Digests(), after.Digests())
 }
 
@@ -308,15 +308,15 @@ func Warnings(changes []Change) []string {
 	return out
 }
 
-// detailIndent indents Report's lines about a change under its line.
+// detailIndent indents reportLines' lines about a change under its line.
 const detailIndent = "    "
 
-// Report is Warnings with each added or modified file followed by indented
-// lines that say what changed or where to look: a modified manifest's
-// dependency and script changes, else the git command that shows the
-// change. before and after are the snapshots changes came from; project is
-// the host directory the commands name.
-func Report(project string, before, after Files, changes []Change) []string {
+// reportLines is Warnings with each added or modified file followed by
+// indented lines that say what changed or where to look: a modified
+// manifest's dependency and script changes, else the git command that
+// shows the change. before and after are the snapshots changes came from;
+// project is the host directory the commands name.
+func reportLines(project string, before, after Files, changes []Change) []string {
 	var out []string
 	for i, line := range Warnings(changes) {
 		out = append(out, line)

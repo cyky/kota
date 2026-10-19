@@ -14,7 +14,6 @@ import (
 	"kota/internal/agent"
 	"kota/internal/changereport"
 	"kota/internal/docker"
-	"kota/internal/mask"
 	"kota/internal/sandbox"
 )
 
@@ -85,20 +84,17 @@ func TestAgentCommit(t *testing.T) {
 	hostGit(t, project, "add", ".npmrc", ".github", "README.md")
 	hostGit(t, project, "commit", "-q", "-m", "start")
 
-	before, err := changereport.SnapshotWith(project, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var report bytes.Buffer
-	commits := startCommitCheck(&report, project)
-	if commits == nil {
-		t.Fatalf("no commit check: %s", report.String())
-	}
-	var layout mask.Layout
+	var result *changereport.Result
 	var inside string
 	sa := sessionArgs{agent: agent.Default, gatewayURL: stubModelGateway(t), dir: project, shell: true}
 	withSession(t, sa, func(*sandbox.Compose) {}, func(sess *session, ds *docker.Session) {
-		layout = sess.layout
+		// Started here, after the session wrote its placeholders, as in
+		// cmdOffline.
+		changes, err := changereport.Start(project, sess.layout, offlineGit, changeOptions(false))
+		if err != nil {
+			t.Fatal(err)
+		}
 		inside, err = ds.Capture("bash", "-c", `exec 2>&1
 set -e
 cd /workspace
@@ -116,10 +112,9 @@ echo DONE`)
 			t.Fatalf("%v\n%s", err, inside)
 		}
 		// Before withSession's cleanup, as in cmdOffline.
-		commits.finish()
+		result = changes.Finish()
 	})
-	reported := reportChanges(&report, project, layout.Watch, before)
-	commits.report(&report, layout, reported)
+	result.Report(&report)
 	t.Logf("inside:\n%s\nreport:\n%s", inside, report.String())
 
 	if !strings.Contains(inside, "DONE") {
