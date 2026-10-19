@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -920,6 +921,45 @@ esac
 	}
 	if _, err := os.Stat(filepath.Join(project, ".envrc")); !os.IsNotExist(err) {
 		t.Errorf("protection placeholder left behind: %v", err)
+	}
+}
+
+// The git identity passed into the sandbox is the project's, never one
+// from bare repository files an agent planted at the project root.
+func TestGitEnvIgnoresPlantedRepository(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "x"})
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	identity := func() string {
+		env := gitEnv(project)
+		for i := range 4 {
+			if env["GIT_CONFIG_KEY_"+strconv.Itoa(i)] == "user.name" {
+				return env["GIT_CONFIG_VALUE_"+strconv.Itoa(i)]
+			}
+		}
+		return ""
+	}
+	if out, err := exec.Command("git", "-C", project, "config", "user.name", "Repo").CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := identity(); got != "Repo" {
+		t.Fatalf("user.name = %q, want the repository's", got)
+	}
+	for rel, content := range map[string]string{
+		".git/HEAD": "garbage\n",
+		"HEAD":      "ref: refs/heads/main\n",
+		"config":    "[core]\n\tbare = true\n[user]\n\tname = AGENT\n",
+		"refs/.k":   "", "objects/.k": "",
+	} {
+		p := filepath.Join(project, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := identity(); got == "AGENT" {
+		t.Errorf("user.name from the planted config")
 	}
 }
 

@@ -200,6 +200,8 @@ const maxGlobalExcludes = 1 << 20
 // agent wrote could name any file. The file is matched on the host and
 // never reaches a container. configHome is as in Options.
 func globalExcludes(configHome string) (func(rel string) bool, error) {
+	// On the host: it reads the global config only, from /, so no
+	// repository is discovered (see hostgit).
 	cmd := exec.Command("git", "config", "--global", "--type=path", "--get", "core.excludesFile")
 	cmd.Dir = "/"
 	out, err := cmd.Output()

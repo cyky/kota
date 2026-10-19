@@ -118,7 +118,7 @@ flowchart TD
 
 ## Packages
 
-`cmd/kota` wires the commands together. The packages under `internal/` are mostly pure and table-tested. `docker` and `enginevm` are the thin adapters over the Docker CLI and QEMU. Every git command kota runs against a project's repository for the full-auto prompt, the **Change report** and the **No-history copy** goes through `offlinegit`, which runs it hardened in an offline container under the `--ro` path policy.
+`cmd/kota` wires the commands together. The packages under `internal/` are mostly pure and table-tested. `docker` and `enginevm` are the thin adapters over the Docker CLI and QEMU. Every git command kota runs against a project's repository for the full-auto prompt, the **Change report** and the **No-history copy** goes through `offlinegit`, which runs it hardened in an offline container under the `--ro` path policy. The few reads before a session (your identity, the config and the tracked files, for the mask plan) run on the host through `hostgit`, which names `.git` explicitly and turns off the bare-repository fallback and fsmonitor.
 
 ```mermaid
 flowchart TD
@@ -163,12 +163,13 @@ flowchart TD
         offlinegit["offlinegit<br/>git in offline containers:<br/>repository discovery, status"]
         sessionregistry["sessionregistry<br/>per-project lease"]
         hostlock["hostlock<br/>files locked on the host"]
+        hostgit["hostgit<br/>kota's few git reads on the host:<br/>explicit git dir, no fsmonitor"]
         hostdata["hostdata<br/>kota's directory on the host"]
         interrupt["interrupt<br/>signals"]
     end
 
     main --> policy & spec & verify & eng & runtime
-    mask --> deps & projectimage & sandbox
+    mask --> deps & projectimage & sandbox & hostgit
     pathpolicy --> sandbox
     nohistory --> offlinegit & mask & deps & projectimage & changereport & hostdata & interrupt
     approval --> offlinegit & interrupt

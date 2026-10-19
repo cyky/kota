@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+
+	"kota/internal/hostgit"
 )
 
 // execKeys are the config keys whose value git runs as a command.
@@ -207,7 +209,9 @@ func pathTokens(value string) []string {
 
 // configOrigins returns the config files git reads for project, absolute.
 func configOrigins(project string) ([]string, error) {
-	cmd := exec.Command("git", "-C", project, "config", "--list", "--show-origin", "-z")
+	// On the host: config reads run nothing, and hostgit names the
+	// repository, so a planted one can't answer.
+	cmd := hostgit.Command(project, "config", "--list", "--show-origin", "-z")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -234,7 +238,8 @@ func configOrigins(project string) ([]string, error) {
 // configEntries runs git config on file alone, without its includes, and
 // returns the key and value of each entry. No match returns none.
 func configEntries(file string, args ...string) ([][2]string, error) {
-	cmd := exec.Command("git", append([]string{"config", "-f", file, "-z"}, args...)...)
+	// On the host: one file read alone, from outside any repository.
+	cmd := hostgit.ConfigFile(file, append([]string{"-z"}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

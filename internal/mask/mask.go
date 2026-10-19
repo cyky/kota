@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"kota/internal/deps"
+	"kota/internal/hostgit"
 	"kota/internal/projectimage"
 	"kota/internal/sandbox"
 )
@@ -252,7 +253,9 @@ func (p *planner) warnTracked() error {
 	if len(masked) == 0 {
 		return nil
 	}
-	out, err := exec.Command("git", "-C", p.project, "ls-files", "-z").Output()
+	// On the host: it reads the index, with discovery and fsmonitor off
+	// (hostgit).
+	out, err := hostgit.Command(p.project, "ls-files", "-z").Output()
 	if err != nil {
 		return fmt.Errorf("list tracked files: %w", err)
 	}
@@ -304,6 +307,9 @@ func (p *planner) git() error {
 	}
 
 	p.add(Mount{Path: ".git", Dir: true, Pin: true})
+	if err := p.readable(); err != nil {
+		return err
+	}
 	if err := p.gitDir(".git"); err != nil {
 		return err
 	}
@@ -314,6 +320,21 @@ func (p *planner) git() error {
 		return err
 	}
 	return p.configs()
+}
+
+// readable refuses a .git directory git can't read as a repository, such
+// as one whose HEAD is broken. The agent can write HEAD, and then git run
+// in the project falls back to files at the project root as a bare
+// repository, with config the agent wrote.
+func (p *planner) readable() error {
+	cmd := hostgit.Command(p.project, "rev-parse", "--git-dir")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s/.git isn't a readable git repository (%s). It may have been changed in an earlier session: check .git/HEAD, and HEAD, config, objects and refs at the project root, before you run git there",
+			p.project, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // gitDir protects the files of the git dir at rel that decide what git runs.
@@ -373,7 +394,9 @@ func (p *planner) linkedWorktrees(rel string, wtConfig bool) error {
 // hooksPath protects a core.hooksPath that points into the project, as
 // husky and similar tools set up. Every config level counts.
 func (p *planner) hooksPath() error {
-	cmd := exec.Command("git", "-C", p.project, "config", "--type=path", "--get", "core.hooksPath")
+	// On the host: config reads run nothing, and hostgit names the
+	// repository, so a planted one can't answer.
+	cmd := hostgit.Command(p.project, "config", "--type=path", "--get", "core.hooksPath")
 	out, err := cmd.Output()
 	if err != nil {
 		var exit *exec.ExitError
@@ -718,7 +741,8 @@ func (pl Layout) Cleanup(project string) {
 // gitConfig reads one key from a config file, without includes or other
 // config levels. A missing key returns "".
 func gitConfig(file string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"config", "-f", file, "--get"}, args...)...)
+	// On the host: one file read alone, from outside any repository.
+	cmd := hostgit.ConfigFile(file, append([]string{"--get"}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

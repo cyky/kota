@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -32,6 +31,7 @@ import (
 	"kota/internal/enginevm"
 	"kota/internal/gatewaykey"
 	"kota/internal/hostdata"
+	"kota/internal/hostgit"
 	"kota/internal/hostlock"
 	"kota/internal/instructions"
 	"kota/internal/interrupt"
@@ -790,7 +790,9 @@ func missingDirs(project, rel string) []string {
 func gitEnv(project string) map[string]string {
 	settings := [][2]string{{"safe.directory", "*"}, {"core.excludesFile", sandbox.GitExcludes}}
 	for _, key := range []string{"user.name", "user.email"} {
-		out, err := exec.Command("git", "-C", project, "config", "--get", key).Output()
+		// On the host: config reads run nothing, and hostgit names the
+		// repository, so a planted one can't answer.
+		out, err := hostgit.Command(project, "config", "--get", key).Output()
 		if v := strings.TrimSpace(string(out)); err == nil && v != "" {
 			settings = append(settings, [2]string{key, v})
 		}

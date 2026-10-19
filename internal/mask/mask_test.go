@@ -707,3 +707,49 @@ func TestPlanMaskKeepsPinsAboveIt(t *testing.T) {
 		}
 	}
 }
+
+// An agent can break .git/HEAD and plant bare repository files at the
+// project root, with a config whose fsmonitor git runs. Plain git falls
+// back to them; Plan refuses the project instead, names .git, and never
+// runs the fsmonitor, though a masked file makes it list tracked files.
+func TestPlanRefusesPlantedRepository(t *testing.T) {
+	isolateGit(t)
+	dir, err := filepath.EvalSymlinks(repo(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, ".env"), "KEY=secret\n")
+	marker := filepath.Join(t.TempDir(), "fsmonitor-ran")
+	write(t, filepath.Join(dir, "fsm.sh"), "#!/bin/sh\ntouch "+marker+"\n")
+	if err := os.Chmod(filepath.Join(dir, "fsm.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, ".git", "HEAD"), "garbage\n")
+	write(t, filepath.Join(dir, "HEAD"), "ref: refs/heads/main\n")
+	for _, d := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(t, filepath.Join(dir, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = "+dir+
+		"\n\tfsmonitor = "+filepath.Join(dir, "fsm.sh")+"\n\thooksPath = /tmp/elsewhere\n")
+	index := exec.Command("git", "-c", "core.fsmonitor=false", "update-index", "--add", "fsm.sh")
+	index.Dir = dir
+	index.Env = append(os.Environ(), "GIT_DIR="+dir, "GIT_WORK_TREE="+dir)
+	if out, err := index.CombinedOutput(); err != nil {
+		t.Fatalf("plant index: %v\n%s", err, out)
+	}
+
+	_, err = Plan(dir, DefaultRules)
+	if err == nil || !strings.Contains(err.Error(), dir+"/.git isn't a readable git repository") || !strings.Contains(err.Error(), "check .git/HEAD") {
+		t.Errorf("Plan = %v, want a refusal naming .git", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("Plan ran the planted fsmonitor")
+	}
+	// Control: plain git runs it, so the plant above is a real one.
+	exec.Command("git", "-C", dir, "ls-files").Run()
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("control: plain git didn't run the planted fsmonitor: %v", err)
+	}
+}
