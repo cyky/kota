@@ -17,6 +17,7 @@ import (
 	"kota/assets"
 	"kota/internal/agent"
 	"kota/internal/changereport"
+	"kota/internal/check"
 	"kota/internal/deps"
 	"kota/internal/docker"
 	"kota/internal/instructions"
@@ -919,6 +920,58 @@ esac
 	}
 	if _, err := os.Stat(filepath.Join(project, ".envrc")); !os.IsNotExist(err) {
 		t.Errorf("protection placeholder left behind: %v", err)
+	}
+}
+
+// run and shell refuse on a failed probe of either suite, and list the
+// failures of both.
+func TestVerdict(t *testing.T) {
+	result := func(name string, pass bool) probe.Result {
+		r := probe.Result{Probe: probe.Probe{Name: name, MustSucceed: true}}
+		if !pass {
+			r.ExitCode = 1
+		}
+		return r
+	}
+	sandboxOK := []probe.Result{result("workspace writable", true), result("gateway reachable", true)}
+	sandboxBad := []probe.Result{result("workspace writable", true), result("gateway reachable", false)}
+	engineOK := []probe.Result{result("engine api", true)}
+	engineBad := []probe.Result{result("engine api", false)}
+	cases := []struct {
+		name    string
+		results check.Results
+		err     string
+		lines   []string
+	}{
+		{"all pass", check.Results{Sandbox: sandboxOK, Engine: engineOK}, "",
+			[]string{"containment verified: 2 probes passed", "Engine VM containment verified: 1 probes passed"}},
+		{"no Engine VM", check.Results{Sandbox: sandboxOK}, "", []string{"containment verified: 2 probes passed"}},
+		{"sandbox fails", check.Results{Sandbox: sandboxBad, Engine: engineOK},
+			"refusing to start: 1 of 2 containment probes failed (run 'kota check' for details)",
+			[]string{"FAIL  gateway reachable", "Engine VM containment verified"}},
+		{"engine fails", check.Results{Sandbox: sandboxOK, Engine: engineBad},
+			"refusing to start: 1 of 1 Engine VM probes failed (run 'kota check' for details)",
+			[]string{"containment verified: 2 probes passed", "FAIL  engine api"}},
+		{"both fail", check.Results{Sandbox: sandboxBad, Engine: engineBad},
+			"refusing to start: 1 of 2 containment probes and 1 of 1 Engine VM probes failed (run 'kota check' for details)",
+			[]string{"FAIL  gateway reachable", "FAIL  engine api"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out strings.Builder
+			err := verdict(&out, c.results)
+			if (err == nil) != (c.err == "") || err != nil && err.Error() != c.err {
+				t.Errorf("err = %v, want %q", err, c.err)
+			}
+			for _, want := range c.lines {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("output lacks %q:\n%s", want, out.String())
+				}
+			}
+			if strings.Contains(out.String(), "PASS") {
+				t.Errorf("passing probes listed:\n%s", out.String())
+			}
+		})
 	}
 }
 

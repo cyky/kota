@@ -143,7 +143,7 @@ flowchart TD
 
     subgraph verify["Verification and reports"]
         probe["probe<br/>probe definitions"]
-        check["check<br/>run probes"]
+        check["check<br/>run probes; Verify:<br/>Sandbox, then Engine VM"]
         changereport["changereport<br/>Change report: watched files,<br/>commits; Start, Finish, Report"]
         vmview["vmview<br/>wait for the Docker VM's view"]
         prepgate["prepgate<br/>prep confirmation"]

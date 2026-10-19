@@ -1115,31 +1115,45 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 			fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
 			return nil
 		}
-		results, err := check.Run(ds, sess.gateway, sess.expect)
+		// The Engine VM got ready, or the startup would have stopped.
+		results, err := check.Verify(ds, sess.gateway, sess.expect, probedEngine(sess, true))
 		if err != nil {
-			return fmt.Errorf("containment probes: %w", err)
+			return err
 		}
-		if failed := probe.Failed(results); len(failed) > 0 {
-			printResults(os.Stderr, failed)
-			return fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'kota check' for details)", len(failed), len(results))
-		}
-		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
-		vm := sess.engine.Engine()
-		if vm == nil {
-			return nil
-		}
-		results, err = vm.Probes(ds, vm.ProbeTargets(sess.gateway))
-		if err != nil {
-			return fmt.Errorf("Engine VM probes: %w", err)
-		}
-		if failed := probe.Failed(results); len(failed) > 0 {
-			printResults(os.Stderr, failed)
-			return fmt.Errorf("refusing to start: %d of %d Engine VM probes failed (run 'kota check' for details)", len(failed), len(results))
-		}
-		fmt.Fprintf(os.Stderr, "Engine VM containment verified: %d probes passed\n", len(results))
-		return nil
+		return verdict(os.Stderr, results)
 	}
 	return st.Start()
+}
+
+// verdict prints what the probes of run or shell found, and refuses the
+// session when any probe of either suite failed, listing all of those.
+func verdict(w io.Writer, results check.Results) error {
+	failed, engineFailed := results.Failed()
+	var refusals []string
+	if len(failed) > 0 {
+		refusals = append(refusals, fmt.Sprintf("%d of %d containment probes", len(failed), len(results.Sandbox)))
+	} else {
+		fmt.Fprintf(w, "containment verified: %d probes passed\n", len(results.Sandbox))
+	}
+	if len(engineFailed) > 0 {
+		refusals = append(refusals, fmt.Sprintf("%d of %d Engine VM probes", len(engineFailed), len(results.Engine)))
+	} else if results.Engine != nil {
+		fmt.Fprintf(w, "Engine VM containment verified: %d probes passed\n", len(results.Engine))
+	}
+	if len(refusals) == 0 {
+		return nil
+	}
+	printResults(w, append(failed, engineFailed...))
+	return fmt.Errorf("refusing to start: %s failed (run 'kota check' for details)", strings.Join(refusals, " and "))
+}
+
+// probedEngine is the Engine VM whose probes run, when it is on and ready:
+// nil, not a typed nil, otherwise.
+func probedEngine(sess *session, ready bool) check.Engine {
+	if vm := sess.engine.Engine(); vm != nil && ready {
+		return vm
+	}
+	return nil
 }
 
 // startup is how sess starts: its Engine VM, if any, and its sandbox. The
@@ -1207,8 +1221,7 @@ func cmdCheck(args []string) error {
 		}
 		return interrupt.Err()
 	}
-	vm := sess.engine.Engine()
-	if vm != nil {
+	if vm := sess.engine.Engine(); vm != nil {
 		st.Engine = &reportedEngine{Engine: vm, failed: &engineErr}
 	}
 	st.Configure = func(ds *docker.Session) error {
@@ -1219,28 +1232,19 @@ func cmdCheck(args []string) error {
 		return nil
 	}
 	st.Verify = func(ds *docker.Session) error {
-		start := time.Now()
-		results, err := check.Run(ds, sess.gateway, sess.expect)
-		if err != nil {
-			return fmt.Errorf("containment probes: %w", err)
+		results, err := check.Verify(ds, sess.gateway, sess.expect, probedEngine(sess, engineErr == nil))
+		failed, engineFailed = results.Failed()
+		if results.Sandbox != nil {
+			fmt.Println("\nprobes:")
+			printResults(os.Stdout, results.Sandbox)
+			fmt.Printf("\n%d passed, %d failed (%s)\n", len(results.Sandbox)-len(failed), len(failed), results.SandboxTime.Round(10*time.Millisecond))
 		}
-		fmt.Println("\nprobes:")
-		printResults(os.Stdout, results)
-		failed = probe.Failed(results)
-		fmt.Printf("\n%d passed, %d failed (%s)\n", len(results)-len(failed), len(failed), time.Since(start).Round(10*time.Millisecond))
-		if vm == nil || engineErr != nil {
-			return nil
+		if results.Engine != nil {
+			fmt.Println("\nEngine VM probes:")
+			printResults(os.Stdout, results.Engine)
+			fmt.Printf("\n%d passed, %d failed (%s)\n", len(results.Engine)-len(engineFailed), len(engineFailed), results.EngineTime.Round(10*time.Millisecond))
 		}
-		start = time.Now()
-		engineResults, err := vm.Probes(ds, vm.ProbeTargets(sess.gateway))
-		if err != nil {
-			return fmt.Errorf("Engine VM probes: %w", err)
-		}
-		fmt.Println("\nEngine VM probes:")
-		printResults(os.Stdout, engineResults)
-		engineFailed = probe.Failed(engineResults)
-		fmt.Printf("\n%d passed, %d failed (%s)\n", len(engineResults)-len(engineFailed), len(engineFailed), time.Since(start).Round(10*time.Millisecond))
-		return nil
+		return err
 	}
 	_, stop, err := st.Start()
 	if err != nil {
