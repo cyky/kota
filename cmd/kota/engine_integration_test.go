@@ -283,8 +283,8 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 		t.Fatal(err)
 	}
 	defer sess.cleanup()
-	if (sess.engine != nil) != sa.engine {
-		t.Fatalf("Engine VM in the session: %v, want %v", sess.engine != nil, sa.engine)
+	if (sess.engine.Engine() != nil) != sa.engine {
+		t.Fatalf("Engine VM in the session: %v, want %v", sess.engine.Engine() != nil, sa.engine)
 	}
 	caches(&sess.spec)
 	ds, stop, err := startSession(sess, lease.Lease, "", false, false)
@@ -295,7 +295,7 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 		defer stop()
 		fn(sess, ds)
 	}()
-	if sess.engine != nil && qemuRunning(sess.engine.PID()) {
+	if vm := sess.engine.Engine(); vm != nil && qemuRunning(vm.PID()) {
 		t.Error("the Engine VM still runs after the session")
 	}
 }
@@ -514,7 +514,7 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 		withShellSession(t, project, gateway, caches, func(sess *session, ds *docker.Session) {
 			// startSession ran the probes once; each run loads the probe
 			// image again and removes it afterwards.
-			results, err := sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
+			results, err := sess.engine.Engine().Probes(ds, sess.engine.Engine().ProbeTargets(sess.gateway))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -528,9 +528,9 @@ getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
 			}
 			// The VM's own address is open to itself, so a must-fail probe
 			// aimed at it has to report the route.
-			targets := sess.engine.ProbeTargets(sess.gateway)
+			targets := sess.engine.Engine().ProbeTargets(sess.gateway)
 			targets.HostAddrs, targets.HostPorts = []string{"10.0.2.15"}, []int{engine.GuestAPIPort}
-			results, err = sess.engine.Probes(ds, targets)
+			results, err = sess.engine.Engine().Probes(ds, targets)
 			if err != nil {
 				t.Fatal(err)
 			}

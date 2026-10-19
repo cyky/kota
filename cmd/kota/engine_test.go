@@ -13,6 +13,7 @@ import (
 	"kota/internal/changereport"
 	"kota/internal/deps"
 	"kota/internal/engine"
+	"kota/internal/enginesession"
 	"kota/internal/prepgate"
 	"kota/internal/sandbox"
 )
@@ -94,7 +95,7 @@ func TestShellEngineSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(sess.cleanup)
-	if sess.engine == nil {
+	if sess.engine.Engine() == nil {
 		t.Fatal("no Engine VM for an engine project")
 	}
 	if _, ok := sess.spec.Services[sandbox.EngineService]; !ok {
@@ -115,8 +116,8 @@ func TestShellEngineSession(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	if !strings.HasPrefix(sess.engine.VM().Certs.Key, filepath.Join(sess.sessionDir, "engine-server")+"/") {
-		t.Errorf("server key at %s", sess.engine.VM().Certs.Key)
+	if !strings.HasPrefix(sess.engine.Engine().VM().Certs.Key, filepath.Join(sess.sessionDir, "engine-server")+"/") {
+		t.Errorf("server key at %s", sess.engine.Engine().VM().Certs.Key)
 	}
 }
 
@@ -131,7 +132,7 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(sess.cleanup)
-		if sess.engine != nil || sess.spec.Services[sandbox.EngineService].Image != "" {
+		if sess.engine.Engine() != nil || sess.spec.Services[sandbox.EngineService].Image != "" {
 			t.Error("engine without being asked for")
 		}
 	})
@@ -142,7 +143,7 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(sess.cleanup)
-		if sess.engine != nil {
+		if sess.engine != (enginesession.State{}) {
 			t.Error("engine for a project without an engine section")
 		}
 		if _, ok := sess.spec.Services[sandbox.AgentService].Environment["DOCKER_HOST"]; ok {
@@ -156,7 +157,7 @@ func TestEngineOnlyWhenWantedAndDeclared(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(sess.cleanup)
-		if sess.engine != nil {
+		if sess.engine != (enginesession.State{}) {
 			t.Error("engine from a broken config")
 		}
 	})
@@ -178,8 +179,8 @@ func TestRunEngineSession(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(sess.cleanup)
-			if sess.engine == nil || sess.engineOff {
-				t.Fatalf("run of an engine project: engine %v, off %v", sess.engine != nil, sess.engineOff)
+			if sess.engine.Engine() == nil {
+				t.Fatalf("run of an engine project: engine %+v", sess.engine)
 			}
 			env := sess.spec.Services[sandbox.AgentService].Environment
 			if env["DOCKER_HOST"] != "tcp://engine:2376" || env[sandbox.EngineEnv] != sandbox.EngineAvailable {
@@ -216,8 +217,8 @@ func TestNoEngine(t *testing.T) {
 				t.Fatalf("--no-engine refused: %v", err)
 			}
 			t.Cleanup(sess.cleanup)
-			if sess.engine != nil || !sess.engineOff {
-				t.Fatalf("engine %v, off %v", sess.engine != nil, sess.engineOff)
+			if sess.engine.Engine() != nil || !sess.engine.Off() {
+				t.Fatalf("engine %+v, want off", sess.engine)
 			}
 			env := sess.spec.Services[sandbox.AgentService].Environment
 			if env[sandbox.EngineEnv] != sandbox.EngineUnavailable {
@@ -248,7 +249,7 @@ func TestNoEngine(t *testing.T) {
 			t.Fatalf("--no-engine refused: %v", err)
 		}
 		t.Cleanup(sess.cleanup)
-		if !sess.engineOff {
+		if !sess.engine.Off() {
 			t.Error("a prepped engine project with a broken config isn't marked off")
 		}
 	})
@@ -268,8 +269,8 @@ func TestNoEngine(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sess.engineOff || sess.engineNote() != "" {
-				t.Errorf("--no-engine=%v: off %v, note %q", noEngine, sess.engineOff, sess.engineNote())
+			if sess.engine.Off() || sess.engine.Note() != "" {
+				t.Errorf("--no-engine=%v: off %v, note %q", noEngine, sess.engine.Off(), sess.engine.Note())
 			}
 			data, _ := json.Marshal(sess.spec)
 			specs[noEngine] = strings.ReplaceAll(string(data), sess.sessionDir, "SESSION")

@@ -124,7 +124,7 @@ func TestPrepareNoEngine(t *testing.T) {
 			if e != nil || err != nil {
 				t.Errorf("Prepare = %v, %v; want no Engine VM", e, err)
 			}
-			if Declared(o.Layout, project) {
+			if declared(o.Layout, project) {
 				t.Error("declared")
 			}
 		})
@@ -150,7 +150,7 @@ func TestPrepareRefusals(t *testing.T) {
 			if e != nil || err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("Prepare = %v, %v; want an error mentioning %q", e, err, c.want)
 			}
-			if !Declared(o.Layout, project) {
+			if !declared(o.Layout, project) {
 				t.Error("a project whose Engine VM can't start isn't declared")
 			}
 		})

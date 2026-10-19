@@ -120,10 +120,10 @@ func Prepare(o Options, project, sessionDir string) (*Engine, error) {
 	return e, nil
 }
 
-// Declared reports whether project has an Engine VM, which a session
+// declared reports whether project has an Engine VM, which a session
 // without it tells the agent about. A broken engine section of a project
 // that was prepped with one counts.
-func Declared(layout engine.Layout, project string) bool {
+func declared(layout engine.Layout, project string) bool {
 	cfg, err := config(layout, project)
 	return cfg != nil || err != nil
 }

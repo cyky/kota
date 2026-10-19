@@ -82,7 +82,7 @@ const sandboxFacts = `# This sandbox
 
 // Note is the file the agent reads: the working style, then the Sandbox
 // facts with agentFacts, the agent's own, as further items, then
-// engineNote (sandbox.EngineNote) when there is one.
+// engineNote (enginesession.State.Note) when there is one.
 func Note(style Style, agentFacts []string, engineNote string) string {
 	facts := sandboxFacts
 	for _, f := range agentFacts {

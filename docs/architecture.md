@@ -151,7 +151,7 @@ flowchart TD
     end
 
     subgraph eng["Engine VM"]
-        enginesession["enginesession<br/>a session's Engine VM:<br/>prepare, start, ready, probes, stop"]
+        enginesession["enginesession<br/>a session's Engine VM: none, off,<br/>can't start or on; its note;<br/>prepare, start, ready, probes, stop"]
         engineimages["engineimages<br/>a project's image archive cache:<br/>plan, fetch with crane"]
         engine["engine<br/>config, QEMU command, certs,<br/>image plan, base disk"]
         enginevm["enginevm<br/>QEMU adapter"]

@@ -334,14 +334,9 @@ type session struct {
 	// image is the agent container's image: the base image or the
 	// project's own.
 	image projectimage.Choice
-	// engine is the session's Engine VM, nil when it has none.
-	engine *enginesession.Engine
-	// engineErr is why the Engine VM can't start, with
-	// sessionArgs.engineOptional.
-	engineErr error
-	// engineOff is set when the project has an Engine VM, but the session
-	// runs without it (--no-engine).
-	engineOff bool
+	// engine is the session's Engine VM: none, off (--no-engine), can't
+	// start (only with sessionArgs.engineOptional), or on.
+	engine enginesession.State
 	// style is the working style the agent's note starts with; unset for
 	// prep.
 	style instructions.Style
@@ -385,18 +380,6 @@ func overrideSource(files []string) string {
 	return strings.Join(files, ", ")
 }
 
-// engineNote is the agent's instruction about the Engine VM: none for a
-// project without one.
-func (s *session) engineNote() string {
-	switch {
-	case s.engine != nil:
-		return sandbox.EngineNote(true, s.engine.Images())
-	case s.engineOff:
-		return sandbox.EngineNote(false, nil)
-	}
-	return ""
-}
-
 // engineOptions are what this kota's Engine VMs share.
 func engineOptions() (enginesession.Options, error) {
 	layout, err := engineLayout()
@@ -425,10 +408,10 @@ func (s *session) printWarnings(w io.Writer) {
 	if s.deps.Fallback != "" {
 		fmt.Fprintln(w, "WARNING:", s.deps.Fallback)
 	}
-	if s.engine != nil && s.engine.Warning() != "" {
+	if s.engine.Warning() != "" {
 		fmt.Fprintln(w, "WARNING:", s.engine.Warning())
 	}
-	if s.engineOff {
+	if s.engine.Off() {
 		told := "the agent is told to report them as not run"
 		if s.shell {
 			told = sandbox.EngineEnv + "=" + sandbox.EngineUnavailable
@@ -507,7 +490,7 @@ type sessionArgs struct {
 	// it, a run session of such a project tells the agent the VM is off.
 	engine bool
 	// engineOptional keeps the session going when the Engine VM can't be
-	// set up, recording why in session.engineErr, so check can report it.
+	// set up, with why in session.engine, so check can report it.
 	engineOptional bool
 	// noHistory runs the session on a No-history copy of the project.
 	noHistory  bool
@@ -665,23 +648,17 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		return nil, err
 	}
 	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, gatewayKey: apiKey, deps: depPlan, image: image, style: style}
-	var engineRoute *sandbox.EngineRoute
 	if !prep {
 		opts, err := engineOptions()
-		if err == nil && sa.engine {
-			sess.engine, err = enginesession.Prepare(opts, key, sessionDir)
-			if err != nil && sa.engineOptional {
-				sess.engine, sess.engineErr, err = nil, err, nil
+		if err == nil {
+			sess.engine, err = enginesession.ForSession(opts, key, sessionDir, sa.engine)
+			if sa.engineOptional {
+				err = nil // check reports it
 			}
-		} else if err == nil {
-			sess.engineOff = enginesession.Declared(opts.Layout, key)
 		}
 		if err != nil {
 			os.RemoveAll(sessionDir)
 			return nil, err
-		}
-		if sess.engine != nil {
-			engineRoute = sess.engine.Route()
 		}
 	}
 	// Prep runs no agent.
@@ -690,7 +667,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	var command []string
 	env := map[string]string{}
 	if !prep {
-		p, err := ag.Prepare(filepath.Join(sessionDir, "agent"), agent.Note{Style: style, Engine: sess.engineNote()})
+		p, err := ag.Prepare(filepath.Join(sessionDir, "agent"), agent.Note{Style: style, Engine: sess.engine.Note()})
 		if err != nil {
 			os.RemoveAll(sessionDir)
 			return nil, err
@@ -762,8 +739,8 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		Deps:           depMounts,
 		Env:            env,
 		Command:        command,
-		Engine:         engineRoute,
-		EngineOff:      sess.engineOff,
+		Engine:         sess.engine.Route(),
+		EngineOff:      sess.engine.Off(),
 	}
 	sess.spec, sess.expect = sandbox.Build(in)
 	if prep {
@@ -1147,10 +1124,11 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 			return fmt.Errorf("refusing to start: %d of %d containment probes failed (run 'kota check' for details)", len(failed), len(results))
 		}
 		fmt.Fprintf(os.Stderr, "containment verified: %d probes passed\n", len(results))
-		if sess.engine == nil {
+		vm := sess.engine.Engine()
+		if vm == nil {
 			return nil
 		}
-		results, err = sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
+		results, err = vm.Probes(ds, vm.ProbeTargets(sess.gateway))
 		if err != nil {
 			return fmt.Errorf("Engine VM probes: %w", err)
 		}
@@ -1175,8 +1153,8 @@ func (s *session) startup(out io.Writer) lifecycle.Startup[*docker.Session] {
 		Out:           out,
 	}
 	// Only a non-nil Engine VM, so the interface isn't a typed nil.
-	if s.engine != nil {
-		st.Engine = s.engine
+	if vm := s.engine.Engine(); vm != nil {
+		st.Engine = vm
 	}
 	return st
 }
@@ -1229,8 +1207,9 @@ func cmdCheck(args []string) error {
 		}
 		return interrupt.Err()
 	}
-	if sess.engine != nil {
-		st.Engine = &reportedEngine{Engine: sess.engine, failed: &engineErr}
+	vm := sess.engine.Engine()
+	if vm != nil {
+		st.Engine = &reportedEngine{Engine: vm, failed: &engineErr}
 	}
 	st.Configure = func(ds *docker.Session) error {
 		printEmptyDeps(os.Stdout, sess, ds.EmptyDeps())
@@ -1249,11 +1228,11 @@ func cmdCheck(args []string) error {
 		printResults(os.Stdout, results)
 		failed = probe.Failed(results)
 		fmt.Printf("\n%d passed, %d failed (%s)\n", len(results)-len(failed), len(failed), time.Since(start).Round(10*time.Millisecond))
-		if sess.engine == nil || engineErr != nil {
+		if vm == nil || engineErr != nil {
 			return nil
 		}
 		start = time.Now()
-		engineResults, err := sess.engine.Probes(ds, sess.engine.ProbeTargets(sess.gateway))
+		engineResults, err := vm.Probes(ds, vm.ProbeTargets(sess.gateway))
 		if err != nil {
 			return fmt.Errorf("Engine VM probes: %w", err)
 		}
@@ -1301,7 +1280,7 @@ func (e *reportedEngine) Ready(w io.Writer) error {
 // returns that reason.
 func printEngine(w io.Writer, sess *session) error {
 	cfg, cfgErr := engine.Read(sess.project)
-	if cfg == nil && sess.engineErr == nil {
+	if cfg == nil && sess.engine.Err() == nil {
 		if cfgErr != nil {
 			fmt.Fprintf(w, "engine: none (%v)\n\n", cfgErr)
 		} else {
@@ -1310,8 +1289,8 @@ func printEngine(w io.Writer, sess *session) error {
 		return nil
 	}
 	fmt.Fprintln(w, "engine:")
-	if sess.engine != nil {
-		for _, a := range sess.engine.Archives() {
+	if vm := sess.engine.Engine(); vm != nil {
+		for _, a := range vm.Archives() {
 			fmt.Fprintf(w, "  image %s (%s)\n", a.Ref, a.Digest)
 		}
 	} else if cfg != nil {
@@ -1319,9 +1298,9 @@ func printEngine(w io.Writer, sess *session) error {
 			fmt.Fprintf(w, "  image %s\n", ref)
 		}
 	}
-	if sess.engineErr != nil {
-		fmt.Fprintf(w, "  status: can't start: %v\n\n", sess.engineErr)
-		return fmt.Errorf("the Engine VM can't start: %w", sess.engineErr)
+	if err := sess.engine.Err(); err != nil {
+		fmt.Fprintf(w, "  status: can't start: %v\n\n", err)
+		return fmt.Errorf("the Engine VM can't start: %w", err)
 	}
 	fmt.Fprintln(w)
 	return nil

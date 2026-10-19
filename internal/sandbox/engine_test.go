@@ -86,29 +86,6 @@ func TestEngineAvailabilitySignal(t *testing.T) {
 	}
 }
 
-func TestEngineNote(t *testing.T) {
-	on, off := EngineNote(true, []string{"postgres:16-alpine", "redis:7"}), EngineNote(false, nil)
-	for _, want := range []string{
-		EngineEnv + "=" + EngineAvailable, "DOCKER_HOST", "testcontainers",
-		// The declared images, how an undeclared one fails, and the fix.
-		"which you can't change: postgres:16-alpine, redis:7.", "never downloads images",
-		"Unable to find image", "Temporary failure in name resolution", "find it in the failing test's code", "Don't retry",
-		"under engine.images in kota.yaml and run 'kota prep' on the host",
-	} {
-		if !strings.Contains(on, want) {
-			t.Errorf("available note lacks %q:\n%s", want, on)
-		}
-	}
-	for _, want := range []string{EngineEnv + "=" + EngineUnavailable, "--no-engine", "not run", "Never report them as passed"} {
-		if !strings.Contains(off, want) {
-			t.Errorf("unavailable note lacks %q:\n%s", want, off)
-		}
-	}
-	if strings.Contains(on, "not run") || strings.Contains(off, "DOCKER_HOST") {
-		t.Error("notes mix up the two states")
-	}
-}
-
 func TestEngineEnvWinsOverInputs(t *testing.T) {
 	in := engineInputs()
 	in.Env = map[string]string{"DOCKER_HOST": "unix:///var/run/docker.sock", "TESTCONTAINERS_RYUK_DISABLED": "false"}
