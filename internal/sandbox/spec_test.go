@@ -598,6 +598,36 @@ func TestDepVolume(t *testing.T) {
 	}
 }
 
+// The witness has the agent's project binds and nothing else: no network,
+// environment, config, caches or dependency volumes, in every mode.
+func TestWitness(t *testing.T) {
+	for _, mode := range []Mode{ModeRun, ModePrep, ModeFetch} {
+		in := testInputs()
+		in.Mode = mode
+		in.HelperImage = "helper:test"
+		in.ReadOnly = append(in.ReadOnly, Mount{Source: "/tmp/empty-file", Target: "/workspace/.env", Mask: true})
+		in.StateVolume = "kota-state-opencode-x"
+		in.Deps = []Mount{{Source: "kota-deps-x-1", Target: "/workspace/node_modules"}}
+		spec := compose(in)
+		w, ok := spec.Services[WitnessService]
+		if !ok {
+			t.Fatalf("mode %d: no witness", mode)
+		}
+		want := []Volume{
+			{Type: "bind", Source: "/Users/me/Projects/foo", Target: Workspace},
+			{Type: "bind", Source: "/Users/me/Projects/foo/.git", Target: "/workspace/.git"},
+			{Type: "bind", Source: "/tmp/empty-file", Target: "/workspace/.env", ReadOnly: true},
+		}
+		if !slices.Equal(w.Volumes, want) {
+			t.Errorf("mode %d: witness volumes = %+v", mode, w.Volumes)
+		}
+		if w.Image != "helper:test" || w.User != "501:20" || w.NetworkMode != "none" || len(w.Networks) > 0 ||
+			!w.ReadOnly || len(w.Environment) > 0 || !slices.Equal(w.CapDrop, []string{"ALL"}) {
+			t.Errorf("mode %d: witness = %+v", mode, w)
+		}
+	}
+}
+
 func TestProjectVolumes(t *testing.T) {
 	const project = "/projects/app"
 	want := []string{

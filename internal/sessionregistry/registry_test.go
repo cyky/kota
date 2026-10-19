@@ -228,6 +228,59 @@ func TestPartialRecordRecovery(t *testing.T) {
 	}
 }
 
+// A lock list left by a killed session is unlocked after its containers
+// are recovered, before Acquire returns; one left by a session that ended
+// is unlocked too. A failed unlock refuses the new session.
+func TestLeftoverLockListUnlocked(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	if err := os.WriteFile(r.filename("/projects/crashed"), []byte(`{"Project":"/projects/crashed","PID":123}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	list := r.LockList("/projects/crashed")
+	if filepath.Dir(list) != r.Dir || list == r.filename("/projects/crashed") || list == r.LockList("/projects/other") {
+		t.Fatalf("lock list %s", list)
+	}
+	if err := os.WriteFile(list, []byte(`"/projects/crashed"`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	r.Recover = func(string) error { calls = append(calls, "recover"); return nil }
+	r.Unlock = func(l string) error {
+		if l != list {
+			t.Errorf("unlock %s, want %s", l, list)
+		}
+		calls = append(calls, "unlock")
+		return os.Remove(l)
+	}
+	lease := acquire(t, r, "/projects/crashed", "run", "")
+	if strings.Join(calls, ",") != "recover,unlock" {
+		t.Fatalf("calls = %v", calls)
+	}
+	lease.Close()
+
+	// A list left after a clean release: no recovery, still unlocked.
+	calls = nil
+	if err := os.WriteFile(list, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	acquire(t, r, "/projects/crashed", "run", "").Close()
+	if strings.Join(calls, ",") != "unlock" {
+		t.Fatalf("calls = %v", calls)
+	}
+
+	failed := errors.New("operation not permitted")
+	r.Unlock = func(string) error { return failed }
+	if err := os.WriteFile(list, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Acquire("/projects/crashed", "run", ""); !errors.Is(err, failed) {
+		t.Fatalf("unlock failure = %v", err)
+	}
+	// No list, no unlock.
+	os.Remove(list)
+	acquire(t, r, "/projects/crashed", "run", "")
+}
+
 func TestRecoveryDoesNotHoldRegistryGuard(t *testing.T) {
 	r := &Registry{Dir: t.TempDir()}
 	if err := os.WriteFile(r.filename("/projects/crashed"), []byte(`{"Project":"/projects/crashed","Agent":"run","PID":123}`), 0o600); err != nil {

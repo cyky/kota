@@ -42,6 +42,10 @@ type Registry struct {
 	// Recover stops orphaned containers before replacing a crashed session.
 	// Failure leaves its record intact and refuses the new session.
 	Recover func(project string) error
+	// Unlock clears the host locks an earlier session recorded in its lock
+	// list (LockList) and removes the list. Acquire calls it, after
+	// Recover, when a list is left over. Failure refuses the new session.
+	Unlock func(list string) error
 }
 
 // Lease owns a project until Close, including startup and teardown.
@@ -133,14 +137,27 @@ func (r *Registry) acquire(project, agent, model string, exclusive bool) (*Lease
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() > 0 && r.Recover != nil {
+	crashed := info.Size() > 0 && r.Recover != nil
+	list := r.LockList(project)
+	_, listErr := os.Lstat(list)
+	locked := listErr == nil && r.Unlock != nil
+	if crashed || locked {
 		// The project flock alone protects recovery. Docker can stall, so
 		// release the metadata guard while keeping this project's lease.
 		// Leave the old record intact until recovery succeeds.
 		guard.Close()
 		guard = nil
-		if err := r.Recover(project); err != nil {
-			return nil, fmt.Errorf("recover crashed session for %s: %w", project, err)
+		if crashed {
+			if err := r.Recover(project); err != nil {
+				return nil, fmt.Errorf("recover crashed session for %s: %w", project, err)
+			}
+		}
+		// After Recover: orphaned containers may still have the files
+		// mounted.
+		if locked {
+			if err := r.Unlock(list); err != nil {
+				return nil, fmt.Errorf("unlock files an earlier session of %s left locked: %w", project, err)
+			}
 		}
 		guard, err = r.guard()
 		if err != nil {
@@ -259,6 +276,12 @@ func (l *Lease) Close() error {
 func (r *Registry) filename(project string) string {
 	sum := sha256.Sum256([]byte(project))
 	return filepath.Join(r.Dir, hex.EncodeToString(sum[:])+".lock")
+}
+
+// LockList is where a session of project records the files it locks on
+// the host, next to the project's record. Only the lease holder writes it.
+func (r *Registry) LockList(project string) string {
+	return strings.TrimSuffix(r.filename(project), ".lock") + ".locked-files"
 }
 
 // The short-lived guard serializes metadata reads and writes. Each lease has

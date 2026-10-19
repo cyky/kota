@@ -121,6 +121,9 @@ func assertNothingLeft(t *testing.T, project string) {
 	if entries, _ := os.ReadDir(filepath.Join(cache, "kota", "sessions")); len(entries) > 0 {
 		t.Errorf("session dirs left: %v", entries)
 	}
+	if lists, _ := filepath.Glob(filepath.Join(cache, "kota", "registry", "*.locked-files")); len(lists) > 0 {
+		t.Errorf("lock lists left: %v", lists)
+	}
 	locks, _ := filepath.Glob(filepath.Join(cache, "kota", "registry", "*.lock"))
 	for _, l := range locks {
 		if info, err := os.Stat(l); err != nil || info.Size() != 0 {
@@ -160,6 +163,7 @@ func TestInterruptDuringProbes(t *testing.T) {
 	probing := filepath.Join(t.TempDir(), "probing")
 	calls := fakeDocker(t, `case "$*" in
   *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
+  *vmview*) echo ok ;;
   *'run --rm -T agent'*) touch `+probing+`; exec sleep 30 ;;
 esac`)
 	cmd, output := startKota(t, "run", project)
@@ -191,6 +195,7 @@ func TestInterruptDuringCommand(t *testing.T) {
 	t.Setenv("TEST_PROJECT", project)
 	calls := fakeDocker(t, `case "$*" in
   *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
+  *vmview*) echo ok ;;
   *'run --rm agent'*) echo 'all:' > "$TEST_PROJECT/Makefile"; exec sleep 30 ;;
 esac`)
 	cmd, output := startKota(t, "run", "--unsafe-skip-check", project, "--", "make")

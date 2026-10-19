@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"kota/assets"
 	"kota/internal/agent"
@@ -851,6 +852,8 @@ func TestSessionImage(t *testing.T) {
 				if c.warning != "" && (!strings.Contains(out.String(), c.warning) || !strings.Contains(out.String(), "kota build "+project)) {
 					t.Errorf("mode %d: output = %q, want %q and the build command", mode, out.String(), c.warning)
 				}
+				// One session of a project at a time.
+				sess.cleanup()
 			}
 			if c.files[projectimage.File] == "" && calls > 0 {
 				t.Error("inspected images for a project without a Dockerfile")
@@ -936,6 +939,7 @@ func TestShellRefusesFailedProbes(t *testing.T) {
 	script := `#!/bin/sh
 case "$*" in
   *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"},{"id":"qwen3.5-2b-instruct"}]}' ;;
+  *vmview*) echo ok ;;
   *'run --rm agent') touch "$TEST_SHELL_ENTERED" ;;
 esac
 `
@@ -952,6 +956,46 @@ esac
 	}
 	if _, err := os.Stat(filepath.Join(project, ".envrc")); !os.IsNotExist(err) {
 		t.Errorf("protection placeholder left behind: %v", err)
+	}
+}
+
+// When the Docker VM doesn't come to see the protected paths as the host
+// does, a shell refuses to start and names them, while check reports it
+// and still runs its probes.
+func TestSettleMismatch(t *testing.T) {
+	project := fakeHome(t, map[string]string{"README.md": "test"})
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	defer func(d time.Duration) { settleTimeout = d }(settleTimeout)
+	settleTimeout = 300 * time.Millisecond
+	calls := fakeDocker(t, `case "$*" in
+  *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
+  *vmview*) while :; do echo 'differ 0=missing'; sleep 0.05; done ;;
+esac`)
+	if err := cmdShell([]string{project}); err == nil || !strings.Contains(err.Error(), "refusing to start: after 300ms the Docker VM still sees") {
+		t.Fatalf("shell error = %v", err)
+	}
+	if data, _ := os.ReadFile(calls); strings.Contains(string(data), "run --rm -T agent") {
+		t.Errorf("probes ran after the refusal:\n%s", data)
+	}
+
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	stdout := os.Stdout
+	os.Stdout = out
+	err = cmdCheck([]string{project})
+	os.Stdout = stdout
+	if err == nil {
+		t.Error("check passed")
+	}
+	data, _ := os.ReadFile(out.Name())
+	for _, want := range []string{"host view: after 300ms the Docker VM still sees", "probes:"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("check output lacks %q:\n%s", want, data)
+		}
 	}
 }
 
@@ -1040,6 +1084,7 @@ func TestRunWarnsOnDifferentSessionModel(t *testing.T) {
 	script := `#!/bin/sh
 case "$*" in
   *wget*) printf '%s\n' '{"data":[{"id":"model-a"},{"id":"model-b"}]}' ;;
+  *vmview*) echo ok ;;
 esac
 `
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
@@ -1148,6 +1193,7 @@ func TestRunContinuesAfterModelWarningFailure(t *testing.T) {
 	script := `#!/bin/sh
 case "$*" in
   *wget*) printf '%s\n' '{"data":[{"id":"qwen3.6-coder"}]}' ;;
+  *vmview*) echo ok ;;
   *'run --rm agent') touch "$TEST_RUN_ENTERED" ;;
 esac
 `

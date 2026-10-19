@@ -75,8 +75,10 @@ func startup(fail string, interruptAt int, withEngine bool) (Startup[*fakeSandbo
 			}
 			return sb, nil
 		},
+		Settle:    func() error { return e.step("settle") },
 		Configure: func(*fakeSandbox) error { return e.step("configure") },
 		Verify:    func(*fakeSandbox) error { return e.step("verify") },
+		Finish:    func(*fakeSandbox) { r.add("finish") },
 		Out:       io.Discard,
 		Interrupted: func() error {
 			checks++
@@ -99,12 +101,12 @@ func TestStartOrder(t *testing.T) {
 	if err != nil || sb == nil {
 		t.Fatalf("Start = %v, %v", sb, err)
 	}
-	want := []string{"engine start", "sandbox start", "configure", "engine ready", "verify"}
+	want := []string{"engine start", "settle", "sandbox start", "configure", "engine ready", "verify"}
 	if got := r.list(); !slices.Equal(got, want) {
 		t.Errorf("start = %q, want %q", got, want)
 	}
 	teardown()
-	want = append(want, "sandbox close", "engine stop")
+	want = append(want, "finish", "sandbox close", "engine stop")
 	if got := r.list(); !slices.Equal(got, want) {
 		t.Errorf("after teardown = %q, want %q", got, want)
 	}
@@ -121,21 +123,23 @@ func TestStartWithoutEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	teardown()
-	want := []string{"sandbox start", "configure", "verify", "sandbox close"}
+	want := []string{"settle", "sandbox start", "configure", "verify", "finish", "sandbox close"}
 	if got := r.list(); !slices.Equal(got, want) {
 		t.Errorf("calls = %q, want %q", got, want)
 	}
 }
 
 // TestStartFailureStopsWhatStarted fails each step in turn: what started
-// before it is stopped, last first, and nothing after it runs.
+// before it is stopped, last first, and nothing after it runs. Finish is
+// only for a session that started.
 func TestStartFailureStopsWhatStarted(t *testing.T) {
 	cases := map[string][]string{
 		"engine start":  {"engine start"},
-		"sandbox start": {"engine start", "sandbox start", "engine stop"},
-		"configure":     {"engine start", "sandbox start", "configure", "sandbox close", "engine stop"},
-		"engine ready":  {"engine start", "sandbox start", "configure", "engine ready", "sandbox close", "engine stop"},
-		"verify":        {"engine start", "sandbox start", "configure", "engine ready", "verify", "sandbox close", "engine stop"},
+		"settle":        {"engine start", "settle", "engine stop"},
+		"sandbox start": {"engine start", "settle", "sandbox start", "engine stop"},
+		"configure":     {"engine start", "settle", "sandbox start", "configure", "sandbox close", "engine stop"},
+		"engine ready":  {"engine start", "settle", "sandbox start", "configure", "engine ready", "sandbox close", "engine stop"},
+		"verify":        {"engine start", "settle", "sandbox start", "configure", "engine ready", "verify", "sandbox close", "engine stop"},
 	}
 	for fail, want := range cases {
 		t.Run(fail, func(t *testing.T) {
@@ -154,9 +158,9 @@ func TestStartFailureStopsWhatStarted(t *testing.T) {
 // TestStartInterrupted delivers a signal at each check between steps.
 func TestStartInterrupted(t *testing.T) {
 	cases := map[int][]string{
-		1: {"engine start", "sandbox start", "signal", "sandbox close", "engine stop"},
-		2: {"engine start", "sandbox start", "configure", "engine ready", "signal", "sandbox close", "engine stop"},
-		3: {"engine start", "sandbox start", "configure", "engine ready", "verify", "signal", "sandbox close", "engine stop"},
+		1: {"engine start", "settle", "sandbox start", "signal", "sandbox close", "engine stop"},
+		2: {"engine start", "settle", "sandbox start", "configure", "engine ready", "signal", "sandbox close", "engine stop"},
+		3: {"engine start", "settle", "sandbox start", "configure", "engine ready", "verify", "signal", "sandbox close", "engine stop"},
 	}
 	for at, want := range cases {
 		st, r, _, _ := startup("", at, true)

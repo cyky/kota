@@ -136,7 +136,7 @@ kota reduces risk; it isn't a guarantee. Know these before you point it at a pro
 - **`prep` has the network.** It reaches the internet, the LAN and the host's loopback, and runs install scripts, including those of registry dependencies. The confirmation is only as good as your review of what changed.
 - **Engine VM ports.** Ports a test container publishes are forwarded to the host's `127.0.0.1` without authentication, so other containers on the machine (for example another project's `prep`) can reach them.
 - **`--unsafe-skip-check`** runs the session even when a probe fails.
-- **SIGKILL or a crash** skips the change report and leaves placeholders in the project (`git status --ignored` shows them).
+- **SIGKILL or a crash** skips the change report and leaves placeholders in the project (`git status --ignored` shows them). The protected and masked files stay locked on the host until the next kota command on the project.
 - **Tested mainly on macOS** with Rancher Desktop on Apple silicon.
 
 ## In practice

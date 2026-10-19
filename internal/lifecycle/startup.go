@@ -3,16 +3,19 @@
 //
 //  1. The Engine VM, if the session has one, starts first, so it boots
 //     while the Sandbox starts.
-//  2. The Sandbox starts. From here on, if the Engine VM exits (the agent
+//  2. Settle waits until the Docker VM sees the protected paths as the
+//     host does, so the Sandbox's mounts over them hold.
+//  3. The Sandbox starts. From here on, if the Engine VM exits (the agent
 //     can power it off as root), the engine forwarder is killed at once, so
 //     the agent can't reach whatever binds the freed host ports next.
-//  3. Configure runs once the Sandbox can reach the gateway.
-//  4. The Engine VM must be ready, with its images loaded.
-//  5. Verify runs the probes.
+//  4. Configure runs once the Sandbox can reach the gateway.
+//  5. The Engine VM must be ready, with its images loaded.
+//  6. Verify runs the probes.
 //
 // On any failure, or a signal between steps, everything already started is
 // stopped again, last first: the watch is disarmed, then the Sandbox goes,
-// then the Engine VM.
+// then the Engine VM. The teardown of a session that started runs Finish
+// first, while the Sandbox still runs.
 package lifecycle
 
 import (
@@ -46,12 +49,17 @@ type Startup[S Sandbox] struct {
 	Engine Engine
 	// EngineService is the Sandbox's engine forwarder.
 	EngineService string
-	StartSandbox  func() (S, error)
+	// Settle runs before the Sandbox starts. An error refuses the session.
+	Settle       func() error
+	StartSandbox func() (S, error)
 	// Configure runs once the Sandbox is up, while the Engine VM may still
 	// be booting. An error stops the startup.
 	Configure func(S) error
 	// Verify runs once the Engine VM is ready. An error refuses the session.
 	Verify func(S) error
+	// Finish runs first in the teardown of a started session, while the
+	// Sandbox still runs, e.g. to check its mounts held.
+	Finish func(S)
 	// Out receives warnings, such as the Engine VM stopping.
 	Out io.Writer
 	// Interrupted reports a signal; nil means interrupt.Err.
@@ -85,6 +93,12 @@ func (st Startup[S]) Start() (sb S, teardown func(), err error) {
 			return sb, nil, err
 		}
 		stops = append(stops, st.Engine.Stop)
+	}
+	// A signal cuts Settle short, with an error.
+	if st.Settle != nil {
+		if err := st.Settle(); err != nil {
+			return sb, nil, err
+		}
 	}
 	if sb, err = st.StartSandbox(); err != nil {
 		return sb, nil, err
@@ -122,7 +136,16 @@ func (st Startup[S]) Start() (sb S, teardown func(), err error) {
 	if err := interrupted(); err != nil {
 		return sb, nil, err
 	}
-	return sb, stop, nil
+	teardown = stop
+	if st.Finish != nil {
+		teardown = func() {
+			if stops != nil {
+				st.Finish(sb)
+			}
+			stop()
+		}
+	}
+	return sb, teardown, nil
 }
 
 // watch kills the engine forwarder when the Engine VM exits before closing.

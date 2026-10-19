@@ -383,6 +383,99 @@ func TestPrepareAndCleanupSeeds(t *testing.T) {
 	}
 }
 
+// File placeholders are created by Prepare, empty, so they can be locked;
+// directory placeholders are left to Docker.
+func TestPreparePlaceholders(t *testing.T) {
+	dir := t.TempDir()
+	l := Layout{Mounts: []Mount{
+		{Path: ".envrc", Placeholder: true},
+		{Path: "githooks", Dir: true, Placeholder: true},
+		{Path: ".git", Dir: true, Pin: true},
+	}}
+	if err := l.Prepare(dir); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(filepath.Join(dir, ".envrc")); err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+		t.Errorf(".envrc placeholder = %v, %v", info, err)
+	}
+	for _, missing := range []string{"githooks", ".git"} {
+		if _, err := os.Lstat(filepath.Join(dir, missing)); !os.IsNotExist(err) {
+			t.Errorf("%s created: %v", missing, err)
+		}
+	}
+	l.Cleanup(dir)
+	if _, err := os.Lstat(filepath.Join(dir, ".envrc")); !os.IsNotExist(err) {
+		t.Errorf(".envrc placeholder left: %v", err)
+	}
+	// A file created on the host since the plan isn't replaced.
+	write(t, filepath.Join(dir, ".envrc"), "use flake\n")
+	if err := l.Prepare(dir); err == nil {
+		t.Error("Prepare replaced a file created since the plan")
+	}
+}
+
+func TestFilesAndPaths(t *testing.T) {
+	l := Layout{Mounts: []Mount{
+		{Path: ".env", Mask: true},
+		{Path: ".envrc", Placeholder: true},
+		{Path: ".git", Dir: true, Pin: true},
+		{Path: ".git/commondir", Seed: ".\n"},
+		{Path: ".git/config"},
+		{Path: ".git/hooks", Dir: true},
+		{Path: "githooks", Dir: true, Placeholder: true},
+		{Path: "secrets", Dir: true, Mask: true},
+	}}
+	if got, want := l.Files(), []string{".env", ".envrc", ".git/commondir", ".git/config"}; !slices.Equal(got, want) {
+		t.Errorf("Files = %v, want %v", got, want)
+	}
+	if got := l.Paths(); len(got) != len(l.Mounts) || got[2] != ".git" {
+		t.Errorf("Paths = %v", got)
+	}
+}
+
+// The end check warns once for each mount gone from the mount table, in
+// different words for masks, pins and read-only mounts.
+func TestLost(t *testing.T) {
+	l := Layout{Mounts: []Mount{
+		{Path: ".env", Mask: true},
+		{Path: ".envrc"},
+		{Path: ".git", Dir: true, Pin: true},
+		{Path: ".git/config"},
+		{Path: "my dir/.env", Mask: true},
+	}}
+	full := `100 90 0:34 /p /workspace rw,relatime - virtiofs share rw
+101 100 0:34 /scratch/empty-file /workspace/.env ro,relatime - virtiofs share rw
+102 100 0:34 /p/.envrc /workspace/.envrc ro,relatime - virtiofs share rw
+103 100 0:34 /p/.git /workspace/.git rw,relatime - virtiofs share rw
+104 103 0:34 /p/.git/config /workspace/.git/config ro,relatime - virtiofs share rw
+105 100 0:34 /scratch/empty-file /workspace/my\040dir/.env ro,relatime - virtiofs share rw
+`
+	if w := l.Lost(full); len(w) != 0 {
+		t.Errorf("warnings with every mount in place: %v", w)
+	}
+	var kept []string
+	for _, line := range strings.Split(full, "\n") {
+		if !strings.Contains(line, "/workspace/.env ") && !strings.Contains(line, "/workspace/.envrc ") && !strings.Contains(line, "/workspace/.git ") {
+			kept = append(kept, line)
+		}
+	}
+	w := l.Lost(strings.Join(kept, "\n"))
+	if len(w) != 3 {
+		t.Fatalf("warnings = %q, want 3", w)
+	}
+	for i, want := range []string{"mask over .env was gone", "pins .git was gone", "read-only mount over .envrc was gone"} {
+		if !slices.ContainsFunc(w, func(s string) bool { return strings.Contains(s, want) }) {
+			t.Errorf("warning %d: no %q in %q", i, want, w)
+		}
+	}
+	if !strings.Contains(w[0], "may have read the secret") || !strings.Contains(w[1], "writable for part of it") {
+		t.Errorf("mask and read-only warnings don't say what it means: %q", w)
+	}
+	if got := l.Lost(""); len(got) != len(l.Mounts) {
+		t.Errorf("empty mount table: %d warnings, want %d", len(got), len(l.Mounts))
+	}
+}
+
 // masked returns the masked paths of a layout, with "/" after directories.
 func masked(l Layout) []string {
 	var out []string

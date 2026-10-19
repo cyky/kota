@@ -33,8 +33,9 @@ type Mount struct {
 	// being renamed or removed. Otherwise the mount is read-only.
 	Pin bool
 	// Placeholder is set when Path doesn't exist: an empty file or directory
-	// is mounted instead, so it can't be created. Docker leaves the empty
-	// mount point behind on the host; Cleanup removes it.
+	// is mounted instead, so it can't be created. Prepare creates a file's
+	// empty mount point on the host, so it can be locked there; Docker
+	// creates a directory's. Cleanup removes them.
 	Placeholder bool
 	// Seed is written to Path on the host by Prepare when Path is missing,
 	// then mounted read-only over itself. Cleanup removes it if unchanged.
@@ -596,27 +597,100 @@ func (l Layout) Bind(project, scratch string) (pinned, readOnly []sandbox.Mount,
 	return pinned, readOnly, nil
 }
 
-// Prepare writes the seeded files to the host. Call Cleanup afterwards.
+// Prepare writes the seeded files, and the empty mount points of file
+// placeholders, to the host. Call Cleanup afterwards.
 func (pl Layout) Prepare(project string) error {
 	for _, m := range pl.Mounts {
-		if m.Seed == "" {
+		if m.Seed == "" && !(m.Placeholder && !m.Dir) {
 			continue
 		}
 		path := filepath.Join(project, filepath.FromSlash(m.Path))
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
-			return fmt.Errorf("seed %s: %w", m.Path, err)
+			return fmt.Errorf("create %s: %w", m.Path, err)
 		}
 		_, err = f.WriteString(m.Seed)
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
-			return fmt.Errorf("seed %s: %w", m.Path, err)
+			return fmt.Errorf("create %s: %w", m.Path, err)
 		}
 	}
 	return nil
 }
+
+// Files are the paths of the layout's files, relative with forward
+// slashes: read-only files, file placeholders, seeded files and masked
+// files. These are locked on the host for the session; directories aren't.
+func (pl Layout) Files() []string {
+	var files []string
+	for _, m := range pl.Mounts {
+		if !m.Dir {
+			files = append(files, m.Path)
+		}
+	}
+	return files
+}
+
+// Paths are the paths of all the layout's mounts, relative with forward
+// slashes.
+func (pl Layout) Paths() []string {
+	var paths []string
+	for _, m := range pl.Mounts {
+		paths = append(paths, m.Path)
+	}
+	return paths
+}
+
+// Lost returns a warning for each of the layout's mounts that is missing
+// from mountinfo, a container's /proc/self/mountinfo, at the end of the
+// session. A mount is dropped when the path under it is replaced or
+// deleted on the host.
+func (pl Layout) Lost(mountinfo string) []string {
+	points := map[string]bool{}
+	for _, line := range strings.Split(mountinfo, "\n") {
+		if f := strings.Fields(line); len(f) > 4 {
+			points[unescapeMountinfo(f[4])] = true
+		}
+	}
+	var warnings []string
+	for _, m := range pl.Mounts {
+		if points[sandbox.Workspace+"/"+m.Path] {
+			continue
+		}
+		var w string
+		switch {
+		case m.Mask:
+			w = "the mask over %s was gone by the end of the session: the agent may have read the secret; rotate it"
+		case m.Pin:
+			w = "the mount that pins %s was gone by the end of the session: the agent may have moved it and put something else in its place; review it before using git or direnv here"
+		default:
+			w = "the read-only mount over %s was gone by the end of the session: it was writable for part of it; review it before using git, direnv or kota here"
+		}
+		warnings = append(warnings, fmt.Sprintf(w, m.Path))
+	}
+	return warnings
+}
+
+// unescapeMountinfo undoes mountinfo's octal escapes (\040 for a space).
+func unescapeMountinfo(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) && isOctal(s[i+1]) && isOctal(s[i+2]) && isOctal(s[i+3]) {
+			b.WriteByte((s[i+1]-'0')<<6 | (s[i+2]-'0')<<3 | (s[i+3] - '0'))
+			i += 3
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func isOctal(c byte) bool { return c >= '0' && c <= '7' }
 
 // Cleanup removes what the session added to the host: seeded files that
 // are unchanged, and the empty mount points Docker created for placeholder

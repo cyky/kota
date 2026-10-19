@@ -82,7 +82,7 @@ The lease is held from the path checks, through confirmations, startup and teard
 
 Ctrl-C, `kill` (SIGTERM) or a closed terminal (SIGHUP) leaves nothing behind. Confirmations come before anything is written or started, and Ctrl-C at a prompt counts as no. Once a session is starting, a signal stops it at the next step: the agent isn't started, and the containers, networks, placeholders and session directory are removed as on an error. The change report still runs, and kota exits with status 130. Inside the agent's terminal, Ctrl-C goes to the agent as usual.
 
-Only a process killed outright (SIGKILL, a crash) skips this. The next command for the project then removes its containers, but not the placeholders and seeded files it left in the project (`git status --ignored` shows them) or its session directory.
+Only a process killed outright (SIGKILL, a crash) skips this. The next command for the project then removes its containers and unlocks the files it [locked on the host](protections.md#locked-files-on-the-host), but doesn't remove the placeholders and seeded files it left in the project (`git status --ignored` shows them) or its session directory.
 
 ## Cleanup
 

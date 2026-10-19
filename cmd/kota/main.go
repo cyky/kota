@@ -32,6 +32,7 @@ import (
 	"kota/internal/enginevm"
 	"kota/internal/gatewaykey"
 	"kota/internal/hostdata"
+	"kota/internal/hostlock"
 	"kota/internal/instructions"
 	"kota/internal/interrupt"
 	"kota/internal/lifecycle"
@@ -45,6 +46,7 @@ import (
 	"kota/internal/projectimage"
 	"kota/internal/sandbox"
 	"kota/internal/sessionregistry"
+	"kota/internal/vmview"
 )
 
 const (
@@ -57,6 +59,10 @@ const (
 	// engineBootTimeout bounds the Engine VM's boot to a ready Docker API.
 	engineBootTimeout = 60 * time.Second
 )
+
+// settleTimeout bounds the wait before a session for the Docker VM to see
+// the protected and masked paths as the host does. Tests shorten it.
+var settleTimeout = 10 * time.Second
 
 var usage = `usage: kota <command> [flags]
 
@@ -339,6 +345,12 @@ type session struct {
 	// style is the working style the agent's note starts with; unset for
 	// prep.
 	style instructions.Style
+	// lockList records the project files locked on the host for the
+	// session, locked how many; see hostlock. notLocked are the files that
+	// couldn't be locked.
+	lockList  string
+	locked    int
+	notLocked []error
 }
 
 // loadStyle reads the user's working style override, or returns the
@@ -423,17 +435,84 @@ func (s *session) printWarnings(w io.Writer) {
 		}
 		fmt.Fprintf(w, "note: --no-engine: the Engine VM is off, so tests that need containers can't run (%s)\n", told)
 	}
+	if s.locked > 0 {
+		fmt.Fprintf(w, "note: %d protected and masked files are locked on the host until the session ends\n", s.locked)
+	}
+	for _, err := range s.notLocked {
+		fmt.Fprintf(w, "WARNING: could not lock %v on the host: don't replace or delete it there during the session, or its mount in the sandbox is dropped\n", err)
+	}
 }
 
 // cleanup removes what the session left on the host. Call it after the
 // containers are gone.
 func (s *session) cleanup() {
+	s.unlock()
 	// Innermost first; a directory with content is kept.
 	for _, dir := range slices.Backward(s.mountPoints) {
 		os.Remove(dir)
 	}
 	s.layout.Cleanup(s.project)
 	os.RemoveAll(s.sessionDir)
+}
+
+// snapshot records the watched files for the change report, before the
+// session runs. The empty file placeholders kota created on the host are
+// left out: they were missing before, and cleanup removes them again.
+func (s *session) snapshot() (changereport.Files, error) {
+	before, err := changereport.SnapshotWith(s.project, s.layout.Watch)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range s.layout.Mounts {
+		if m.Placeholder && !m.Dir {
+			delete(before, m.Path)
+		}
+	}
+	return before, nil
+}
+
+// unlock clears the session's locks on the host, once. Call it after the
+// containers are gone; cleanup does. If it fails, the list stays for the
+// next command on the project to retry.
+func (s *session) unlock() {
+	if s.lockList == "" {
+		return
+	}
+	if err := hostlock.Unlock(s.lockList); err != nil {
+		fmt.Fprintln(os.Stderr, "WARNING:", err)
+	}
+	s.lockList = ""
+}
+
+// settle waits until the Docker VM sees the paths the session mounts over
+// as the host does. Call it once they're locked, before the sandbox
+// starts.
+func (s *session) settle() error {
+	return vmview.Wait(s.project, s.layout.Paths(), settleTimeout, func(args []string) (io.Reader, func() error, error) {
+		return docker.StartOffline(baseImage, os.Getuid(), os.Getgid(), []string{s.project}, s.project,
+			append([]string{"sh", "-c", vmview.Script, "sh"}, args...)...)
+	})
+}
+
+// settleOrRefuse is settle for a session that refuses to start without it.
+func (s *session) settleOrRefuse() error {
+	if err := s.settle(); err != nil {
+		return fmt.Errorf("refusing to start: %w", err)
+	}
+	return nil
+}
+
+// finish warns about each protection or mask mount that ds no longer has.
+// Call it at the end of the session, while ds still runs.
+func (s *session) finish(w io.Writer, ds *docker.Session) {
+	table, err := ds.MountTable()
+	if err != nil {
+		fmt.Fprintln(w, "WARNING: could not check that the protected and masked paths stayed protected:", err)
+		return
+	}
+	for _, warning := range s.layout.Lost(table) {
+		fmt.Fprintln(w, "WARNING:", warning)
+	}
 }
 
 // sessionArgs are the [flags] [dir] [-- cmd...] shared by run, shell and check.
@@ -646,6 +725,14 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	if err == nil {
 		err = layout.Prepare(project)
 	}
+	// Lock the files the mounts lie over, so the host can't replace them
+	// during the session: that would drop the mounts in the sandbox.
+	if err == nil {
+		sess.lockList, err = lockListFile(key)
+	}
+	if err == nil {
+		sess.locked, sess.notLocked, err = hostlock.Lock(project, layout.Files(), sess.lockList)
+	}
 	excludes := filepath.Join(sessionDir, "git-excludes")
 	if err == nil {
 		err = os.WriteFile(excludes, []byte(layout.Excludes()), 0o444)
@@ -701,6 +788,20 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		sess.fetchSpec, _ = sandbox.Build(in)
 	}
 	return sess, nil
+}
+
+// lockListFile is where the sessions of the project key record the files
+// they lock on the host, next to its lease record, so the next command
+// on the project unlocks them after a crash.
+func lockListFile(key string) (string, error) {
+	r, err := registry()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(r.Dir, 0o700); err != nil {
+		return "", err
+	}
+	return r.LockList(key), nil
 }
 
 // missingDirs returns the directories on the way to the dependency
@@ -795,22 +896,9 @@ func lockProject(sa sessionArgs, operation string) (*lockedProject, error) {
 	if err != nil {
 		return nil, err
 	}
-	dirs, err := hostdata.Default()
+	r, err := registry()
 	if err != nil {
 		return nil, err
-	}
-	r := &sessionregistry.Registry{
-		Dir: dirs.Registry(),
-		Recover: func(project string) error {
-			layout, err := engineLayout()
-			if err != nil {
-				return err
-			}
-			if err := enginevm.Recover(layout.Pidfile(project)); err != nil {
-				return err
-			}
-			return docker.RecoverProject(sandbox.ProjectName(project))
-		},
 	}
 	if sa.agent != "" {
 		operation += " (" + sa.agent + ")"
@@ -824,6 +912,29 @@ func lockProject(sa sessionArgs, operation string) (*lockedProject, error) {
 		return nil, err
 	}
 	return &lockedProject{Lease: lease, paths: paths}, nil
+}
+
+// registry is the session registry, which recovers what a crashed session
+// left: its containers, its Engine VM and its locks on the host.
+func registry() (*sessionregistry.Registry, error) {
+	dirs, err := hostdata.Default()
+	if err != nil {
+		return nil, err
+	}
+	return &sessionregistry.Registry{
+		Dir: dirs.Registry(),
+		Recover: func(project string) error {
+			layout, err := engineLayout()
+			if err != nil {
+				return err
+			}
+			if err := enginevm.Recover(layout.Pidfile(project)); err != nil {
+				return err
+			}
+			return docker.RecoverProject(sandbox.ProjectName(project))
+		},
+		Unlock: hostlock.Unlock,
+	}, nil
 }
 
 func releaseProject(lease *lockedProject) {
@@ -873,9 +984,9 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		discard()
 		return err
 	}
-	// Snapshot before Docker creates any mount points, and compare after
-	// cleanup has removed them, so placeholders aren't reported.
-	before, err := changereport.SnapshotWith(sess.project, sess.layout.Watch)
+	// Compare after cleanup has removed the placeholders, so they aren't
+	// reported.
+	before, err := sess.snapshot()
 	if err != nil {
 		sess.cleanup()
 		discard()
@@ -934,6 +1045,8 @@ type returned struct {
 // cleanup. git runs in offline containers only: in the copy only with its
 // bundle's directory writable, and in the original without the copy.
 func returnWork(sess *session, commits *commitCheck, name string, start time.Time) returned {
+	// The copy's locked files couldn't be removed.
+	sess.unlock()
 	r := returned{copy: sess.project}
 	if commits == nil || commits.err != nil {
 		r.none = "could not read the copy's commits"
@@ -1174,7 +1287,9 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 func (s *session) startup(out io.Writer) lifecycle.Startup[*docker.Session] {
 	st := lifecycle.Startup[*docker.Session]{
 		EngineService: sandbox.EngineService,
+		Settle:        s.settleOrRefuse,
 		StartSandbox:  func() (*docker.Session, error) { return docker.Start(s.spec, s.sessionDir, s.gatewayKey) },
+		Finish:        func(ds *docker.Session) { s.finish(out, ds) },
 		Out:           out,
 	}
 	// Only a non-nil Engine VM, so the interface isn't a typed nil.
@@ -1391,9 +1506,15 @@ func cmdCheck(args []string) error {
 	// check reports what it finds instead of stopping at the first problem:
 	// a gateway problem is also reported by the gateway probe, and the
 	// sandbox probes run when the Engine VM can't start.
-	var modelErr error
+	var modelErr, settleErr error
 	var failed, engineFailed []probe.Result
 	st := sess.startup(os.Stdout)
+	st.Settle = func() error {
+		if settleErr = sess.settle(); settleErr != nil {
+			fmt.Printf("host view: %v\n\n", settleErr)
+		}
+		return interrupt.Err()
+	}
 	if sess.engine != nil {
 		st.Engine = &reportedEngine{Engine: sess.engine, failed: &engineErr}
 	}
@@ -1438,6 +1559,8 @@ func cmdCheck(args []string) error {
 		return errors.New("sandbox is not contained")
 	case len(engineFailed) > 0:
 		return errors.New("the Engine VM is not contained")
+	case settleErr != nil:
+		return errors.New("the Docker VM doesn't see the protected and masked paths as the host does")
 	case engineErr != nil:
 		return engineErr
 	}
@@ -1539,7 +1662,7 @@ func cmdPrep(args []string) error {
 	if err != nil {
 		return err
 	}
-	before, err := changereport.SnapshotWith(sess.project, sess.layout.Watch)
+	before, err := sess.snapshot()
 	if err != nil {
 		sess.cleanup()
 		return fmt.Errorf("snapshot watched files: %w", err)
@@ -1813,9 +1936,12 @@ func runPrep(sess *session, cache engineimages.Cache, images *engine.ImagePlan) 
 	if err := docker.RemoveVolumes(vols...); err != nil {
 		return fmt.Errorf("%w (is a session for this project running?)", err)
 	}
+	if err := sess.settleOrRefuse(); err != nil {
+		return err
+	}
 	if sess.deps.FetchScript() != "" {
 		fmt.Fprintln(os.Stderr, "fetching into the shared caches (no project code runs)")
-		if err := runAttached(sess.fetchSpec, sess.sessionDir); err != nil {
+		if err := runAttached(sess, sess.fetchSpec); err != nil {
 			return fmt.Errorf("prep fetch failed: %w", err)
 		}
 	}
@@ -1832,7 +1958,7 @@ func runPrep(sess *session, cache engineimages.Cache, images *engine.ImagePlan) 
 	}
 	if sess.deps.Script() != "" {
 		fmt.Fprintln(os.Stderr, "installing (shared caches read-only)")
-		if err := runAttached(sess.spec, sess.sessionDir); err != nil {
+		if err := runAttached(sess, sess.spec); err != nil {
 			return fmt.Errorf("prep install failed: %w", err)
 		}
 	}
@@ -1862,14 +1988,16 @@ func engineImages(project string) (engineimages.Cache, error) {
 	return c, nil
 }
 
-// runAttached starts spec and runs its agent service attached to the
-// terminal. The containers are gone when it returns.
-func runAttached(spec sandbox.Compose, sessionDir string) error {
-	ds, err := docker.Start(spec, sessionDir, "")
+// runAttached starts spec, one of sess's specs, and runs its agent service
+// attached to the terminal, then checks its mounts held. The containers
+// are gone when it returns.
+func runAttached(sess *session, spec sandbox.Compose) error {
+	ds, err := docker.Start(spec, sess.sessionDir, "")
 	if err != nil {
 		return err
 	}
 	defer ds.Close()
+	defer sess.finish(os.Stderr, ds)
 	return ds.Interactive()
 }
 

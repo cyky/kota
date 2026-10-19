@@ -13,7 +13,7 @@ The agent can't plant code that git, direnv or kota runs on the host later. Thes
 - `.envrc` (direnv);
 - kota's own files: `kota.yaml`, `.kotaignore` and `kota.Dockerfile`.
 
-Each is mounted read-only over itself. A missing one (no `.envrc`, no hooks directory, no `commondir`) gets an empty read-only placeholder for the session, so the agent can't create it either, and the placeholder is removed from the host afterwards. `.git`, and every other directory on the way to a protected path, is mounted over itself too, so it can't be renamed away and replaced. A protected path with a symlink anywhere along it is refused, because a read-only mount can't hold it in place. The probes check each of these mounts before the session.
+Each is mounted read-only over itself, and locked on the host for the session (see [Locked files on the host](#locked-files-on-the-host)). A missing one (no `.envrc`, no hooks directory, no `commondir`) gets an empty read-only placeholder for the session, so the agent can't create it either, and the placeholder is removed from the host afterwards. `.git`, and every other directory on the way to a protected path, is mounted over itself too, so it can't be renamed away and replaced. A protected path with a symlink anywhere along it is refused, because a read-only mount can't hold it in place. The probes check each of these mounts before the session.
 
 The shared Go module and corepack caches, which every project's sessions use, are read-only as well, so the agent can't plant code in another project's dependencies; the probes check them too, and `kota check` lists them. Only `prep`'s fetch step writes them (see [Shared caches](dependencies.md#shared-caches)).
 
@@ -51,6 +51,32 @@ Limits:
 - **Masks are computed at launch.** A secret created on the host during a session isn't masked until the next one.
 - **Dependency and build directories aren't searched** (`node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`, ...), to keep launch fast.
 - **`--ro` paths aren't masked.**
+
+## Locked files on the host
+
+A read-only mount or a mask holds only while the file under it stays the same file on the host. If something on the host replaces it (writes a new file and renames it over, as host git does with `.git/config` and many editors do on save) or deletes it, the mount is dropped in the sandbox: a read-only file becomes writable from there, and a masked secret becomes readable. On Rancher Desktop (VZ, virtiofs) this happens about a second later, when the Docker VM's cached entry for the path runs out.
+
+So on macOS, kota locks these files on the host for the length of a session, with the user-immutable flag (`chflags uchg`): every protected file, file placeholder, seeded file (`commondir`) and masked file. It creates file placeholders itself, empty, so they can be locked too. `run`, `shell`, `check` and `prep` say how many:
+
+```
+note: 9 protected and masked files are locked on the host until the session ends
+```
+
+While a session runs, anything that changes them on the host fails with "Operation not permitted": saving `.envrc`, `kota.yaml` or a masked `.env` in an editor, `git config`, and host git commands that write `.git/config` (`git remote add`, `git push -u`, `git switch --track`). Retry once the session has ended.
+
+A file that can't be locked (on a filesystem without file flags, such as a network share, or a file owned by another user) gets a warning instead, and the session still starts. Don't replace or delete it on the host until the session ends; the end check below warns if its mount was dropped.
+
+Before the sandbox starts, kota waits until the Docker VM sees every protected and masked path as the host does (type, size and modification time), checking from one offline container every 250ms. That covers a file replaced on the host just before the session, including by kota's own cleanup after the previous session. If they don't match within 10 seconds, the session refuses to start and names the paths that differ; `kota check` reports them and runs its probes anyway.
+
+At the end, while the sandbox still runs, kota checks that every protection and mask mount is still in place, and warns for each one that is gone: for a mask, the agent may have read the secret; for a read-only path, it was writable for part of the session, so review it. This is a warning, and it doesn't change kota's exit status.
+
+kota unlocks the files when the session ends, including after Ctrl-C, SIGTERM, a closed terminal or a startup error, before it removes placeholders and seeded files. A file you had locked yourself before the session is left locked. If kota is killed outright (SIGKILL) or crashes, the files stay locked until the next kota command on the project, which unlocks them before it does anything else. To unlock them by hand, run `chflags nouchg` on each file; kota's list of them is in `~/Library/Caches/kota/registry/*.locked-files`.
+
+Limits:
+
+- **Directories aren't locked**: masked directories (`.aws/`, `.ssh/`, your own `secrets/`), `.git/hooks` and the pinned directories on the way to protected files. Replacing a whole one on the host during a session (renaming another directory over it, or deleting and re-creating it) still drops its mount. The end check warns about it.
+- **macOS only.** Linux isn't supported yet: it has no equivalent flag for the user, and a mount there is dropped at once when the file is replaced.
+- **Checked on Rancher Desktop** (VZ, virtiofs) only. Docker Desktop, Colima and OrbStack aren't checked.
 
 ## Changed files that run code
 

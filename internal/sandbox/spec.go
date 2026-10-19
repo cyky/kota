@@ -42,6 +42,10 @@ const (
 	// VolumesService gives new dependency volumes to the session user and
 	// lists the empty ones, one target per line.
 	VolumesService = "volumes"
+	// WitnessService runs for the whole session with the agent's project
+	// mounts, and nothing else, so its mount table shows at the end which
+	// of them still hold. The agent's own containers are gone by then.
+	WitnessService = "witness"
 
 	// GoModCache, CorepackHome and PnpmStore hold the caches shared by all
 	// projects. The base image creates them world-writable, like StateDir.
@@ -473,6 +477,8 @@ func Build(in Inputs) (Compose, Expect) {
 		agent.Command = in.Command
 	}
 
+	services[WitnessService] = witnessService(hardening, in, volumes)
+
 	key := in.Key
 	if key == "" {
 		key = in.ProjectDir
@@ -538,6 +544,28 @@ wait`
 	s.Networks = map[string]*NetworkAttach{
 		internalNetwork: {Aliases: []string{EngineHost}},
 		egressNetwork:   {},
+	}
+	return s
+}
+
+// witnessService holds the agent's binds at Workspace and under it, and
+// only waits. A protection mount is dropped in every container at once
+// when the path under it is replaced on the host, so its mount table
+// stands for the agent's. It has no network and runs no project code.
+func witnessService(hardening Service, in Inputs, volumes []Volume) Service {
+	s := hardening
+	s.Image = in.HelperImage
+	if s.Image == "" {
+		s.Image = in.AgentImage
+	}
+	s.User = fmt.Sprintf("%d:%d", in.UID, in.GID)
+	s.ReadOnly = true
+	s.NetworkMode = "none"
+	s.Entrypoint = []string{"sh", "-c", `trap 'exit 0' TERM; sleep infinity & wait`}
+	for _, v := range volumes {
+		if v.Type == "bind" && (v.Target == Workspace || strings.HasPrefix(v.Target, Workspace+"/")) {
+			s.Volumes = append(s.Volumes, v)
+		}
 	}
 	return s
 }

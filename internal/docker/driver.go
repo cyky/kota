@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -140,6 +142,89 @@ func RunOffline(image string, uid, gid int, mounts []string, dir string, cmd ...
 // RunOfflineWritable is RunOffline with writable, unless empty, also
 // bind-mounted at its own host path, and writable there.
 func RunOfflineWritable(image string, uid, gid int, mounts []string, writable, dir string, cmd ...string) (string, error) {
+	args, err := offlineArgs(image, uid, gid, mounts, writable, dir, cmd)
+	if err != nil {
+		return "", err
+	}
+	c := command("docker", args...)
+	var stdout, stderr bytes.Buffer
+	c.Stdout, c.Stderr = &stdout, &stderr
+	if err := c.Run(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+// StartOffline is RunOffline for a command that reports as it runs: it
+// returns its stdout as it comes, and stop, which stops the container if
+// it still runs, waits for it and closes stdout. A non-zero exit of its
+// own is an error carrying stderr.
+func StartOffline(image string, uid, gid int, mounts []string, dir string, cmd ...string) (io.Reader, func() error, error) {
+	args, err := offlineArgs(image, uid, gid, mounts, "", dir, cmd)
+	if err != nil {
+		return nil, nil, err
+	}
+	c := command("docker", args...)
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	// Not StdoutPipe: Wait would close it at the exit, before the last
+	// lines are read.
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	c.Stdout = w
+	err = c.Start()
+	w.Close()
+	if err != nil {
+		r.Close()
+		return nil, nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	out := &eofReader{r: r}
+	stop := func() error {
+		defer r.Close()
+		exited := func(err error) error {
+			if err != nil {
+				return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+			}
+			return nil
+		}
+		// A command that closed its stdout is exiting: wait for its status.
+		if out.eof.Load() {
+			return exited(<-done)
+		}
+		// One that just printed its result is about to exit by itself.
+		select {
+		case err := <-done:
+			return exited(err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		// The CLI passes the signal on to the container.
+		c.Process.Signal(syscall.SIGTERM)
+		<-done
+		return nil
+	}
+	return out, stop, nil
+}
+
+// eofReader records that r reached its end.
+type eofReader struct {
+	r   io.Reader
+	eof atomic.Bool
+}
+
+func (e *eofReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF {
+		e.eof.Store(true)
+	}
+	return n, err
+}
+
+// offlineArgs are the docker arguments of RunOfflineWritable.
+func offlineArgs(image string, uid, gid int, mounts []string, writable, dir string, cmd []string) ([]string, error) {
 	args := []string{"run", "--rm", "--pull", "never", "--network", "none",
 		"--read-only", "--tmpfs", "/tmp", "-e", "HOME=/tmp",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
@@ -147,24 +232,18 @@ func RunOfflineWritable(image string, uid, gid int, mounts []string, writable, d
 	for _, m := range mounts {
 		arg, err := bindArg(m)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		args = append(args, "--mount", arg)
 	}
 	if writable != "" {
 		arg, err := mountArg(writable, writable, false)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		args = append(args, "--mount", arg)
 	}
-	c := command("docker", append(append(args, "--", image), cmd...)...)
-	var stdout, stderr bytes.Buffer
-	c.Stdout, c.Stderr = &stdout, &stderr
-	if err := c.Run(); err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.String(), nil
+	return append(append(args, "--", image), cmd...), nil
 }
 
 // RunOnline runs cmd in a throwaway container of image, as uid:gid, on the
@@ -262,19 +341,33 @@ func Start(spec sandbox.Compose, sessionDir, gatewayKey string) (*Session, error
 			}
 		}
 	}
-	var forwarders []string
-	for _, name := range []string{sandbox.ForwarderService, sandbox.EngineService} {
+	// The forwarders and the mount witness, in one compose call.
+	var services []string
+	for _, name := range []string{sandbox.ForwarderService, sandbox.EngineService, sandbox.WitnessService} {
 		if _, ok := spec.Services[name]; ok {
-			forwarders = append(forwarders, name)
+			services = append(services, name)
 		}
 	}
-	if len(forwarders) > 0 {
-		if _, err := s.output(append([]string{"up", "-d", "--quiet-pull"}, forwarders...)...); err != nil {
+	if len(services) > 0 {
+		if _, err := s.output(append([]string{"up", "-d", "--quiet-pull"}, services...)...); err != nil {
 			s.Close()
-			return nil, fmt.Errorf("start forwarder: %w", err)
+			return nil, fmt.Errorf("start forwarder and mount witness: %w", err)
 		}
 	}
 	return s, nil
+}
+
+// MountTable returns the witness's /proc/self/mountinfo. It runs even after
+// an interrupt, since it is part of the teardown.
+func (s *Session) MountTable() (string, error) {
+	c := exec.Command("docker", append(slices.Clone(s.compose), "exec", "-T", sandbox.WitnessService, "cat", "/proc/self/mountinfo")...)
+	c.Env = s.env
+	var stdout, stderr bytes.Buffer
+	c.Stdout, c.Stderr = &stdout, &stderr
+	if err := c.Run(); err != nil {
+		return "", fmt.Errorf("read the mount table: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
 }
 
 // NetworkGateways returns the gateway address of each non-internal network
