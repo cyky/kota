@@ -14,7 +14,7 @@ import (
 
 func TestBranchName(t *testing.T) {
 	start := time.Date(2026, 10, 16, 14, 32, 5, 0, time.Local)
-	if got := BranchName("pi", start); got != "refs/heads/kota/pi-2026-10-16T143205" {
+	if got := branchName("pi", start); got != "refs/heads/kota/pi-2026-10-16T143205" {
 		t.Errorf("branch = %s", got)
 	}
 }
@@ -31,7 +31,7 @@ func TestUnreturned(t *testing.T) {
 		"refs/tags/v1":    a, // unchanged
 		"refs/tags/v2":    b, // new tag: tags are never returned
 	}}
-	got := Unreturned(before, after)
+	got := unreturned(before, after)
 	if want := []string{"branch wip", "tag v2"}; !slices.Equal(got, want) {
 		t.Errorf("unreturned = %q, want %q (old was deleted, which loses nothing)", got, want)
 	}
@@ -43,7 +43,7 @@ func TestUncommittedLeavesOutConfigFiles(t *testing.T) {
 		job = j
 		return " M src/a.go\n M kota.yaml\n?? new.txt\n", nil
 	}
-	got, err := Uncommitted("/copies/app", "/sessions/x/git-excludes", run)
+	got, err := uncommittedChanges("/copies/app", "/sessions/x/git-excludes", run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestImportWritesOnlyTheCommonDir(t *testing.T) {
 	for _, project := range []string{repo, wt} {
 		var job offlinegit.Job
 		run := func(j offlinegit.Job) (string, error) { job = j; return "returned " + id + " 1\n", nil }
-		r, err := Import(project, "/sessions/x/return-1/return.bundle", id, "refs/heads/kota/pi-x", run)
+		r, err := importBundle(project, "/sessions/x/return-1/return.bundle", id, "refs/heads/kota/pi-x", run)
 		if err != nil || r.Commit != id {
 			t.Fatalf("%s: %+v, %v", project, r, err)
 		}

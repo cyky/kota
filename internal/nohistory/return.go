@@ -3,6 +3,8 @@ package nohistory
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -14,18 +16,137 @@ import (
 	"kota/internal/offlinegit"
 )
 
-// BranchName is the Returned branch of a Session of name (the agent, or
+// Refs are the copy's refs at the start and the end of the Session, as a
+// *changereport.Result has them. ok is false when they couldn't be read.
+type Refs interface {
+	Refs() (before, after changereport.Refs, ok bool)
+}
+
+// Outcome is what Return did with a No-history copy.
+type Outcome struct {
+	copy string
+	// branch is the Returned branch, when one was made.
+	branch returnedBranch
+	// none is why no branch was made, when none was.
+	none string
+	// unreturned are branches and tags in the copy that weren't brought
+	// back, uncommitted its uncommitted changes.
+	unreturned, uncommitted []string
+	// keep are the reasons the copy is kept; it was removed when there are
+	// none.
+	keep []string
+}
+
+// Return brings the copy's HEAD back into original as the Returned branch
+// of a Session of name (the agent, or "shell") started at start, and
+// removes the copy unless something in it would be lost: uncommitted
+// changes, branches or tags not brought back, or commits that couldn't
+// be. commits are the copy's refs; excludes is the Session's excludes
+// file; the bundle goes in a new directory under scratch.
+//
+// Call it once the containers are gone and the copy's files are unlocked,
+// before the Session's cleanup: git reads the seeded files in the copy's
+// .git. git runs in offline containers only: in the copy only with the
+// bundle's directory writable, and in original without the copy.
+func Return(copy, original string, commits Refs, name string, start time.Time, run offlinegit.Runner, excludes, scratch string) Outcome {
+	o := Outcome{copy: copy}
+	before, after, ok := commits.Refs()
+	if !ok {
+		o.none = "could not read the copy's commits"
+		o.keep = append(o.keep, o.none)
+		return o
+	}
+	uncommitted, err := uncommittedChanges(copy, excludes, run)
+	if err != nil {
+		o.keep = append(o.keep, fmt.Sprintf("could not read its status: %v", err))
+	} else if o.uncommitted = uncommitted; len(uncommitted) > 0 {
+		o.keep = append(o.keep, "uncommitted changes")
+	}
+	if o.unreturned = unreturned(before, after); len(o.unreturned) > 0 {
+		o.keep = append(o.keep, "branches or tags not brought back")
+	}
+	base, head := before.Head, after.Head
+	switch {
+	case head == base:
+		o.none = "no commits to bring back"
+	case head == "":
+		o.none = "the copy's HEAD has no commit"
+		o.keep = append(o.keep, o.none)
+	default:
+		o.branch, err = bringBack(copy, original, base, branchName(name, start), run, scratch)
+		if errors.Is(err, errRewritten) {
+			o.none = err.Error()
+		} else if err != nil {
+			o.none = fmt.Sprintf("could not bring back: %v", err)
+		}
+		if err != nil {
+			o.keep = append(o.keep, "its commits weren't brought back")
+		}
+	}
+	if len(o.keep) == 0 {
+		if err := os.RemoveAll(copy); err != nil {
+			o.keep = append(o.keep, fmt.Sprintf("could not remove it: %v", err))
+		}
+	}
+	return o
+}
+
+// bringBack exports the copy's new commits to a bundle in a new directory
+// under scratch and imports them into original as branch.
+func bringBack(copy, original, base, branch string, run offlinegit.Runner, scratch string) (returnedBranch, error) {
+	dir, err := os.MkdirTemp(scratch, "return-")
+	if err != nil {
+		return returnedBranch{}, err
+	}
+	bundle := filepath.Join(dir, "return.bundle")
+	if err := export(copy, base, bundle, run); err != nil {
+		return returnedBranch{}, err
+	}
+	return importBundle(original, bundle, base, branch, run)
+}
+
+// maxUncommitted is how many uncommitted changes in a kept copy the
+// report lists.
+const maxUncommitted = 20
+
+// Report prints the return part of the Change report.
+func (o Outcome) Report(w io.Writer) {
+	if o.branch.Branch != "" {
+		fmt.Fprintf(w, "returned branch %s (%d commit(s), at %s); review it, then merge it yourself\n",
+			strings.TrimPrefix(o.branch.Branch, "refs/heads/"), o.branch.Commits, o.branch.Commit[:min(12, len(o.branch.Commit))])
+	} else {
+		fmt.Fprintf(w, "no-history: no branch brought back: %s\n", o.none)
+	}
+	if len(o.unreturned) > 0 {
+		fmt.Fprintf(w, "not brought back: %s\n", strings.Join(o.unreturned, ", "))
+	}
+	if len(o.keep) == 0 {
+		fmt.Fprintln(w, "the copy was removed")
+		return
+	}
+	fmt.Fprintf(w, "copy kept at %s (%s)\n", o.copy, strings.Join(o.keep, "; "))
+	for i, line := range o.uncommitted {
+		if i == maxUncommitted {
+			fmt.Fprintf(w, "  ... and %d more\n", len(o.uncommitted)-maxUncommitted)
+			break
+		}
+		fmt.Fprintln(w, "  "+line)
+	}
+	fmt.Fprintln(w, "  git in the copy reads config and hooks the agent could write: review them before running git there; kota clean removes the copy")
+}
+
+// branchName is the Returned branch of a Session of name (the agent, or
 // "shell") started at start, as a full ref.
-func BranchName(name string, start time.Time) string {
+func branchName(name string, start time.Time) string {
 	return "refs/heads/kota/" + name + "-" + start.Format(hostdata.TimeFormat)
 }
 
-// Uncommitted returns the copy's uncommitted changes, as git status
+// uncommittedChanges returns the copy's uncommitted changes, as git status
 // --porcelain lines, kota's own files left out. excludes is the
 // Session's excludes file, so placeholders and masks aren't listed. Read
 // it before the Session's cleanup: Docker's file sharing can show a
 // removed seeded file as still there.
-func Uncommitted(copy, excludes string, run offlinegit.Runner) ([]string, error) {
+func uncommittedChanges(copy, excludes string, run offlinegit.Runner) ([]string, error) {
 	out, err := offlinegit.Git(run, offlinegit.Job{ReadOnly: []string{copy, excludes}, Dir: copy},
 		"-c", "core.excludesFile="+excludes, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
@@ -46,9 +167,9 @@ func Uncommitted(copy, excludes string, run offlinegit.Runner) ([]string, error)
 const exportScript = `set -e
 g -c core.hooksPath=/dev/null bundle create -q "$1" HEAD "^$2"`
 
-// Export writes the commits on the copy's HEAD that its base doesn't have
+// export writes the commits on the copy's HEAD that its base doesn't have
 // to the bundle file, whose directory must exist and be empty.
-func Export(copy, base, bundle string, run offlinegit.Runner) error {
+func export(copy, base, bundle string, run offlinegit.Runner) error {
 	job := offlinegit.Job{ReadOnly: []string{copy}, Writable: filepath.Dir(bundle), Dir: copy}
 	if _, err := offlinegit.Script(run, job, exportScript, bundle, base); err != nil {
 		return fmt.Errorf("export the copy's commits: %w", err)
@@ -81,44 +202,44 @@ o update-ref "$branch" "$incoming" ""
 o update-ref -d "$incoming"
 echo "returned $(o rev-parse "$branch") $(o rev-list --count "$base..$branch")"`
 
-// ErrRewritten is returned by Import when the bundle's HEAD doesn't
+// errRewritten is returned by importBundle when the bundle's HEAD doesn't
 // descend from the base: the agent reset or replaced the history.
-var ErrRewritten = errors.New("history rewritten, not brought back")
+var errRewritten = errors.New("history rewritten, not brought back")
 
-// Returned is a Returned branch.
-type Returned struct {
+// returnedBranch is a Returned branch.
+type returnedBranch struct {
 	// Branch is the full ref, Commit its tip.
 	Branch, Commit string
 	// Commits is how many commits it has that the base hasn't.
 	Commits int
 }
 
-// Import brings the bundle's HEAD into project's repository as the full
-// ref branch, if it descends from base and branch doesn't exist yet. Only
-// the repository's common git dir is writable.
-func Import(project, bundle, base, branch string, run offlinegit.Runner) (Returned, error) {
+// importBundle brings the bundle's HEAD into project's repository as the
+// full ref branch, if it descends from base and branch doesn't exist yet.
+// Only the repository's common git dir is writable.
+func importBundle(project, bundle, base, branch string, run offlinegit.Runner) (returnedBranch, error) {
 	repo, err := repoOf(project)
 	if err != nil {
-		return Returned{}, err
+		return returnedBranch{}, err
 	}
 	gitDir := repo.CommonDir
 	incoming := "refs/kota-incoming/" + filepath.Base(strings.TrimPrefix(branch, "refs/heads/kota/"))
 	job := offlinegit.Job{ReadOnly: []string{filepath.Dir(bundle)}, Writable: gitDir, Dir: gitDir}
 	out, err := offlinegit.Script(run, job, importScript, gitDir, bundle, base, incoming, branch)
 	if err != nil {
-		return Returned{}, fmt.Errorf("import into %s: %w", project, err)
+		return returnedBranch{}, fmt.Errorf("import into %s: %w", project, err)
 	}
 	result := strings.TrimSpace(out)
 	switch result {
 	case "rewritten":
-		return Returned{}, ErrRewritten
+		return returnedBranch{}, errRewritten
 	case "exists":
-		return Returned{}, fmt.Errorf("branch %s already exists", strings.TrimPrefix(branch, "refs/heads/"))
+		return returnedBranch{}, fmt.Errorf("branch %s already exists", strings.TrimPrefix(branch, "refs/heads/"))
 	}
-	var r Returned
+	var r returnedBranch
 	_, err = fmt.Sscanf(result, "returned %s %d", &r.Commit, &r.Commits)
 	if err != nil || !objectID.MatchString(r.Commit) {
-		return Returned{}, fmt.Errorf("import into %s: unexpected output %q", project, result)
+		return returnedBranch{}, fmt.Errorf("import into %s: unexpected output %q", project, result)
 	}
 	r.Branch = branch
 	return r, nil
@@ -126,10 +247,10 @@ func Import(project, bundle, base, branch string, run offlinegit.Runner) (Return
 
 var objectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
-// Unreturned are the branches and tags the Session created or moved in
+// unreturned are the branches and tags the Session created or moved in
 // the copy that aren't brought back: every tag, and every branch whose
 // tip isn't HEAD. Deleted refs lose nothing.
-func Unreturned(before, after changereport.Refs) []string {
+func unreturned(before, after changereport.Refs) []string {
 	var out []string
 	for _, c := range changereport.RefChanges(before, after) {
 		if c.Kind == changereport.Deleted {

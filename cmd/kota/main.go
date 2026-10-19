@@ -982,14 +982,17 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		return err
 	}
 	// Before cleanup, as Finish: the copy's status and export read its
-	// .git, where cleanup removes seeded files.
-	ret := returnWork(sess, result, returnName(sa, ag.Name()), start)
+	// .git, where cleanup removes seeded files. Unlocked first, so the copy
+	// can be removed.
+	sess.unlock()
+	ret := nohistory.Return(sess.project, sess.key, result, returnName(sa, ag.Name()), start,
+		offlineGit, filepath.Join(sess.sessionDir, "git-excludes"), sess.sessionDir)
 	sess.cleanup()
 	// The copy's working tree is discarded, so watched files changed in
 	// its commits are always flagged, and its changes are listed in full
 	// when it is kept.
 	result.Report(os.Stderr)
-	ret.report(os.Stderr)
+	ret.Report(os.Stderr)
 	return err
 }
 
@@ -1010,115 +1013,6 @@ func returnName(sa sessionArgs, agent string) string {
 	}
 	return agent
 }
-
-// returned is what returnWork did with a No-history copy.
-type returned struct {
-	copy string
-	// branch is the Returned branch, when one was made.
-	branch nohistory.Returned
-	// none is why no branch was made, when none was.
-	none string
-	// unreturned are branches and tags in the copy that weren't brought
-	// back, uncommitted its uncommitted changes.
-	unreturned, uncommitted []string
-	// keep are the reasons the copy is kept; it is deleted when there are
-	// none.
-	keep []string
-}
-
-// returnWork brings the copy's HEAD back into the original as the
-// Returned branch, and deletes the copy unless something in it would be
-// lost. Call it once the containers are gone, before the session's
-// cleanup. git runs in offline containers only: in the copy only with its
-// bundle's directory writable, and in the original without the copy.
-func returnWork(sess *session, commits *changereport.Result, name string, start time.Time) returned {
-	// The copy's locked files couldn't be removed.
-	sess.unlock()
-	r := returned{copy: sess.project}
-	before, after, ok := commits.Refs()
-	if !ok {
-		r.none = "could not read the copy's commits"
-		r.keep = append(r.keep, r.none)
-		return r
-	}
-	uncommitted, err := nohistory.Uncommitted(sess.project, filepath.Join(sess.sessionDir, "git-excludes"), offlineGit)
-	if err != nil {
-		r.keep = append(r.keep, fmt.Sprintf("could not read its status: %v", err))
-	} else if r.uncommitted = uncommitted; len(uncommitted) > 0 {
-		r.keep = append(r.keep, "uncommitted changes")
-	}
-	if r.unreturned = nohistory.Unreturned(before, after); len(r.unreturned) > 0 {
-		r.keep = append(r.keep, "branches or tags not brought back")
-	}
-	base, head := before.Head, after.Head
-	switch {
-	case head == base:
-		r.none = "no commits to bring back"
-	case head == "":
-		r.none = "the copy's HEAD has no commit"
-		r.keep = append(r.keep, r.none)
-	default:
-		r.branch, err = bringBack(sess, base, nohistory.BranchName(name, start))
-		if errors.Is(err, nohistory.ErrRewritten) {
-			r.none = err.Error()
-		} else if err != nil {
-			r.none = fmt.Sprintf("could not bring back: %v", err)
-		}
-		if err != nil {
-			r.keep = append(r.keep, "its commits weren't brought back")
-		}
-	}
-	if len(r.keep) == 0 {
-		if err := os.RemoveAll(sess.project); err != nil {
-			r.keep = append(r.keep, fmt.Sprintf("could not remove it: %v", err))
-		}
-	}
-	return r
-}
-
-// bringBack exports the copy's new commits to a bundle in the session dir
-// and imports them into the original as branch.
-func bringBack(sess *session, base, branch string) (nohistory.Returned, error) {
-	dir, err := os.MkdirTemp(sess.sessionDir, "return-")
-	if err != nil {
-		return nohistory.Returned{}, err
-	}
-	bundle := filepath.Join(dir, "return.bundle")
-	if err := nohistory.Export(sess.project, base, bundle, offlineGit); err != nil {
-		return nohistory.Returned{}, err
-	}
-	return nohistory.Import(sess.key, bundle, base, branch, offlineGit)
-}
-
-// report prints the return part of the change report.
-func (r returned) report(w io.Writer) {
-	if r.branch.Branch != "" {
-		fmt.Fprintf(w, "returned branch %s (%d commit(s), at %s); review it, then merge it yourself\n",
-			strings.TrimPrefix(r.branch.Branch, "refs/heads/"), r.branch.Commits, r.branch.Commit[:min(12, len(r.branch.Commit))])
-	} else {
-		fmt.Fprintf(w, "no-history: no branch brought back: %s\n", r.none)
-	}
-	if len(r.unreturned) > 0 {
-		fmt.Fprintf(w, "not brought back: %s\n", strings.Join(r.unreturned, ", "))
-	}
-	if len(r.keep) == 0 {
-		fmt.Fprintln(w, "the copy was removed")
-		return
-	}
-	fmt.Fprintf(w, "copy kept at %s (%s)\n", r.copy, strings.Join(r.keep, "; "))
-	for i, line := range r.uncommitted {
-		if i == maxListedChanges {
-			fmt.Fprintf(w, "  ... and %d more\n", len(r.uncommitted)-maxListedChanges)
-			break
-		}
-		fmt.Fprintln(w, "  "+line)
-	}
-	fmt.Fprintln(w, "  git in the copy reads config and hooks the agent could write: review them before running git there; kota clean removes the copy")
-}
-
-// maxListedChanges is how many uncommitted changes in a kept copy the
-// report lists.
-const maxListedChanges = 20
 
 // offlinePaths returns the paths a run or shell session mounts and the
 // project it belongs to, after the full-auto prompt or, with --no-history,

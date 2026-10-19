@@ -129,7 +129,7 @@ flowchart TD
         mask["mask<br/>secret masks, git and .envrc protections"]
         deps["deps<br/>dependency plan, kota.yaml prep"]
         projectimage["projectimage<br/>kota.Dockerfile"]
-        nohistory["nohistory<br/>No-history copy: inspect, clone,<br/>kota config from the original"]
+        nohistory["nohistory<br/>No-history copy: inspect, clone,<br/>kota config from the original,<br/>Returned branch, keep or remove"]
     end
 
     subgraph spec["Sandbox definition"]

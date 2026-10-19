@@ -15,6 +15,7 @@ import (
 	"kota/internal/changereport"
 	"kota/internal/docker"
 	"kota/internal/hostdata"
+	"kota/internal/nohistory"
 	"kota/internal/sandbox"
 )
 
@@ -189,9 +190,12 @@ func noHistorySession(t *testing.T, project, gateway, script string) noHistoryRu
 			t.Fatalf("%v\n%s", err, run.inside)
 		}
 		result := changes.Finish()
-		ret := returnWork(sess, result, returnName(sa, agent.Default), run.start)
+		// As in cmdOffline.
+		sess.unlock()
+		ret := nohistory.Return(sess.project, sess.key, result, returnName(sa, agent.Default), run.start,
+			offlineGit, filepath.Join(sess.sessionDir, "git-excludes"), sess.sessionDir)
 		result.Report(&report)
-		ret.report(&report)
+		ret.Report(&report)
 	})
 	run.report = report.String()
 	t.Logf("inside:\n%s\nreport:\n%s", run.inside, run.report)

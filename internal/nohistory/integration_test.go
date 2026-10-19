@@ -237,11 +237,11 @@ func TestReturnBringsHeadBack(t *testing.T) {
 	userBranch := git(t, project, "symbolic-ref", "HEAD")
 
 	settle()
-	if err := Export(dest, base, bundle, dockerRunner(t)); err != nil {
+	if err := export(dest, base, bundle, dockerRunner(t)); err != nil {
 		t.Fatal(err)
 	}
-	branch := BranchName("pi", time.Date(2026, 10, 16, 14, 32, 5, 0, time.Local))
-	got, err := Import(project, bundle, base, branch, dockerRunner(t))
+	branch := branchName("pi", time.Date(2026, 10, 16, 14, 32, 5, 0, time.Local))
+	got, err := importBundle(project, bundle, base, branch, dockerRunner(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestReturnBringsHeadBack(t *testing.T) {
 	}
 
 	// The same name again: the branch isn't replaced.
-	if _, err := Import(project, bundle, base, branch, dockerRunner(t)); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if _, err := importBundle(project, bundle, base, branch, dockerRunner(t)); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("second import: %v", err)
 	}
 
@@ -286,12 +286,12 @@ func TestReturnRefusesRewrittenHistory(t *testing.T) {
 	git(t, dest, "checkout", "-q", "--orphan", "fresh")
 	git(t, dest, "commit", "-q", "-m", "new root")
 	settle()
-	if err := Export(dest, base, bundle, dockerRunner(t)); err != nil {
+	if err := export(dest, base, bundle, dockerRunner(t)); err != nil {
 		t.Fatal(err)
 	}
-	branch := BranchName("pi", time.Now())
-	if _, err := Import(project, bundle, base, branch, dockerRunner(t)); err != ErrRewritten {
-		t.Errorf("import = %v, want ErrRewritten", err)
+	branch := branchName("pi", time.Now())
+	if _, err := importBundle(project, bundle, base, branch, dockerRunner(t)); err != errRewritten {
+		t.Errorf("import = %v, want errRewritten", err)
 	}
 	if refs := git(t, project, "for-each-ref", "--format=%(refname)", "refs/kota-incoming", "refs/heads/kota"); refs != "" {
 		t.Errorf("refs left: %s", refs)
@@ -306,7 +306,7 @@ func TestUncommittedInCopy(t *testing.T) {
 	os.WriteFile(filepath.Join(dest, ".envrc"), nil, 0o644) // a placeholder
 	os.WriteFile(filepath.Join(dest, "kota.yaml"), []byte("{}\n"), 0o644)
 	os.WriteFile(filepath.Join(dest, "README"), []byte("changed\n"), 0o644)
-	got, err := Uncommitted(dest, excludes, dockerRunner(t))
+	got, err := uncommittedChanges(dest, excludes, dockerRunner(t))
 	if err != nil {
 		t.Fatal(err)
 	}
