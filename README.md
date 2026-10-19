@@ -77,5 +77,4 @@ kota runs the agent in a container on an internal Docker network whose only way 
 - [Dependencies](docs/dependencies.md): `prep`, shared caches and project images
 - [Engine VM](docs/engine-vm.md): containers for a project's tests
 - [Architecture](docs/architecture.md): diagrams of the runtime, the command flows, the packages and where data lives
-- [Migrating from localllm](docs/migrating.md)
 - [Development](docs/development.md): running kota's tests
