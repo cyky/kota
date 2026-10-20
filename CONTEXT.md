@@ -61,6 +61,7 @@ _Avoid_: user config, custom config, project config
 - A **Session** runs in exactly one **Sandbox**, for exactly one project
 - A **Gate** runs inside a **Session**, never on the host
 - **Prep** runs before **Sessions** and is the only step with network access to registries
+- **Prep** reads the project's registry auth (`.npmrc`) once the user approves it; a **Session** never can
 - A **Gate** that needs containers (for example testcontainers) starts them in the **Engine VM**, never in the host's Docker
 - Every **Engine VM** boots from the same **Engine base disk**, through a throwaway layer
 - An **Engine VM** belongs to exactly one project. It runs only while a **Session** of that project does, and starts every **Session** from a clean disk with its **Engine images** loaded, so nothing carries over between **Sessions**
@@ -89,4 +90,5 @@ _Avoid_: user config, custom config, project config
 - "gate" could have meant a check kota runs after the **Session**, before the user accepts the changes. Resolved: a **Gate** is run by the agent inside the **Session**.
 - The **Engine VM** was first planned as a Lima VM. Resolved: it is a QEMU VM, because Lima can't lock its network down from outside the VM.
 - "no history" (`--no-history`) reads as "no commits from the project". Resolved: a **No-history copy** keeps the project's current commit as it is (files, message, author, date) and hides only the older ones. Keeping a path and its history from the agent means pointing kota at a directory that excludes it, not `--no-history`.
+- `!.npmrc` in `.kotaignore` used to expose the project's registry auth to **Sessions** too, as the only way to give it to **Prep**. Resolved: **Prep** reads the project-root `.npmrc` once approved, and **Sessions** always mask it; `.kotaignore` can't unmask it.
 - "a separate container that serves Docker" was considered for the agent's containers. Resolved: they run in the **Engine VM**, because a Docker-serving container would have to be privileged on the same VM as the host's Docker.
