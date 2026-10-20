@@ -4,17 +4,19 @@ Run coding agents (opencode, pi) in an offline Docker sandbox that can reach onl
 
 A kota is a Finnish (and Sámi) hut: a simple shelter where the agent works, apart from everything else.
 
-Status: early, and tested mainly on macOS with Rancher Desktop on Apple silicon. kota reduces the risk of letting an agent work unattended; it isn't a guarantee. Read [the limits](docs/sandbox.md#drawbacks-and-limits) before you point it at a project with secrets.
+Status: early, a personal project built for one setup: macOS with Rancher Desktop on Apple silicon, and local models behind llama-swap. kota reduces the risk of letting an agent work unattended; it isn't a guarantee. Read [the limits](docs/sandbox.md#drawbacks-and-limits) before you point it at a project with secrets.
 
 ## Requirements
 
+- Go 1.27 or later, to install kota
 - Docker with compose (tested with Rancher Desktop on macOS)
-- A model gateway on the host, by default llama-swap on port 8686
+- A model gateway on the host that speaks the OpenAI API, by default llama-swap on port 8686. See [Models](#models) if yours serves other models.
 - QEMU, only for projects with an [Engine VM](docs/engine-vm.md)
 
 ## Quick start
 
 ```sh
+git clone https://github.com/cyky/kota.git && cd kota
 go install ./cmd/kota
 kota build              # build the sandbox images, once and after updating kota
 cd ~/Projects/app
@@ -61,6 +63,12 @@ kota instructions                  # print the agent's working style and whether
 | `KOTA_GATEWAY_KEY` or `KOTA_GATEWAY_KEY_FILE` | The gateway's API key, if llama-swap has `apiKeys` enabled. The agent can read it, so use a key meant only for the gateway. | none |
 | `KOTA_ALLOWED_ROOT` | The directory projects must be inside | `~/Projects` |
 
+### Models
+
+The agent can use every model the gateway lists. [`assets/models.yaml`](assets/models.yaml) adds what the gateway doesn't report, such as each model's context window, and names the default model, `qwen3.6-coder`. A session refuses to start when the gateway doesn't serve the default, and lists the models it does. Pass `--model ID`, or set your own default and context sizes in `assets/models.yaml` and run `go install ./cmd/kota` again, since the file is built into kota. Details: [Sessions](docs/sessions.md#models).
+
+### Your own settings
+
 Your own working style for the agent, and agent settings such as keybindings, go in `~/.config/kota/`; see [The agents](docs/agent-setup.md). A project's own settings go in `kota.yaml`, `.kotaignore` and `kota.Dockerfile` at its root; see [Dependencies](docs/dependencies.md) and [Protecting the host](docs/protections.md).
 
 ## How it works
@@ -77,7 +85,8 @@ kota runs the agent in a container on an internal Docker network whose only way 
 - [Dependencies](docs/dependencies.md): `prep`, shared caches and project images
 - [Engine VM](docs/engine-vm.md): containers for a project's tests
 - [Architecture](docs/architecture.md): diagrams of the runtime, the command flows, the packages and where data lives
-- [Development](docs/development.md): running kota's tests
+- [Development](docs/development.md): the layout, building and running kota's tests
+- [Design notes and issues](.scratch/README.md): every feature's PRD and issues, done and open
 
 ## License
 
