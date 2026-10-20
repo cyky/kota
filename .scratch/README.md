@@ -18,6 +18,7 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 | [stale-mounts](stale-mounts/issues/) | Mounts that vanish when a file is replaced on the host |
 | [prep-npmrc](prep-npmrc/issues/) | `prep` reads the project-root `.npmrc` |
 | [module-path](module-path/issues/) | The Go module path, so `go install` works from GitHub |
+| [renovate](renovate/issues/) | Renovate keeps the pinned agents and images up to date |
 
 ## Open issues
 
@@ -25,5 +26,6 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 - [Engine VM on Linux](engine-vm/issues/09-engine-vm-on-linux.md) (ready for a human)
 - [On Linux, replacing a protected file on the host drops its mount](stale-mounts/issues/02-host-replace-on-linux.md) (needs triage)
 - [Module path github.com/cyky/kota, so go install works](module-path/issues/01-module-path-for-go-install.md) (ready for an agent)
+- [Renovate keeps opencode, pi and the pinned images up to date](renovate/issues/01-renovate-for-pinned-versions.md) (ready for an agent)
 
 An issue's title starts with `DONE — ` once it is closed, and its `Resolved in:` line names the commits.
