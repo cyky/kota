@@ -17,11 +17,13 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 | [session-verify](session-verify/issues/) | One verify step for `run`, `shell` and `check` |
 | [stale-mounts](stale-mounts/issues/) | Mounts that vanish when a file is replaced on the host |
 | [prep-npmrc](prep-npmrc/issues/) | `prep` reads the project-root `.npmrc` |
+| [module-path](module-path/issues/) | The Go module path, so `go install` works from GitHub |
 
 ## Open issues
 
 - [Any OpenAI-compatible gateway, such as LiteLLM](agent-sandbox/issues/34-any-openai-compatible-gateway.md) (needs triage)
 - [Engine VM on Linux](engine-vm/issues/09-engine-vm-on-linux.md) (ready for a human)
 - [On Linux, replacing a protected file on the host drops its mount](stale-mounts/issues/02-host-replace-on-linux.md) (needs triage)
+- [Module path github.com/cyky/kota, so go install works](module-path/issues/01-module-path-for-go-install.md) (ready for an agent)
 
 An issue's title starts with `DONE — ` once it is closed, and its `Resolved in:` line names the commits.
