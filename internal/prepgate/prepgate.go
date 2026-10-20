@@ -15,6 +15,7 @@ import (
 
 	"kota/internal/changereport"
 	"kota/internal/deps"
+	"kota/internal/mask"
 )
 
 // Inputs are the files that decide what prep runs, in the syntax of
@@ -54,6 +55,9 @@ type Record struct {
 	// Dirs are the dependency directories prep installed into. Sessions
 	// reuse them when the project's dependencies can't be worked out.
 	Dirs []deps.Dir `json:"dirs,omitempty"`
+	// Npmrc is set when the project has a root mask.Npmrc, which prep
+	// reads. In a saved record it means the user approved that.
+	Npmrc bool `json:"npmrc,omitempty"`
 }
 
 // Snapshot records project as it is now.
@@ -66,7 +70,11 @@ func Snapshot(project string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	return Record{Inputs: inputs.Digests(), All: all.Digests()}, nil
+	_, err = os.Lstat(filepath.Join(project, mask.Npmrc))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return Record{}, err
+	}
+	return Record{Inputs: inputs.Digests(), All: all.Digests(), Npmrc: err == nil}, nil
 }
 
 // Load reads the record at file. A missing file returns nil.
@@ -110,18 +118,30 @@ type Decision struct {
 	// Others are the other changed files. They only count when the install
 	// runs project code (hooks), which may run any of them.
 	Others []changereport.Change
+	// Npmrc is set when the project has a root mask.Npmrc, which prep
+	// reads.
+	Npmrc bool
+	// NewNpmrc is set when prep would read it and the last prep didn't, or
+	// wasn't recorded as reading it.
+	NewNpmrc bool
 }
 
 // Ask reports whether prep must ask before running.
-func (d Decision) Ask() bool { return d.First || len(d.Inputs) > 0 || len(d.Others) > 0 }
+func (d Decision) Ask() bool {
+	return d.First || d.NewNpmrc || len(d.Inputs) > 0 || len(d.Others) > 0
+}
 
 // Decide compares now with the last record, nil if there is none. hooks
 // reports whether the install runs project code.
 func Decide(last *Record, now Record, hooks bool) Decision {
 	if last == nil {
-		return Decision{First: true}
+		return Decision{First: true, Npmrc: now.Npmrc, NewNpmrc: now.Npmrc}
 	}
-	d := Decision{Inputs: changereport.DiffDigests(last.Inputs, now.Inputs)}
+	d := Decision{
+		Inputs:   changereport.DiffDigests(last.Inputs, now.Inputs),
+		Npmrc:    now.Npmrc,
+		NewNpmrc: now.Npmrc && !last.Npmrc,
+	}
 	if !hooks {
 		return d
 	}

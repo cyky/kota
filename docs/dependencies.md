@@ -2,7 +2,7 @@
 
 Sessions are offline, so a project's dependencies are installed beforehand with `kota prep [dir]`. Run it once before the first session, and again whenever dependencies change. When the agent needs a new dependency, it asks you; add it to the manifest on the host and run `prep` again.
 
-`prep` runs in the same image as a session, with the same masks and read-only files, but on a normal network so registries are reachable, and without an agent, the forwarder or the gateway key. If a step fails, its output is followed by a line naming it, for example `kota: install step npm failed (exit 1): npm ci`.
+`prep` runs in the same image as a session, with the same masks and read-only files (except the project-root `.npmrc`, see [Private registries](#private-registries)), but on a normal network so registries are reachable, and without an agent, the forwarder or the gateway key. If a step fails, its output is followed by a line naming it, for example `kota: install step npm failed (exit 1): npm ci`.
 
 ## What it runs
 
@@ -21,11 +21,23 @@ prep:
 
 The detected fetches (see [Shared caches](#shared-caches)) still run before the command.
 
+## Private registries
+
+`prep` reads the `.npmrc` at the project root, so its registry settings and auth tokens apply to npm, pnpm and yarn 1. It is mounted read-only as it is, in both phases: install scripts can read it, including those of registry dependencies, but nothing in `prep` can change it.
+
+- Only the root file counts. A `.npmrc` anywhere else in the project stays masked.
+- kota never reads your host `~/.npmrc` or global npm config, and passes no host environment variables, so a `${NPM_TOKEN}` reference in the file is empty. Write the token into the project `.npmrc`, and keep that file out of git.
+- Keep a token that `prep` doesn't need, such as one with publish rights, in your host `~/.npmrc`, not in the project.
+- A root `.npmrc` that is a symlink, a directory or anything else but a regular file makes `prep` refuse before it asks, since the mount would follow the link to whatever host file it names.
+- Sessions never see it: every `.npmrc` in the project is masked in `run`, `shell` and `check`, and `!.npmrc` in `.kotaignore` is ignored with a warning.
+- yarn 2+ doesn't read `.npmrc`, and its `.yarnrc.yml` isn't masked: don't put `npmAuthToken` there, since the agent can read it.
+
 ## The confirmation
 
 The agent can write the files that decide what `prep` runs, and `prep` runs them with network access. So `prep` asks you to type `y` first when:
 
 - it is the project's first `prep`. It lists the commands, and the project code the install runs;
+- the project has a root `.npmrc` that the last approved `prep` didn't read, including every project prepped before kota read it. While there is one, the confirmation says that `prep` and its install scripts can read it;
 - a file that decides what `prep` runs changed since the last successful `prep`: `package.json` files, lockfiles, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.npmrc`, `.yarnrc.yml`, `.yarn/releases/`, `.yarn/plugins/`, patches, `go.mod`, `go.sum`, `go.work` or `kota.yaml`;
 - the install runs project code, and any other project file changed, since that code may run it. Project code is a lifecycle script (`postinstall`, `prepare`, ...), a pnpmfile, a `yarnPath` or the `kota.yaml` command. Lifecycle scripts count in the root and workspace packages, and in local dependencies (`file:`, `link:`, `portal:` or a relative path inside the project, and theirs in turn) listed in `dependencies`, `devDependencies` or `optionalDependencies`. A local tarball dependency and any git dependency (`github:user/repo`, `user/repo`, `git+https://...`) count too.
 
@@ -54,7 +66,7 @@ pnpm without a lockfile has nothing to fetch ahead, so its install uses a store 
 - **The confirmation is only as good as your review.** A dependency from the registry can still run its own install scripts, with the masks in place.
 - **Changes in dependency and build directories** (`dist`, `build`, `vendor`, ...) don't count for the confirmation. Don't let install scripts run files from there.
 - **Install scripts can't change `.git/config`**, so a `prepare` script that sets `core.hooksPath` (husky) fails or does nothing; run it on the host.
-- **`.npmrc` is masked by default**, so registry settings and tokens in it don't apply. Unmask it in `.kotaignore` (`!.npmrc`) if `prep` needs it; the agent can then read it too.
+- **Install scripts can read the root `.npmrc`**, tokens included, and send them anywhere. Keep only the tokens the install needs there (see [Private registries](#private-registries)).
 - `prep` reports changed files that run code, and commits, like `run` (see [Protecting the host](protections.md)).
 
 ## Project image

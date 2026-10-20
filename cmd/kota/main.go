@@ -622,6 +622,11 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		}
 	}
 	layout, err := mask.Plan(project, mask.DefaultRules)
+	if err == nil && prep {
+		// The install may need the registry auth in the root .npmrc. The
+		// user approved that at the prep prompt.
+		layout, err = layout.ForPrep(project)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1354,6 +1359,10 @@ func cmdPrep(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Refuse before asking; prepareSession checks again.
+	if err := mask.CheckNpmrc(project); err != nil {
+		return err
+	}
 	if err := confirmPrep(project, depPlan, images); err != nil {
 		return err
 	}
@@ -1553,7 +1562,7 @@ func printPrepGate(w io.Writer, project string, plan deps.Plan, images *engine.I
 				}
 			}
 		}
-	case d.Ask():
+	case len(d.Inputs) > 0 || len(d.Others) > 0:
 		fmt.Fprintf(w, "%s changed since its last prep, and prep runs with network access.\n", project)
 		if len(d.Inputs) > 0 {
 			fmt.Fprintln(w, "Files that decide what prep runs:")
@@ -1561,6 +1570,8 @@ func printPrepGate(w io.Writer, project string, plan deps.Plan, images *engine.I
 				fmt.Fprintln(w, "  "+line)
 			}
 		}
+	case d.NewNpmrc:
+		fmt.Fprintf(w, "Prep of %s now reads its %s, which the last prep didn't.\n", project, mask.Npmrc)
 	default:
 		fmt.Fprintf(w, "The engine images of %s changed since its last prep.\n", project)
 	}
@@ -1593,7 +1604,10 @@ func printPrepGate(w io.Writer, project string, plan deps.Plan, images *engine.I
 			fmt.Fprintln(w, "  "+line)
 		}
 	}
-	if !d.First && d.Ask() {
+	if d.Npmrc {
+		fmt.Fprintf(w, "%s/%s is readable by this prep, install scripts included, which run with network access. Keep tokens prep shouldn't see in ~/.npmrc on the host: kota never reads it.\n", project, mask.Npmrc)
+	}
+	if !d.First && (len(d.Inputs) > 0 || len(d.Others) > 0) {
 		fmt.Fprintf(w, "Review them first, e.g. git -C %s diff\n", project)
 	}
 }
@@ -1838,9 +1852,12 @@ func printMasks(w io.Writer, layout mask.Layout) {
 			continue
 		}
 		n++
-		if m.Dir {
+		switch {
+		case m.Dir:
 			fmt.Fprintf(w, "  %s/ (directory, shown empty)\n", m.Path)
-		} else {
+		case m.Path == mask.Npmrc:
+			fmt.Fprintf(w, "  %s (shown empty; prep reads it)\n", m.Path)
+		default:
 			fmt.Fprintf(w, "  %s (shown empty)\n", m.Path)
 		}
 	}

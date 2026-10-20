@@ -116,12 +116,57 @@ func TestOtherFilesCountOnlyWithHooks(t *testing.T) {
 	}
 }
 
+// TestNpmrcAsksUntilApproved: prep reads the project-root .npmrc, so a
+// record that didn't approve that, including one written before prep read
+// it, asks even when nothing changed.
+func TestNpmrcAsksUntilApproved(t *testing.T) {
+	dir := project(t)
+	write(t, dir, ".npmrc", "//registry.example.com/:_authToken=secret\n")
+	approved := snap(t, dir)
+	if !approved.Npmrc {
+		t.Fatalf("snapshot = %+v, want Npmrc", approved)
+	}
+	if d := Decide(&approved, snap(t, dir), true); d.Ask() || !d.Npmrc {
+		t.Errorf("approved: %+v, want no question", d)
+	}
+	older := approved
+	older.Npmrc = false
+	if d := Decide(&older, snap(t, dir), true); !d.NewNpmrc || !d.Ask() || len(d.Inputs) > 0 {
+		t.Errorf("older record: %+v, want only the .npmrc question", d)
+	}
+	if d := Decide(nil, snap(t, dir), false); !d.First || !d.NewNpmrc {
+		t.Errorf("first prep: %+v", d)
+	}
+}
+
+func TestNpmrcAdded(t *testing.T) {
+	dir := project(t)
+	last := snap(t, dir)
+	if last.Npmrc {
+		t.Fatalf("snapshot = %+v, want no Npmrc", last)
+	}
+	write(t, dir, ".npmrc", "registry=https://registry.example.com/\n")
+	d := Decide(&last, snap(t, dir), false)
+	if !d.NewNpmrc || !slices.Equal(paths(d.Inputs), []string{"added .npmrc"}) {
+		t.Errorf("decision = %+v", d)
+	}
+}
+
+func TestNestedNpmrcIsNotApproved(t *testing.T) {
+	dir := project(t)
+	write(t, dir, "pkgs/a/.npmrc", "x")
+	if r := snap(t, dir); r.Npmrc {
+		t.Errorf("snapshot = %+v, want no Npmrc for a nested .npmrc", r)
+	}
+}
+
 func TestSaveLoad(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "prep", "p.json")
 	if r, err := Load(file); r != nil || err != nil {
 		t.Fatalf("missing record = %v, %v", r, err)
 	}
 	dir := project(t)
+	write(t, dir, ".npmrc", "x")
 	want := snap(t, dir)
 	want.Dirs = []deps.Dir{{Path: "pkgs/a/node_modules", Manifest: "pkgs/a/package.json"}}
 	if err := want.Save(file); err != nil {

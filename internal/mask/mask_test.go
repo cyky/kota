@@ -560,6 +560,140 @@ func TestPlanMasks(t *testing.T) {
 	}
 }
 
+func TestPlanAlwaysMasksNpmrc(t *testing.T) {
+	isolateGit(t)
+	tests := []struct {
+		name     string
+		ignore   string
+		defaults []string
+		warned   []string
+	}{
+		{name: "defaults", defaults: DefaultRules},
+		{name: "without default rules", defaults: nil},
+		{name: "unmasked in the ignore file", defaults: DefaultRules, ignore: "!.npmrc\n", warned: []string{".npmrc", "packages/a/.npmrc"}},
+		{name: "one unmasked by path", defaults: DefaultRules, ignore: "!/packages/a/.npmrc\n", warned: []string{"packages/a/.npmrc"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := repo(t)
+			write(t, filepath.Join(dir, ".npmrc"), "//registry.example.com/:_authToken=secret\n")
+			write(t, filepath.Join(dir, "packages/a/.npmrc"), "x")
+			if tt.ignore != "" {
+				write(t, filepath.Join(dir, IgnoreFile), tt.ignore)
+			}
+			l, err := Plan(dir, tt.defaults)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := masked(l); !slices.Equal(got, []string{".npmrc", "packages/a/.npmrc"}) {
+				t.Errorf("masked = %q", got)
+			}
+			var warned []string
+			for _, w := range l.Warnings {
+				if path, ok := strings.CutPrefix(w, IgnoreFile+" unmasks "); ok {
+					warned = append(warned, strings.Fields(path)[0])
+				}
+			}
+			if !slices.Equal(warned, tt.warned) {
+				t.Errorf("warned about %q, want %q; warnings %q", warned, tt.warned, l.Warnings)
+			}
+		})
+	}
+}
+
+func TestForPrep(t *testing.T) {
+	isolateGit(t)
+	dir := repo(t)
+	write(t, filepath.Join(dir, ".npmrc"), "//registry.example.com/:_authToken=secret\n")
+	write(t, filepath.Join(dir, "packages/a/.npmrc"), "x")
+	write(t, filepath.Join(dir, ".env"), "x")
+	l, err := Plan(dir, DefaultRules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prep, err := l.ForPrep(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := masked(prep); !slices.Equal(got, []string{".env", "packages/a/.npmrc"}) {
+		t.Errorf("masked in prep = %q", got)
+	}
+	if !slices.Contains(prep.Mounts, Mount{Path: ".npmrc"}) {
+		t.Errorf("prep mounts = %+v, want .npmrc read-only", prep.Mounts)
+	}
+	if got := masked(l); !slices.Contains(got, ".npmrc") {
+		t.Errorf("ForPrep changed the session layout: masked = %q", got)
+	}
+	_, ro, err := prep.Bind(dir, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sandbox.Mount{Source: filepath.Join(dir, ".npmrc"), Target: sandbox.Workspace + "/.npmrc"}
+	if !slices.Contains(ro, want) {
+		t.Errorf("read-only mounts = %+v, want %+v", ro, want)
+	}
+}
+
+func TestForPrepWithoutNpmrc(t *testing.T) {
+	isolateGit(t)
+	dir := repo(t)
+	l := mustPlan(t, dir)
+	prep, err := l.ForPrep(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(prep.Mounts, l.Mounts) {
+		t.Errorf("prep mounts = %+v, want %+v", prep.Mounts, l.Mounts)
+	}
+}
+
+func TestForPrepRefusesNpmrcThatIsNotAFile(t *testing.T) {
+	isolateGit(t)
+	outside := filepath.Join(t.TempDir(), "npmrc")
+	write(t, outside, "//registry.example.com/:_authToken=host\n")
+	tests := []struct {
+		name string
+		make func(t *testing.T, path string)
+		want string
+	}{
+		{"symlink outside", func(t *testing.T, path string) {
+			if err := os.Symlink(outside, path); err != nil {
+				t.Fatal(err)
+			}
+		}, "symlink to " + outside},
+		{"symlink inside", func(t *testing.T, path string) {
+			write(t, filepath.Join(filepath.Dir(path), "config/npmrc"), "x")
+			if err := os.Symlink("config/npmrc", path); err != nil {
+				t.Fatal(err)
+			}
+		}, "symlink to config/npmrc"},
+		{"directory", func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "not a regular file"},
+		{"fifo", func(t *testing.T, path string) {
+			if err := exec.Command("mkfifo", path).Run(); err != nil {
+				t.Skip("mkfifo:", err)
+			}
+		}, "not a regular file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := repo(t)
+			tt.make(t, filepath.Join(dir, ".npmrc"))
+			l, err := Plan(dir, DefaultRules)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = l.ForPrep(dir)
+			if err == nil || !strings.Contains(err.Error(), ".npmrc") || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want one naming .npmrc and %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestPlanMaskedEnvrcIsReadOnlyAndEmpty(t *testing.T) {
 	isolateGit(t)
 	dir := repo(t)

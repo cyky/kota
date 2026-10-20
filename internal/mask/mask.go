@@ -95,6 +95,11 @@ var DefaultRules = []string{
 	".gnupg/",
 }
 
+// Npmrc is npm's config file, which holds registry auth. Every one in the
+// project is masked in sessions, whatever the rules say. Prep reads the one
+// at the project root (Layout.ForPrep).
+const Npmrc = ".npmrc"
+
 // skipDirs are not searched for secrets: dependency and build output, which
 // is large and not where secrets live. .git is never searched.
 var skipDirs = []string{
@@ -137,10 +142,16 @@ func Plan(project string, defaults []string) (Layout, error) {
 	// Pin before masking: a mask may replace a protection or hide it inside
 	// a masked directory, but the directories above must still hold.
 	p.pinAncestors()
-	rs, err := p.rules(defaults)
+	rs, own, err := p.rules(defaults)
 	if err != nil {
 		return Layout{}, err
 	}
+	// Whether the ignore file unmasks a .npmrc, which it can't.
+	always, err := parseRules([]string{Npmrc}, "always masked")
+	if err != nil {
+		return Layout{}, err
+	}
+	p.npmrcRules = append(always, own...)
 	if err := p.masks(rs, ""); err != nil {
 		return Layout{}, err
 	}
@@ -153,22 +164,24 @@ func Plan(project string, defaults []string) (Layout, error) {
 	return p.plan, nil
 }
 
-func (p *planner) rules(defaults []string) (rules, error) {
+// rules returns the mask rules, defaults then IgnoreFile's, and
+// IgnoreFile's alone.
+func (p *planner) rules(defaults []string) (all, own rules, err error) {
 	rs, err := parseRules(defaults, "default rules")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	data, err := os.ReadFile(filepath.Join(p.project, IgnoreFile))
 	if errors.Is(err, fs.ErrNotExist) {
-		return rs, nil
+		return rs, nil, nil
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	own, err := parseRules(strings.Split(string(data), "\n"), IgnoreFile)
+	own, err = parseRules(strings.Split(string(data), "\n"), IgnoreFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return append(rs, own...), nil
+	return append(rs, own...), own, nil
 }
 
 // masks walks the directory rel (slash-separated, "" for the root) and
@@ -183,7 +196,12 @@ func (p *planner) masks(rs rules, rel string) error {
 		if e.IsDir() && slices.Contains(skipDirs, e.Name()) {
 			continue
 		}
-		if rs.excluded(path, e.IsDir()) {
+		npmrc := e.Name() == Npmrc
+		if npmrc && !p.npmrcRules.excluded(path, e.IsDir()) {
+			p.plan.Warnings = append(p.plan.Warnings, fmt.Sprintf(
+				"%s unmasks %s (ignored): a %s is always masked in sessions, and prep reads the one at the project root", IgnoreFile, path, Npmrc))
+		}
+		if npmrc || rs.excluded(path, e.IsDir()) {
 			if err := p.mask(path, e); err != nil {
 				return err
 			}
@@ -280,6 +298,8 @@ type planner struct {
 	gitDirs []string
 	// execRefs are config values that run a project file.
 	execRefs []execRef
+	// npmrcRules mask a .npmrc unless IgnoreFile unmasks it.
+	npmrcRules rules
 }
 
 // execRef is a config value that names a file in the project.
@@ -586,6 +606,42 @@ func (p *planner) note(s string) { p.plan.Notes = append(p.plan.Notes, s) }
 
 func (p *planner) lstat(rel string) (fs.FileInfo, error) {
 	return os.Lstat(filepath.Join(p.project, filepath.FromSlash(rel)))
+}
+
+// CheckNpmrc refuses a project-root Npmrc that prep can't read: one that
+// isn't a regular file. Docker would follow a symlink on the host, which
+// the agent could point at any host file. A missing one is fine.
+func CheckNpmrc(project string) error {
+	path := filepath.Join(project, Npmrc)
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case info.Mode()&fs.ModeSymlink != 0:
+		target, _ := os.Readlink(path)
+		return fmt.Errorf("refusing to run prep: %s is a symlink to %s; prep reads only a regular file there", path, target)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("refusing to run prep: %s is not a regular file", path)
+	}
+	return nil
+}
+
+// ForPrep returns the layout for prep: the project-root Npmrc, if there is
+// one, is mounted read-only as it is instead of masked, so the install can
+// use its registry auth. It refuses what CheckNpmrc refuses.
+func (l Layout) ForPrep(project string) (Layout, error) {
+	if err := CheckNpmrc(project); err != nil {
+		return Layout{}, err
+	}
+	l.Mounts = slices.Clone(l.Mounts)
+	for i, m := range l.Mounts {
+		if m.Path == Npmrc {
+			l.Mounts[i].Mask = false
+		}
+	}
+	return l, nil
 }
 
 // Bind turns the layout into bind mounts for the sandbox. Placeholders and

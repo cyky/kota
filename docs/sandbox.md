@@ -83,7 +83,7 @@ Details: [Sessions](sessions.md#approval).
 
 ### 7. Dependency installs are separated and confirmed
 
-`kota prep` is the only step with internet access. It runs no agent, has no gateway key, and keeps the same masks and read-only files. Because the agent can edit the files that decide what `prep` runs (lockfiles, `package.json` scripts, `kota.yaml`), `prep` lists what changed since the last approved run and asks you to type `y`. Shared caches are written only by package managers in a phase where no project code runs, so one project can't plant code in another's dependencies.
+`kota prep` is the only step with internet access. It runs no agent, has no gateway key, and keeps the same masks and read-only files, except that it reads the project-root `.npmrc` for private registries, which sessions never see. Because the agent can edit the files that decide what `prep` runs (lockfiles, `package.json` scripts, `kota.yaml`), `prep` lists what changed since the last approved run and asks you to type `y`. Shared caches are written only by package managers in a phase where no project code runs, so one project can't plant code in another's dependencies.
 
 Details: [Dependencies](dependencies.md).
 
@@ -133,7 +133,7 @@ kota reduces risk; it isn't a guarantee. Know these before you point it at a pro
 
 **Other gaps**
 
-- **`prep` has the network.** It reaches the internet, the LAN and the host's loopback, and runs install scripts, including those of registry dependencies. The confirmation is only as good as your review of what changed.
+- **`prep` has the network.** It reaches the internet, the LAN and the host's loopback, and runs install scripts, including those of registry dependencies, which can read the tokens in the project-root `.npmrc`. The confirmation is only as good as your review of what changed.
 - **Engine VM ports.** Ports a test container publishes are forwarded to the host's `127.0.0.1` without authentication, so other containers on the machine (for example another project's `prep`) can reach them.
 - **`--unsafe-skip-check`** runs the session even when a probe fails.
 - **SIGKILL or a crash** skips the change report and leaves placeholders in the project (`git status --ignored` shows them). The protected and masked files stay locked on the host until the next kota command on the project.

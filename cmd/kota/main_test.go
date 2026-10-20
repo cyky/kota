@@ -22,6 +22,7 @@ import (
 	"kota/internal/deps"
 	"kota/internal/docker"
 	"kota/internal/instructions"
+	"kota/internal/mask"
 	"kota/internal/prepgate"
 	"kota/internal/probe"
 	"kota/internal/projectimage"
@@ -335,6 +336,113 @@ func TestPrepSession(t *testing.T) {
 	}
 }
 
+// TestPrepReadsRootNpmrc checks both prep phases mount the project-root
+// .npmrc read-only as it is, while nested ones and every session mask it.
+func TestPrepReadsRootNpmrc(t *testing.T) {
+	project := fakeHome(t, map[string]string{
+		"package.json":      "{}",
+		"pnpm-lock.yaml":    "",
+		".npmrc":            "//registry.example.com/:_authToken=secret\n",
+		"packages/a/.npmrc": "x",
+		mask.IgnoreFile:     "!.npmrc\n",
+	})
+	// A host npmrc and token that must not reach prep.
+	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), ".npmrc"), []byte("//registry.example.com/:_authToken=host\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NPM_TOKEN", "host-token")
+	t.Setenv("KOTA_GATEWAY_KEY", "sk-unit-test-secret")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+
+	sources := func(spec sandbox.Compose) map[string]sandbox.Volume {
+		vs := map[string]sandbox.Volume{}
+		for _, v := range spec.Services[sandbox.AgentService].Volumes {
+			vs[v.Target] = v
+		}
+		return vs
+	}
+	prep, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for phase, spec := range map[string]sandbox.Compose{"install": prep.spec, "fetch": prep.fetchSpec} {
+		vs := sources(spec)
+		root := vs[sandbox.Workspace+"/.npmrc"]
+		if root.Source != filepath.Join(project, ".npmrc") || !root.ReadOnly {
+			t.Errorf("%s: root .npmrc mount = %+v, want the project file read-only", phase, root)
+		}
+		if nested := vs[sandbox.Workspace+"/packages/a/.npmrc"]; nested.Source == filepath.Join(project, "packages/a/.npmrc") || !nested.ReadOnly {
+			t.Errorf("%s: nested .npmrc mount = %+v, want masked", phase, nested)
+		}
+		for target, v := range vs {
+			if strings.HasPrefix(v.Source, os.Getenv("HOME")+"/.npmrc") {
+				t.Errorf("%s: host npmrc mounted at %s", phase, target)
+			}
+		}
+		svc := spec.Services[sandbox.AgentService]
+		if len(svc.PassEnv) > 0 {
+			t.Errorf("%s: pass env = %v", phase, svc.PassEnv)
+		}
+		for k, v := range svc.Environment {
+			if strings.Contains(k, "NPM") || strings.Contains(v, "host-token") {
+				t.Errorf("%s: host env reaches prep: %s=%s", phase, k, v)
+			}
+		}
+	}
+	if slices.Contains(prep.expect.Masked, sandbox.Workspace+"/.npmrc") {
+		t.Errorf("prep expects the root .npmrc to read as empty")
+	}
+	prep.cleanup()
+
+	sa := sessionArgs{agent: agent.Default, gatewayURL: defaultGateway, dir: project}
+	paths, err := resolveSessionPaths(sa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := prepareSession(sa, sandbox.ModeRun, paths, paths.Project, prep.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.cleanup()
+	for _, target := range []string{sandbox.Workspace + "/.npmrc", sandbox.Workspace + "/packages/a/.npmrc"} {
+		if !slices.Contains(run.expect.Masked, target) {
+			t.Errorf("run doesn't mask %s despite !.npmrc: masked %q", target, run.expect.Masked)
+		}
+	}
+	var out strings.Builder
+	run.printWarnings(&out)
+	if !strings.Contains(out.String(), "WARNING: .kotaignore unmasks .npmrc (ignored)") {
+		t.Errorf("warnings = %q", out.String())
+	}
+}
+
+func TestPrintMasksNamesPrepNpmrc(t *testing.T) {
+	var out strings.Builder
+	printMasks(&out, mask.Layout{Mounts: []mask.Mount{{Path: ".npmrc", Mask: true}, {Path: "packages/a/.npmrc", Mask: true}}})
+	if !strings.Contains(out.String(), "  .npmrc (shown empty; prep reads it)\n") || !strings.Contains(out.String(), "  packages/a/.npmrc (shown empty)\n") {
+		t.Errorf("masks = %q", out.String())
+	}
+}
+
+// TestPrepRefusesSymlinkedNpmrc checks prep refuses before it asks: the
+// agent could point the link at a host file.
+func TestPrepRefusesSymlinkedNpmrc(t *testing.T) {
+	project := fakeHome(t, map[string]string{"package.json": "{}"})
+	host := filepath.Join(os.Getenv("HOME"), ".npmrc")
+	if err := os.WriteFile(host, []byte("//registry.example.com/:_authToken=host\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(host, filepath.Join(project, ".npmrc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdPrep([]string{project}); err == nil || !strings.Contains(err.Error(), "symlink to "+host) {
+		t.Errorf("prep error = %v, want the symlink refusal", err)
+	}
+	if _, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep); err == nil || !strings.Contains(err.Error(), "symlink to "+host) {
+		t.Errorf("prepareSession error = %v, want the symlink refusal", err)
+	}
+}
+
 // TestHostDependencyDirKept checks cleanup never removes a dependency
 // directory the host already had.
 func TestHostDependencyDirKept(t *testing.T) {
@@ -445,6 +553,21 @@ func TestPrepGateOutput(t *testing.T) {
 	}
 	if strings.Contains(changed.String(), "src/f20.js") {
 		t.Errorf("output not truncated:\n%s", changed.String())
+	}
+	if strings.Contains(changed.String(), ".npmrc") {
+		t.Errorf("output mentions .npmrc without one:\n%s", changed.String())
+	}
+
+	// A record from before prep read the .npmrc.
+	var npmrc strings.Builder
+	printPrepGate(&npmrc, "/p", plan, nil, prepgate.Decision{Npmrc: true, NewNpmrc: true})
+	for _, want := range []string{"Prep of /p now reads its .npmrc", "/p/.npmrc is readable by this prep, install scripts included", "~/.npmrc on the host"} {
+		if !strings.Contains(npmrc.String(), want) {
+			t.Errorf(".npmrc output lacks %q:\n%s", want, npmrc.String())
+		}
+	}
+	if strings.Contains(npmrc.String(), "git -C /p diff") || strings.Contains(npmrc.String(), "changed since") {
+		t.Errorf(".npmrc output claims changes:\n%s", npmrc.String())
 	}
 }
 

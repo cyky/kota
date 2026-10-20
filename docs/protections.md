@@ -35,14 +35,14 @@ Secrets in the project are masked: inside the sandbox they read as an empty file
 - `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, and Terraform state (`*.tfstate`, `*.tfstate.*`);
 - `.aws/`, `.ssh/` and `.gnupg/` directories.
 
-Add your own in `.kotaignore` at the project root, in gitignore syntax. It comes after the defaults, so `!` unmasks a default. It is read-only in the sandbox. `kota check` lists the masks.
+Add your own in `.kotaignore` at the project root, in gitignore syntax. It comes after the defaults, so `!` unmasks a default, except `.npmrc`: every `.npmrc` is masked whatever the rules say, and kota warns about a rule that unmasks one. `prep` reads the one at the project root instead (see [Private registries](dependencies.md#private-registries)). `.kotaignore` is read-only in the sandbox. `kota check` lists the masks.
 
 ```gitignore
 # .kotaignore
 config/credentials.yml
 secrets/
-# prep needs the registry settings; the agent can read them then too
-!.npmrc
+# the example config holds no secrets
+!config/example.pem
 ```
 
 Limits:
