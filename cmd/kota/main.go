@@ -703,11 +703,20 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	if err == nil {
 		err = os.WriteFile(excludes, []byte(layout.Excludes()), 0o444)
 	}
+	passwd, group := sandbox.Accounts(os.Getuid(), os.Getgid())
+	passwdFile, groupFile := filepath.Join(sessionDir, "passwd"), filepath.Join(sessionDir, "group")
+	if err == nil {
+		err = os.WriteFile(passwdFile, []byte(passwd), 0o444)
+	}
+	if err == nil {
+		err = os.WriteFile(groupFile, []byte(group), 0o444)
+	}
 	if err != nil {
 		sess.cleanup()
 		return nil, err
 	}
-	cfgMounts = append(cfgMounts, sandbox.Mount{Source: excludes, Target: sandbox.GitExcludes})
+	cfgMounts = append(cfgMounts, sandbox.Mount{Source: excludes, Target: sandbox.GitExcludes},
+		sandbox.Mount{Source: passwdFile, Target: sandbox.Passwd}, sandbox.Mount{Source: groupFile, Target: sandbox.Group})
 
 	maps.Copy(env, gitEnv(key))
 	if len(sa.command) > 0 {

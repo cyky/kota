@@ -967,6 +967,38 @@ func TestDockerfileReadOnly(t *testing.T) {
 	}
 }
 
+// TestSessionAccounts checks run and prep mount the session's passwd and
+// group read-only, so the host UID has a name in the sandbox.
+func TestSessionAccounts(t *testing.T) {
+	project := fakeHome(t, map[string]string{"package.json": "{}"})
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	passwd, group := sandbox.Accounts(os.Getuid(), os.Getgid())
+	want := map[string]string{sandbox.Passwd: passwd, sandbox.Group: group}
+	for _, mode := range []sandbox.Mode{sandbox.ModeRun, sandbox.ModePrep} {
+		sess, err := prepareTestSession(sessionArgs{agent: "opencode", gatewayURL: defaultGateway, dir: project}, mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		volumes := sess.spec.Services[sandbox.AgentService].Volumes
+		for target, content := range want {
+			i := slices.IndexFunc(volumes, func(v sandbox.Volume) bool { return v.Target == target })
+			if i < 0 || !volumes[i].ReadOnly || volumes[i].Type != "bind" {
+				t.Errorf("mode %d: %s is not bind-mounted read-only: %+v", mode, target, volumes)
+				continue
+			}
+			got, err := os.ReadFile(volumes[i].Source)
+			if err != nil || string(got) != content {
+				t.Errorf("mode %d: %s = %q (%v), want %q", mode, target, got, err, content)
+			}
+			if !slices.Contains(sess.expect.ReadOnly, target) {
+				t.Errorf("mode %d: %s is not probed read-only", mode, target)
+			}
+		}
+		sess.cleanup()
+	}
+}
+
 // Shell changes only the command: the selected agent's config/state, probes,
 // dependency mounts, gateway key and hardening stay identical to run.
 func TestShellMatchesRun(t *testing.T) {

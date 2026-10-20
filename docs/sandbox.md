@@ -34,7 +34,7 @@ Details: [Sessions](sessions.md#project-and---ro-paths).
 
 The agent runs:
 
-- as your UID, not root;
+- as your UID, not root, named `agent` by a read-only `/etc/passwd` and `/etc/group` that kota writes for the session (so tools that look up the current user, such as Node's `os.userInfo()`, work);
 - with all Linux capabilities dropped (`cap_drop: ALL`);
 - with `no-new-privileges`, so setuid binaries can't raise it;
 - unprivileged, and without the Docker socket, so it can't start containers on the host's engine.

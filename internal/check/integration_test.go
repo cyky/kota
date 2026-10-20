@@ -6,6 +6,7 @@ package check
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
@@ -174,6 +175,50 @@ func TestBrokenSandboxIsDetected(t *testing.T) {
 		}
 	}
 	t.Errorf("expected the host.docker.internal probe among failures, got %v", names(failed))
+}
+
+// TestSessionUserHasName checks the session's passwd and group give the host
+// UID a name: Node's os.userInfo(), which testcontainers calls, fails
+// without one.
+func TestSessionUserHasName(t *testing.T) {
+	requireDocker(t)
+	dir := projectDir(t)
+	passwd, group := sandbox.Accounts(os.Getuid(), os.Getgid())
+	var accounts []sandbox.Mount
+	for target, content := range map[string]string{sandbox.Passwd: passwd, sandbox.Group: group} {
+		file := filepath.Join(dir, filepath.Base(target))
+		if err := os.WriteFile(file, []byte(content), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		accounts = append(accounts, sandbox.Mount{Source: file, Target: target})
+	}
+	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t), ReadOnly: accounts}, nil)
+
+	out, err := s.Capture("sh", "-c", `whoami && id -gn && node -e 'const u = require("os").userInfo(); console.log(u.username, u.uid, u.gid, u.homedir)'`)
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	user, home := sandbox.User, sandbox.Home
+	if os.Getuid() == 0 {
+		user, home = "root", "/root"
+	}
+	groupName := sandbox.User
+	if os.Getgid() == 0 {
+		groupName = "root"
+	}
+	want := fmt.Sprintf("%s\n%s\n%s %d %d %s", user, groupName, user, os.Getuid(), os.Getgid(), home)
+	if strings.TrimSpace(out) != want {
+		t.Errorf("user lookup = %q, want %q", out, want)
+	}
+	results, err := Run(s, gw, sandbox.Expect{ReadOnly: []string{sandbox.Passwd, sandbox.Group}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if !r.Passed() {
+			t.Errorf("probe %q failed: exit %d", r.Name, r.ExitCode)
+		}
+	}
 }
 
 func probesPort(results []probe.Result, port int) bool {
