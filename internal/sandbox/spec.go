@@ -470,7 +470,7 @@ func Build(in Inputs) (Compose, Expect) {
 	forwarder.Image = in.ForwarderImage
 	forwarder.ReadOnly = true
 	forwarder.Command = []string{
-		fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr", GatewayPort),
+		fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,backlog=%d", GatewayPort, listenBacklog),
 		"TCP:" + net.JoinHostPort(in.Gateway.Host, strconv.Itoa(in.Gateway.Port)),
 	}
 	forwarder.Networks = map[string]*NetworkAttach{
@@ -497,21 +497,26 @@ func Build(in Inputs) (Compose, Expect) {
 	return spec, expected
 }
 
+// listenBacklog is the forwarders' listen backlog. socat's default of 5
+// resets connections that arrive together, as Node's testcontainers opens
+// them.
+const listenBacklog = 1024
+
 // engineForwarder relays each of the route's ports from the internal
 // network, under the alias EngineHost, to the Engine VM's forwards on the
 // host: one socat per port. Like the gateway forwarder, it is the agent's
 // only way to those ports.
 func engineForwarder(hardening Service, image string, r *EngineRoute) Service {
-	const script = `host=$1; shift
+	const script = `host=$1; backlog=$2; shift 2
 while [ $# -gt 0 ]; do
-  socat "TCP-LISTEN:$1,fork,reuseaddr" "TCP:$host:$2" &
+  socat "TCP-LISTEN:$1,fork,reuseaddr,backlog=$backlog" "TCP:$host:$2" &
   shift 2
 done
 wait`
 	s := hardening
 	s.Image = image
 	s.ReadOnly = true
-	s.Entrypoint = []string{"sh", "-c", script, "sh", r.Host}
+	s.Entrypoint = []string{"sh", "-c", script, "sh", r.Host, strconv.Itoa(listenBacklog)}
 	for _, f := range r.Forwards {
 		s.Entrypoint = append(s.Entrypoint, strconv.Itoa(f.Listen), strconv.Itoa(f.Target))
 	}

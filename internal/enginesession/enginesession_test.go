@@ -102,14 +102,27 @@ func TestPrepare(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	// The route forwards the API and the published range, each from the
-	// host port QEMU forwards to the VM's own port number.
-	if len(r.Forwards) != 1+len(engine.PublishedPorts()) || r.Forwards[0].Listen != engine.GuestAPIPort || r.Forwards[0].Target != vm.Ports.API {
+	// The route forwards the API and the published range, each to the VM's
+	// own port number from a relay port, never from QEMU's host port.
+	qemu := append([]int{vm.Ports.API}, vm.Ports.Published...)
+	if len(r.Forwards) != 1+len(engine.PublishedPorts()) || r.Forwards[0].Listen != engine.GuestAPIPort {
 		t.Errorf("forwards = %+v", r.Forwards)
 	}
+	seen := map[int]bool{}
+	for _, f := range r.Forwards {
+		if slices.Contains(qemu, f.Target) || seen[f.Target] {
+			t.Errorf("forward %+v: target is QEMU's port or another forward's", f)
+		}
+		seen[f.Target] = true
+	}
 	targets := e.ProbeTargets(sandbox.Gateway{Host: "host.docker.internal", Port: 8080})
-	if targets.Image != ProbeImage || !slices.Contains(targets.HostPorts, vm.Ports.API) || !slices.Contains(targets.HostPorts, vm.Ports.Published[0]) {
-		t.Errorf("probe targets = %+v", targets)
+	for _, p := range []int{vm.Ports.API, vm.Ports.Published[0], r.Forwards[0].Target, r.Forwards[1].Target} {
+		if !slices.Contains(targets.HostPorts, p) {
+			t.Errorf("probe targets lack host port %d: %+v", p, targets)
+		}
+	}
+	if targets.Image != ProbeImage {
+		t.Errorf("probe image = %q", targets.Image)
 	}
 	if e.PID() != 0 {
 		t.Error("PID before Start")

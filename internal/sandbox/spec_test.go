@@ -141,7 +141,7 @@ func TestForwarderBridgesToGatewayOnly(t *testing.T) {
 		t.Errorf("forwarder on %d internal and %d external networks, want 1 and 1", internal, external)
 	}
 
-	want := []string{"TCP-LISTEN:8080,fork,reuseaddr", "TCP:host.docker.internal:8080"}
+	want := []string{"TCP-LISTEN:8080,fork,reuseaddr,backlog=1024", "TCP:host.docker.internal:8080"}
 	if !slices.Equal(fwd.Command, want) {
 		t.Errorf("forwarder command = %v, want %v", fwd.Command, want)
 	}

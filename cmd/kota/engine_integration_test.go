@@ -127,6 +127,56 @@ func TestUndeclared(t *testing.T) {
 	t.Logf("UNDECLARED-ERR: %v", err)
 }
 `,
+		// Node's testcontainers looks up the current user (os.userInfo()),
+		// which fails unless the session user has a passwd entry.
+		"package.json": `{"private": true, "dependencies": {"@testcontainers/postgresql": "12.2.1", "pg": "8.23.1"}}` + "\n",
+		"db.mjs": `import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import pg from "pg";
+
+const ctr = await new PostgreSqlContainer("postgres:16-alpine")
+  .withDatabase("app").withUsername("app").withPassword("app").start();
+const client = new pg.Client({ connectionString: ctr.getConnectionUri() });
+await client.connect();
+const { rows } = await client.query("SELECT 40 + 2 AS n");
+await client.end();
+await ctr.stop();
+if (rows[0].n !== 42) throw new Error("got " + rows[0].n);
+console.log("NODE-POSTGRES-QUERY-OK");
+`,
+		// Connections that arrive together, each on its own socket: the
+		// Docker API's TLS handshake and a pool's worth of Postgres clients
+		// on a published port.
+		"burst.mjs": `import fs from "node:fs";
+import https from "node:https";
+import pg from "pg";
+
+const dir = process.env.DOCKER_CERT_PATH;
+const tls = { ca: fs.readFileSync(dir + "/ca.pem"), cert: fs.readFileSync(dir + "/cert.pem"), key: fs.readFileSync(dir + "/key.pem") };
+const ping = () => new Promise((resolve) => {
+  https.get({ host: "engine", port: 2376, path: "/_ping", agent: false, ...tls }, (res) => {
+    res.resume();
+    res.on("end", () => resolve(res.statusCode === 200 ? "ok" : "status " + res.statusCode));
+  }).on("error", (e) => resolve(e.message));
+});
+const query = async () => {
+  const c = new pg.Client({ host: "engine", port: Number(process.argv[2]), user: "postgres", database: "postgres" });
+  try {
+    await c.connect();
+    await c.query("SELECT 1");
+    return "ok";
+  } catch (e) {
+    return e.message;
+  } finally {
+    await c.end().catch(() => {});
+  }
+};
+const report = (name, results) => {
+  const failed = results.filter((r) => r !== "ok");
+  console.log(name + " " + (results.length - failed.length) + "/" + results.length, [...new Set(failed)].join("; "));
+};
+report("API-BURST", await Promise.all(Array.from({ length: 50 }, ping)));
+report("PUBLISHED-BURST", await Promise.all(Array.from({ length: 20 }, query)));
+`,
 	}
 	for rel, content := range files {
 		p := filepath.Join(project, rel)
@@ -140,6 +190,7 @@ func TestUndeclared(t *testing.T) {
 	for _, args := range [][]string{
 		{"go", "get", "github.com/testcontainers/testcontainers-go/modules/postgres@v0.44.0", "github.com/jackc/pgx/v5@latest"},
 		{"go", "mod", "tidy"},
+		{"npm", "install", "--package-lock-only", "--ignore-scripts"},
 		{"git", "init", "-q"},
 	} {
 		c := exec.Command(args[0], args[1:]...)
@@ -361,8 +412,14 @@ func TestEngineInShell(t *testing.T) {
 		out := shellSession(t, project, gateway, caches, `
 env | grep -E '^(DOCKER_|TESTCONTAINERS_)' | sort
 docker images --format '{{.Repository}}:{{.Tag}}'
-go test -count=1 -v -run TestPostgres ./... && echo GO-TEST-PASSED`)
-		for _, want := range []string{"DOCKER_HOST=tcp://engine:2376", "TESTCONTAINERS_RYUK_DISABLED=true", "postgres:16-alpine", "POSTGRES-QUERY-OK", "GO-TEST-PASSED"} {
+go test -count=1 -v -run TestPostgres ./... && echo GO-TEST-PASSED
+node db.mjs
+docker run -d --name burst -p 40090:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine >/dev/null
+for i in $(seq 60); do docker exec burst pg_isready -q -h 127.0.0.1 && break; sleep 0.5; done
+node burst.mjs 40090
+docker rm -f burst >/dev/null`)
+		for _, want := range []string{"DOCKER_HOST=tcp://engine:2376", "TESTCONTAINERS_RYUK_DISABLED=true", "postgres:16-alpine", "POSTGRES-QUERY-OK", "GO-TEST-PASSED", "NODE-POSTGRES-QUERY-OK",
+			"API-BURST 50/50", "PUBLISHED-BURST 20/20"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output lacks %q:\n%s", want, out)
 			}
@@ -500,14 +557,28 @@ docker image inspect postgres:16-alpine >/dev/null 2>&1 && echo IMAGE-LOADED`)
 	})
 
 	t.Run("route closes when the agent powers the VM off", func(t *testing.T) {
-		out := shellSession(t, project, gateway, caches, `
+		withShellSession(t, project, gateway, caches, func(sess *session, ds *docker.Session) {
+			out, err := ds.Capture("bash", "-c", `exec 2>&1
 docker version --format 'API UP {{.Server.Version}}'
 docker run --rm --privileged postgres:16-alpine sh -c 'echo o > /proc/sysrq-trigger'
 for i in $(seq 1 50); do getent hosts engine >/dev/null || break; sleep 0.2; done
 getent hosts engine >/dev/null && echo ROUTE-OPEN || echo ROUTE-CLOSED`)
-		if !strings.Contains(out, "API UP") || !strings.Contains(out, "ROUTE-CLOSED") {
-			t.Errorf("engine route after the VM powered off:\n%s", out)
-		}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out, "API UP") || !strings.Contains(out, "ROUTE-CLOSED") {
+				t.Errorf("engine route after the VM powered off:\n%s", out)
+			}
+			// The host relays close with the VM too, so nothing relays to
+			// whatever binds QEMU's freed ports next.
+			for _, f := range sess.engine.Route().Forwards[:2] {
+				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.Target))
+				if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+					c.Close()
+					t.Errorf("relay %s still accepts after the VM powered off", addr)
+				}
+			}
+		})
 	})
 
 	t.Run("engine probes pass and detect an open route", func(t *testing.T) {

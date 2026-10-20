@@ -12,7 +12,10 @@ package enginesession
 import (
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"time"
 
 	"kota/internal/check"
@@ -20,6 +23,7 @@ import (
 	"kota/internal/engine"
 	"kota/internal/enginevm"
 	"kota/internal/probe"
+	"kota/internal/relay"
 	"kota/internal/sandbox"
 )
 
@@ -50,6 +54,12 @@ type Engine struct {
 	archives   []engine.Archive
 	warning    string
 	probeTar   string
+	// relayPorts are the host ports the Sandbox reaches the VM's forwards
+	// on, in the forwards' order: QEMU's own listeners drop connections that
+	// arrive together (package relay).
+	relayPorts []int
+	relayMu    sync.Mutex
+	relays     []*relay.Relay
 	running    *enginevm.VM
 	started    time.Time
 }
@@ -85,10 +95,13 @@ func Prepare(o Options, project, sessionDir string) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w; run 'kota prep %s'", err, project)
 	}
-	ports, err := enginevm.FreePorts(1 + len(engine.PublishedPorts()))
+	// The VM's forwards and, after them, a relay port for each.
+	n := 1 + len(engine.PublishedPorts())
+	all, err := enginevm.FreePorts(2 * n)
 	if err != nil {
 		return nil, err
 	}
+	ports, relayPorts := all[:n], all[n:]
 	certs, err := engine.NewCerts(time.Now(), []string{sandbox.EngineHost, "127.0.0.1"})
 	if err != nil {
 		return nil, err
@@ -113,7 +126,7 @@ func Prepare(o Options, project, sessionDir string) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{opts: o, vm: vm, cmd: cmd, certs: certs, archiveDir: archiveDir, archives: archives, warning: warning,
-		probeTar: filepath.Join(sessionDir, "engine-probe.tar")}
+		probeTar: filepath.Join(sessionDir, "engine-probe.tar"), relayPorts: relayPorts}
 	if e.route, err = e.writeRoute(filepath.Join(sessionDir, "engine-client")); err != nil {
 		return nil, err
 	}
@@ -154,8 +167,8 @@ func (e *Engine) writeRoute(dir string) (*sandbox.EngineRoute, error) {
 		return nil, err
 	}
 	r := &sandbox.EngineRoute{Host: e.opts.HostAlias, APIPort: engine.GuestAPIPort, CertDir: dir}
-	for _, f := range fwds {
-		r.Forwards = append(r.Forwards, sandbox.PortForward{Listen: f.Guest, Target: f.Host})
+	for i, f := range fwds {
+		r.Forwards = append(r.Forwards, sandbox.PortForward{Listen: f.Guest, Target: e.relayPorts[i]})
 	}
 	return r, nil
 }
@@ -184,12 +197,42 @@ func (e *Engine) VM() engine.VM { return e.vm }
 // Start boots the VM without waiting for it, so it boots while the Sandbox
 // starts.
 func (e *Engine) Start() error {
-	vm, err := enginevm.Start(e.cmd, e.vm, e.certs.CA, e.certs.ClientCert, e.certs.ClientKey)
+	fwds, err := e.vm.Ports.Forwards()
 	if err != nil {
 		return err
 	}
+	for i, f := range fwds {
+		r, err := relay.Listen(loopback(e.relayPorts[i]), loopback(f.Host))
+		if err != nil {
+			e.stopRelays()
+			return fmt.Errorf("relay the Engine VM's port %d: %w", f.Guest, err)
+		}
+		e.relays = append(e.relays, r)
+	}
+	vm, err := enginevm.Start(e.cmd, e.vm, e.certs.CA, e.certs.ClientCert, e.certs.ClientKey)
+	if err != nil {
+		e.stopRelays()
+		return err
+	}
 	e.running, e.started = vm, time.Now()
+	// The relays die with the VM: whatever binds QEMU's freed host ports
+	// next must not be reached through them.
+	go func() {
+		<-vm.Done()
+		e.stopRelays()
+	}()
 	return nil
+}
+
+func loopback(port int) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) }
+
+func (e *Engine) stopRelays() {
+	e.relayMu.Lock()
+	defer e.relayMu.Unlock()
+	for _, r := range e.relays {
+		r.Close()
+	}
+	e.relays = nil
 }
 
 // Done is closed when the started VM exits.
@@ -228,9 +271,9 @@ func (e *Engine) ProbeTargets(gw sandbox.Gateway) probe.EngineTargets {
 		Image:        ProbeImage,
 		GuestAPIPort: engine.GuestAPIPort,
 		HostAddrs:    check.EngineHostAddrs(),
-		// The host side of the VM's own forwards, so the VM can't loop back
-		// through the host.
-		HostPorts:  check.EnginePorts(gw, []int{e.vm.Ports.API, e.vm.Ports.Published[0]}),
+		// The host side of the VM's own forwards and of their relays, so the
+		// VM can't loop back through the host.
+		HostPorts:  check.EnginePorts(gw, []int{e.vm.Ports.API, e.vm.Ports.Published[0], e.relayPorts[0], e.relayPorts[1]}),
 		EngineHost: sandbox.EngineHost,
 		APIPort:    engine.GuestAPIPort,
 		CertDir:    sandbox.EngineCertDir,
@@ -251,4 +294,5 @@ func (e *Engine) Stop() {
 	if e.running != nil {
 		e.running.Stop()
 	}
+	e.stopRelays()
 }

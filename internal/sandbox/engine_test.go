@@ -129,14 +129,14 @@ func TestEngineForwarder(t *testing.T) {
 	if internal != 1 || external != 1 {
 		t.Errorf("engine forwarder on %d internal and %d external networks", internal, external)
 	}
-	// After "sh -c script sh host", the arguments are the port pairs.
+	// After "sh -c script sh host backlog", the arguments are the port pairs.
 	args := fwd.Entrypoint
-	if len(args) < 5 || args[0] != "sh" || args[4] != "host.docker.internal" {
+	if len(args) < 6 || args[0] != "sh" || args[4] != "host.docker.internal" || args[5] != "1024" {
 		t.Fatalf("entrypoint = %q", args)
 	}
 	want := []string{"2376", "51000", "40000", "51001", "40001", "51002"}
-	if !slices.Equal(args[5:], want) {
-		t.Errorf("forwards = %q, want %q", args[5:], want)
+	if !slices.Equal(args[6:], want) {
+		t.Errorf("forwards = %q, want %q", args[6:], want)
 	}
 	agent := spec.Services[AgentService]
 	if !slices.Contains(agent.DependsOn, EngineService) {

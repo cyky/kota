@@ -29,7 +29,7 @@ flowchart LR
     end
 
     sandbox -- "gateway:8080" --> fwd -- "only the gateway port" --> gw
-    sandbox -- "engine:2376,<br/>published ports 40000-40099" --> efwd -- "host 127.0.0.1<br/>QEMU hostfwd" --> dockerd
+    sandbox -- "engine:2376,<br/>published ports 40000-40099" --> efwd -- "host 127.0.0.1<br/>kota relay, QEMU hostfwd" --> dockerd
     dockerd --- ctrs
     project -- "bind /workspace<br/>secrets masked, .git hooks/config read-only" --> sandbox
     vols --> sandbox
