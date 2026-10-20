@@ -1,7 +1,8 @@
-# 41 — Engine VM forwards drop parallel connections
+# DONE — 41 — Engine VM forwards drop parallel connections
 
-Status: needs-triage
+Status: done
 Category: bug
+Resolved in: 198c9b4
 
 ## Parent
 
@@ -19,12 +20,12 @@ Proposed fix, to be grilled: kota relays each forward on the host. It listens on
 
 ## Acceptance criteria
 
-- [ ] 50 parallel TLS connections to the Docker API from the agent all succeed
-- [ ] 20 parallel connections to a published port all succeed
-- [ ] `node db.mjs` in `TestEngineInShell` (Node testcontainers, Postgres) prints `NODE-POSTGRES-QUERY-OK`, with no change to the project
-- [ ] The Go testcontainers test and the Engine VM probes still pass
-- [ ] The relay listens only on loopback, and stops with the **Session**
-- [ ] Tests use a fake HOME
+- [x] 50 parallel TLS connections to the Docker API from the agent all succeed
+- [x] 20 parallel connections to a published port all succeed
+- [x] `node db.mjs` in `TestEngineInShell` (Node testcontainers, Postgres) prints `NODE-POSTGRES-QUERY-OK`, with no change to the project
+- [x] The Go testcontainers test and the Engine VM probes still pass
+- [x] The relay listens only on loopback, and stops with the **Session**
+- [x] Tests use a fake HOME
 
 ## Blocked by
 
@@ -35,3 +36,15 @@ None - can start immediately.
 ### 2026-10-20
 
 Found while verifying issue 40 end to end: with the session user's passwd entry in place, Node's testcontainers got past `os.userInfo()` and then failed here. The Node check (`package.json`, `db.mjs` and the `npm install --package-lock-only` step in `engineProject`, plus `node db.mjs` in `TestEngineInShell`) was left uncommitted in `cmd/kota/engine_integration_test.go` for this issue.
+
+### 2026-10-20 (findings while building)
+
+libslirp's `tcpx_listen` calls `listen(s, 1)`: the backlog of one is confirmed in its source. The resets come on connect and also just after it, during the TLS handshake, before the VM sends anything, so the relay redials both and sends the client's bytes again, up to 64 KiB. Past that the connection goes on but isn't redialed. A clean close before any byte isn't redialed either: that's the target's answer, for example a published port nothing listens on.
+
+With the relay alone, Node's testcontainers passed and 20 of 20 Postgres clients on a published port connected, but the API burst still lost 1 to 7 of 50 in two of four runs, with no failure seen by the relay. The second backlog was socat's default of 5 in the engine forwarder inside the sandbox. With `backlog=1024`, five runs in a row passed. The gateway forwarder had the same default and gets the same backlog.
+
+### 2026-10-20 (implementation)
+
+`internal/relay` is the relay; `enginesession` picks its ports next to QEMU's, points the route's targets at them, starts the relays with the VM and closes them on `Stop` and as soon as the VM exits. Deviations from the proposal: the relay also redials a connection reset after connecting but before the first byte back, sending the client's bytes again; the forwarders' socat backlog (both forwarders) is part of the fix; and the Engine VM probes also try the relay ports from the VM.
+
+Verified: relay unit tests (redial after reset and refusal, giving up, no redial after an answer or a clean close, an upload past the replay limit, half-close, `Close` with a connection open), three times under `-race`; `TestEngineInShell` checks the Node testcontainers script, 50 parallel `/_ping`s over TLS and 20 parallel Postgres clients on a published port, and five runs in a row passed; the power-off subtest checks the relay ports refuse connections once the VM is off, and fails without that change. The full integration suite passed before the stop-on-exit change; after it, the power-off and testcontainers subtests and the `enginesession` unit tests under `-race` were rerun, not the whole suite. Not verified: a Linux host.
