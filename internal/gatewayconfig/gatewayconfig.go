@@ -19,6 +19,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"kota/internal/models"
 	"kota/internal/sandbox"
 )
 
@@ -58,7 +59,17 @@ type Choice struct {
 	KeySource string
 	// KeyHint tells the user how to set this gateway's key.
 	KeyHint string
+	// Models are the gateway's own models, else the config's default
+	// models, as a whole; nil means the built-in ones. Nothing is merged
+	// between them.
+	Models *models.File
+	// ModelsSource says which models apply: the gateway's own, the config
+	// defaults, or built-in.
+	ModelsSource string
 }
+
+// ModelsBuiltin is the ModelsSource of the models built into kota.
+const ModelsBuiltin = "built-in (" + models.BuiltinSource + ")"
 
 // String is the choice as kota shows it: name, URL and source, never the
 // key.
@@ -71,15 +82,18 @@ func (c Choice) String() string {
 
 // config is the parsed config.yaml.
 type config struct {
-	DefaultGateway string             `yaml:"defaultGateway"`
-	Gateways       map[string]gateway `yaml:"gateways"`
+	DefaultGateway string `yaml:"defaultGateway"`
+	// Models are the default models, for gateways without their own.
+	Models   *models.File       `yaml:"models"`
+	Gateways map[string]gateway `yaml:"gateways"`
 }
 
 type gateway struct {
 	URL string `yaml:"url"`
 	// KeyFile is the path of a file holding the gateway's key, absolute
 	// or starting with ~/. The config never holds the key itself.
-	KeyFile string `yaml:"keyFile"`
+	KeyFile string       `yaml:"keyFile"`
+	Models  *models.File `yaml:"models"`
 }
 
 // validName keeps names apart from URLs and readable in output.
@@ -115,7 +129,9 @@ func Resolve(dir, flag string, getenv func(string) string) (Choice, error) {
 		if err != nil {
 			return Choice{}, err
 		}
-		return Choice{URL: value, Gateway: gw, Source: source, Key: key, KeySource: keySource, KeyHint: envHint}, nil
+		c := Choice{URL: value, Gateway: gw, Source: source, Key: key, KeySource: keySource, KeyHint: envHint}
+		c.Models, c.ModelsSource = defaultModels(cfg, path)
+		return c, nil
 	}
 	g, ok := cfg.Gateways[value]
 	if !ok {
@@ -125,6 +141,10 @@ func Resolve(dir, flag string, getenv func(string) string) (Choice, error) {
 	gw, _ := sandbox.ParseGateway(g.URL)
 	c := Choice{Name: value, URL: g.URL, Gateway: gw, Source: source, KeySource: NoKey,
 		KeyHint: fmt.Sprintf("set keyFile for gateway %s in %s", value, path)}
+	c.Models, c.ModelsSource = defaultModels(cfg, path)
+	if g.Models != nil {
+		c.Models, c.ModelsSource = g.Models, fmt.Sprintf("gateway %s's own (%s)", value, path)
+	}
 	if g.KeyFile != "" {
 		file, _ := expandKeyFile(g.KeyFile, getenv)
 		if c.Key, err = readKey(file); err != nil {
@@ -166,6 +186,18 @@ func load(path string, getenv func(string) string) (config, error) {
 				return cfg, fmt.Errorf("%s: gateway %s: %w", path, name, err)
 			}
 		}
+		if g.Models != nil {
+			if err := g.Models.Check(); err != nil {
+				return cfg, fmt.Errorf("%s: gateway %s: models: %w", path, name, err)
+			}
+			g.Models.Source = fmt.Sprintf("%s (gateway %s)", path, name)
+		}
+	}
+	if cfg.Models != nil {
+		if err := cfg.Models.Check(); err != nil {
+			return cfg, fmt.Errorf("%s: models: %w", path, err)
+		}
+		cfg.Models.Source = fmt.Sprintf("%s (default models)", path)
 	}
 	if d := cfg.DefaultGateway; d != "" {
 		if _, ok := cfg.Gateways[d]; !ok {
@@ -173,6 +205,15 @@ func load(path string, getenv func(string) string) (config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// defaultModels are the models of a gateway without its own: the config's
+// default models, or nil for the built-in ones.
+func defaultModels(cfg config, path string) (*models.File, string) {
+	if cfg.Models != nil {
+		return cfg.Models, fmt.Sprintf("config defaults (%s)", path)
+	}
+	return nil, ModelsBuiltin
 }
 
 // unknown is the error for a gateway name the config doesn't define.

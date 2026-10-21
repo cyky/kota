@@ -125,19 +125,38 @@ func TestResolve(t *testing.T) {
 }
 
 func TestParseFileErrors(t *testing.T) {
-	cases := map[string]string{
-		"typo":            strings.Replace(testFile, "context: 129024", "contxt: 129024", 1),
-		"no default":      strings.Replace(testFile, "default: coder", "", 1),
-		"partial unknown": strings.Replace(testFile, "  tools: true\nmodels", "models", 1),
-		"zero context":    strings.Replace(testFile, "context: 16384", "context: 0", 1),
-		"not yaml":        "default: [",
+	cases := map[string]struct{ data, want string }{
+		"typo":            {strings.Replace(testFile, "context: 129024", "contxt: 129024", 1), "contxt"},
+		"no default":      {strings.Replace(testFile, "default: coder", "", 1), "default model not set"},
+		"partial unknown": {strings.Replace(testFile, "  tools: true\nmodels", "models", 1), "unknown needs context, output and tools"},
+		"zero context":    {strings.Replace(testFile, "context: 16384", "context: 0", 1), "tiny: context must be positive"},
+		"not yaml":        {"default: [", "models.yaml"},
 	}
-	for name, data := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := ParseFile([]byte(data)); err == nil {
-				t.Error("no error")
+			_, err := ParseFile([]byte(c.data))
+			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.HasPrefix(err.Error(), "models.yaml: ") {
+				t.Errorf("err = %v, want %q after models.yaml:", err, c.want)
 			}
 		})
+	}
+}
+
+// TestSource checks Resolve's errors name the file the models came from.
+func TestSource(t *testing.T) {
+	f := parse(t, testFile)
+	if f.Source != BuiltinSource {
+		t.Errorf("Source = %q, want %q", f.Source, BuiltinSource)
+	}
+	f.Source = "/home/u/.config/kota/config.yaml (gateway work-api)"
+	_, err := Resolve([]string{"tiny"}, f, "")
+	if err == nil || !strings.Contains(err.Error(), `default model "coder" from /home/u/.config/kota/config.yaml (gateway work-api) is not served`) {
+		t.Errorf("not served: %v", err)
+	}
+	f.Default = "completion"
+	_, err = Resolve([]string{"tiny", "completion"}, f, "")
+	if err == nil || !strings.Contains(err.Error(), "agent: false in /home/u/.config/kota/config.yaml (gateway work-api)") {
+		t.Errorf("hidden: %v", err)
 	}
 }
 

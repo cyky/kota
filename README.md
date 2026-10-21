@@ -65,7 +65,7 @@ kota instructions                  # print the agent's working style and whether
 
 ### Models
 
-The agent can use every model the gateway lists. [`assets/models.yaml`](assets/models.yaml) adds what the gateway doesn't report, such as each model's context window, and names the default model, `qwen3.6-coder`. A session refuses to start when the gateway doesn't serve the default, and lists the models it does. Pass `--model ID`, or set your own default and context sizes in `assets/models.yaml` and run `go install ./cmd/kota` again, since the file is built into kota. Details: [Sessions](docs/sessions.md#models).
+The agent can use every model the gateway lists. [`assets/models.yaml`](assets/models.yaml) adds what the gateway doesn't report, such as each model's context window, and names the default model, `qwen3.6-coder`. A session refuses to start when the gateway doesn't serve the default, and lists the models it does. Pass `--model ID`, or set your own default and context sizes in `~/.config/kota/config.yaml`, for every gateway or for one, without reinstalling kota. Details: [Sessions](docs/sessions.md#models).
 
 ### Your own settings
 

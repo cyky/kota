@@ -77,7 +77,7 @@ flowchart TD
     ask -- "no" --> abort(["abort"])
     ask -- "y" --> copy
     auto -- "no" --> copy["With --no-history: clone HEAD<br/>into a copy, offline"]
-    copy --> prepare["Prepare the session:<br/>gateway from --gateway, KOTA_GATEWAY<br/>or config.yaml; mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
+    copy --> prepare["Prepare the session:<br/>gateway, its key and models from<br/>--gateway, KOTA_GATEWAY or config.yaml;<br/>mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
     prepare --> snap["Start the Change report:<br/>snapshot watched files, record refs"]
     snap --> vmstart["Start the Engine VM and its port relays<br/>(boots while the sandbox starts)"]
     vmstart --> settle["Wait until the Docker VM sees<br/>the protected paths as the host does"]
@@ -136,9 +136,9 @@ flowchart TD
 
     subgraph spec["Sandbox definition"]
         sandbox["sandbox<br/>compose spec, names, gateway"]
-        models["models<br/>catalog from gateway + models.yaml"]
+        models["models<br/>catalog from gateway + a models file"]
         agent["agent<br/>opencode and pi: overrides,<br/>config, note, approval"]
-        gatewayconfig["gatewayconfig<br/>named gateways in config.yaml:<br/>which one a command uses, its key"]
+        gatewayconfig["gatewayconfig<br/>named gateways in config.yaml:<br/>which one a command uses,<br/>its key and models"]
         instructions["instructions<br/>what the agent is told"]
         override["override<br/>agent overrides"]
     end
@@ -179,7 +179,7 @@ flowchart TD
     changereport --> offlinegit & mask & deps
     offlinegit --> docker & pathpolicy
     agent --> models & override & sandbox & instructions
-    gatewayconfig --> sandbox
+    gatewayconfig --> models & sandbox
     check --> docker & probe & sandbox
     probe --> sandbox
     prepgate --> changereport & deps & mask

@@ -87,8 +87,8 @@ commands:
                         override
 
 flags:
-` + flagHelp("--agent NAME", agent.AgentHelp()) + flagHelp("--gateway NAME|URL", "model gateway: a name from config.yaml or an http:// URL (default $KOTA_GATEWAY, then config.yaml's defaultGateway, then "+defaultGateway+")") + `  --model ID            model to start with (default: models.yaml's default);
-                        the agent is offered every model the gateway serves
+` + flagHelp("--agent NAME", agent.AgentHelp()) + flagHelp("--gateway NAME|URL", "model gateway: a name from config.yaml or an http:// URL (default $KOTA_GATEWAY, then config.yaml's defaultGateway, then "+defaultGateway+")") + `  --model ID            model to start with (default: the default model for the
+                        gateway); the agent is offered every model it serves
   --ro PATH             mount PATH read-only at ` + sandbox.ReadOnlyRoot + `/<name> (repeatable)
 ` + flagHelp("--auto", "run only: "+agent.AutoHelp()+"; on uncommitted changes, asks you to type y") + `  --unsafe-skip-check   run only: start without the containment probes
   --no-engine           run and shell: start without the project's Engine VM;
@@ -105,7 +105,9 @@ dir must be inside the allowed root ($KOTA_ALLOWED_ROOT, default ~/Projects).
 $XDG_CONFIG_HOME/kota/instructions.md (default ~/.config/kota/instructions.md),
 when present, replaces the built-in working style for every project.
 $XDG_CONFIG_HOME/kota/config.yaml defines named gateways for --gateway, each
-with an optional file holding its API key:
+with an optional file holding its API key, and models in the format of
+models.yaml: a gateway's own, or default ones for the others (else the
+built-in models.yaml applies):
   defaultGateway: local
   gateways:
     local: {url: http://host.docker.internal:8686}
@@ -1752,11 +1754,20 @@ func printEmptyDeps(w io.Writer, sess *session, empty []string) {
 	}
 }
 
+// modelsFile is the session's models: its gateway's own or the config's
+// default models, else the built-in models.yaml.
+func (s *session) modelsFile() (models.File, error) {
+	if m := s.gatewayChoice.Models; m != nil {
+		return *m, nil
+	}
+	return models.ParseFile(assets.Models)
+}
+
 // configure resolves the session's models from the gateway, through the
 // started sandbox, and writes the agent config. No agent container exists
 // yet, so the config is complete before the agent first sees it.
 func (s *session) configure(ds *docker.Session, model string, auto bool) (models.Catalog, error) {
-	file, err := models.ParseFile(assets.Models)
+	file, err := s.modelsFile()
 	if err != nil {
 		return models.Catalog{}, err
 	}
@@ -1875,6 +1886,7 @@ func printMounts(w io.Writer, sess *session) {
 		key = sess.gatewayChoice.KeySource + " (value not shown)"
 	}
 	fmt.Fprintf(w, "gateway key: %s\n", key)
+	fmt.Fprintln(w, "model settings:", sess.gatewayChoice.ModelsSource)
 }
 
 func printMasks(w io.Writer, layout mask.Layout) {

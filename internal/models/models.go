@@ -1,5 +1,6 @@
 // Package models resolves which gateway models an agent is offered: the list
-// the gateway reports at launch, merged with the metadata in models.yaml.
+// the gateway reports at launch, merged with the metadata in a models file:
+// the built-in models.yaml, or a models section of the user's config.yaml.
 // The result is agent-neutral; each agent package renders its own config.
 package models
 
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -37,7 +39,8 @@ type Catalog struct {
 	Notes []string
 }
 
-// File is the parsed models.yaml.
+// File is a parsed models file: models.yaml, or a models section in the
+// same format.
 type File struct {
 	Default string `yaml:"default"`
 	Small   string `yaml:"small"`
@@ -45,6 +48,9 @@ type File struct {
 	// listed model leaves out.
 	Unknown Meta            `yaml:"unknown"`
 	Models  map[string]Meta `yaml:"models"`
+	// Source names where the file came from, for messages, such as
+	// "models.yaml".
+	Source string `yaml:"-"`
 }
 
 // Meta is the metadata for one model. Nil fields fall back to File.Unknown.
@@ -56,36 +62,54 @@ type Meta struct {
 	Agent *bool `yaml:"agent"`
 }
 
-// ParseFile parses models.yaml. Unknown keys are errors, so a typo doesn't
-// silently fall back to defaults.
+// BuiltinSource is the Source of the built-in models file.
+const BuiltinSource = "models.yaml"
+
+// ParseFile parses the built-in models.yaml. Unknown keys are errors, so a
+// typo doesn't silently fall back to defaults.
 func ParseFile(data []byte) (File, error) {
 	var f File
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&f); err != nil {
-		return File{}, fmt.Errorf("models.yaml: %w", err)
+		return File{}, fmt.Errorf("%s: %w", BuiltinSource, err)
 	}
+	if err := f.Check(); err != nil {
+		return File{}, fmt.Errorf("%s: %w", BuiltinSource, err)
+	}
+	f.Source = BuiltinSource
+	return f, nil
+}
+
+// Check reports what a decoded models file lacks to stand on its own: a
+// default model, and an unknown entry with context, output and tools.
+// Nothing is filled in from another file.
+func (f File) Check() error {
 	if f.Default == "" {
-		return File{}, errors.New("models.yaml: default model not set")
+		return errors.New("default model not set")
 	}
 	u := f.Unknown
 	if u.Context == nil || u.Output == nil || u.Tools == nil {
-		return File{}, errors.New("models.yaml: unknown needs context, output and tools")
+		return errors.New("unknown needs context, output and tools")
 	}
 	if u.Agent != nil {
-		return File{}, errors.New("models.yaml: unknown can't set agent")
+		return errors.New("unknown can't set agent")
 	}
-	for id, m := range f.Models {
-		for name, v := range map[string]*int{"context": m.Context, "output": m.Output} {
-			if v != nil && *v <= 0 {
-				return File{}, fmt.Errorf("models.yaml: %s: %s must be positive", id, name)
+	for _, id := range slices.Sorted(maps.Keys(f.Models)) {
+		m := f.Models[id]
+		for _, v := range []struct {
+			name  string
+			value *int
+		}{{"context", m.Context}, {"output", m.Output}} {
+			if v.value != nil && *v.value <= 0 {
+				return fmt.Errorf("%s: %s must be positive", id, v.name)
 			}
 		}
 	}
 	if *u.Context <= 0 || *u.Output <= 0 {
-		return File{}, errors.New("models.yaml: unknown context and output must be positive")
+		return errors.New("unknown context and output must be positive")
 	}
-	return f, nil
+	return nil
 }
 
 // ParseDiscovered returns the model IDs in an OpenAI-style /v1/models
@@ -134,15 +158,15 @@ func Resolve(discovered []string, f File, override string) (Catalog, error) {
 	}
 
 	c.Default = f.Default
-	source := "default model %q from models.yaml"
+	what := fmt.Sprintf("default model %q from %s", c.Default, f.Source)
 	if override != "" {
-		c.Default, source = override, "model %q"
+		c.Default, what = override, fmt.Sprintf("model %q", override)
 	}
 	switch {
 	case hidden[c.Default]:
-		return Catalog{}, fmt.Errorf(source+" is hidden from agents (agent: false in models.yaml); available: %s", c.Default, c.ids())
+		return Catalog{}, fmt.Errorf("%s is hidden from agents (agent: false in %s); available: %s", what, f.Source, c.ids())
 	case !c.offers(c.Default):
-		return Catalog{}, fmt.Errorf(source+" is not served by the gateway; available: %s", c.Default, c.ids())
+		return Catalog{}, fmt.Errorf("%s is not served by the gateway; available: %s", what, c.ids())
 	}
 
 	switch {

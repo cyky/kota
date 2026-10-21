@@ -23,7 +23,29 @@ The check doesn't run git on the host, where a filter or fsmonitor the agent con
 
 Models come from the gateway: at launch, kota reads its `/v1/models`, so a model added to llama-swap shows up in the agent without editing anything. `--model ID` picks another default for one session; an ID the gateway doesn't serve is refused with the list of available ones. `kota check` shows the list.
 
-`assets/models.yaml` adds what llama-swap doesn't report: each model's context window, maximum output and tool-call support, `agent: false` to hide a model (`zeta2.1`, a completion model), the default model (`qwen3.6-coder`) and the small model opencode uses for titles (`qwen3.5-2b-instruct`; pi has none). Models not listed there get conservative values from its `unknown` entry.
+A models file adds what the gateway doesn't report: each model's context window, maximum output and tool-call support, `agent: false` to hide a model, the default model and the small model opencode uses for titles (pi has none). Models not listed there get the values of its `unknown` entry. The built-in one is `assets/models.yaml`: its default is `qwen3.6-coder`, its small model `qwen3.5-2b-instruct`, and it hides `zeta2.1`, a completion model.
+
+Your `config.yaml` (see [Gateway](#gateway)) can set models in the same format, so you don't have to reinstall kota to change them: under a gateway for that gateway only, or at the top level as defaults for the gateways without their own, and for a gateway given as a URL.
+
+```yaml
+models:                      # defaults
+  default: qwen3.8-27b
+  unknown: { context: 8192, output: 2048, tools: true }
+  models:
+    qwen3.8-27b: { context: 131072, output: 16384, tools: true }
+gateways:
+  local:
+    url: http://host.docker.internal:8686           # uses the defaults above
+  work-api:
+    url: http://host.docker.internal:4000
+    models:                                          # only these
+      default: big-coder
+      unknown: { context: 32768, output: 8192, tools: true }
+      models:
+        big-coder: { context: 200000, output: 32000, tools: true }
+```
+
+One set applies as a whole: the gateway's own models, else the config's defaults, else the built-in ones. Nothing is merged between them, so a gateway with its own models gets none of the defaults' entries, and the defaults none of the built-in ones; gateways often serve entirely different models. Each section needs `default` and an `unknown` with `context`, `output` and `tools`, as `assets/models.yaml` does, and a missing one is an error that names the section. `check` shows which set applies (`model settings:`).
 
 When a session starts with a different model than another running session, kota warns that llama-swap will swap models back and forth. It compares the models chosen at startup only; a model changed later inside the agent isn't seen. `shell`, `prep`, `check` and `clean` don't count as model users.
 

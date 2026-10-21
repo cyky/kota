@@ -24,6 +24,7 @@ import (
 	"kota/internal/gatewayconfig"
 	"kota/internal/instructions"
 	"kota/internal/mask"
+	"kota/internal/models"
 	"kota/internal/prepgate"
 	"kota/internal/probe"
 	"kota/internal/projectimage"
@@ -300,6 +301,55 @@ func TestNamedGateway(t *testing.T) {
 		t.Fatalf("prep with a broken config: %v", err)
 	}
 	sess.cleanup()
+}
+
+// TestGatewayModels checks a session uses its gateway's own models, else
+// the config's defaults, else the built-in ones, and check says which.
+func TestGatewayModels(t *testing.T) {
+	project := fakeHome(t, nil)
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	t.Setenv(gatewayconfig.Env, "")
+	builtin, err := models.ParseFile(assets.Models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateways := "gateways:\n  local:\n    url: http://host.docker.internal:8686\n  work-api:\n    url: http://host.docker.internal:4000\n    models:\n      default: big-coder\n      unknown: { context: 32768, output: 8192, tools: true }\n"
+	defaults := "models:\n  default: mid\n  unknown: { context: 8192, output: 2048, tools: true }\n"
+	config := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "kota", gatewayconfig.File)
+	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		config, flag, def, line string
+	}{
+		{config: gateways, flag: "work-api", def: "big-coder", line: "model settings: gateway work-api's own (" + config + ")\n"},
+		{config: gateways, flag: "local", def: builtin.Default, line: "model settings: built-in (models.yaml)\n"},
+		{config: defaults + gateways, flag: "local", def: "mid", line: "model settings: config defaults (" + config + ")\n"},
+		{config: defaults + gateways, flag: "work-api", def: "big-coder", line: "model settings: gateway work-api's own"},
+	}
+	for _, c := range cases {
+		if err := os.WriteFile(config, []byte(c.config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sess, err := prepareTestSession(sessionArgs{agent: agent.Default, gatewayURL: c.flag, dir: project}, sandbox.ModeRun)
+		if err != nil {
+			t.Fatalf("%s: %v", c.flag, err)
+		}
+		file, err := sess.modelsFile()
+		var out strings.Builder
+		printMounts(&out, sess)
+		sess.cleanup()
+		if err != nil {
+			t.Fatalf("%s: %v", c.flag, err)
+		}
+		if file.Default != c.def {
+			t.Errorf("%s: default model %q, want %q", c.flag, file.Default, c.def)
+		}
+		if !strings.Contains(out.String(), c.line) {
+			t.Errorf("%s: check output lacks %q:\n%s", c.flag, c.line, out.String())
+		}
+	}
 }
 
 // fakeHome points HOME at a temp dir with a project under ~/Projects, and
