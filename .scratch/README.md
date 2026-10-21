@@ -19,6 +19,7 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 | [prep-npmrc](prep-npmrc/issues/) | `prep` reads the project-root `.npmrc` |
 | [module-path](module-path/issues/) | The Go module path, so `go install` works from GitHub |
 | [renovate](renovate/issues/) | Renovate keeps the pinned agents and images up to date |
+| [gateway-config](gateway-config/PRD.md) | Named gateways, their keys and models in the user's kota config ([ADR 0002](../docs/adr/0002-gateways-defined-in-user-config.md)) |
 
 ## Open issues
 
@@ -27,5 +28,9 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 - [On Linux, replacing a protected file on the host drops its mount](stale-mounts/issues/02-host-replace-on-linux.md) (needs triage)
 - [Module path github.com/cyky/kota, so go install works](module-path/issues/01-module-path-for-go-install.md) (ready for an agent)
 - [Renovate keeps opencode, pi and the pinned images up to date](renovate/issues/01-renovate-for-pinned-versions.md) (ready for an agent)
+- [Named gateways, picked by name](gateway-config/issues/01-named-gateways.md) (ready for an agent)
+- [Each gateway's own key file](gateway-config/issues/02-gateway-key-file.md) (ready for an agent, after 01)
+- [Models per gateway and config defaults](gateway-config/issues/03-gateway-models.md) (ready for an agent, after 01)
+- [Model-clash warning only for Sessions on the same gateway](gateway-config/issues/04-clash-warning-per-gateway.md) (ready for an agent)
 
 An issue's title starts with `DONE — ` once it is closed, and its `Resolved in:` line names the commits.
