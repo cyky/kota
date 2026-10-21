@@ -28,6 +28,5 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 - [On Linux, replacing a protected file on the host drops its mount](stale-mounts/issues/02-host-replace-on-linux.md) (needs triage)
 - [Module path github.com/cyky/kota, so go install works](module-path/issues/01-module-path-for-go-install.md) (ready for an agent)
 - [Renovate keeps opencode, pi and the pinned images up to date](renovate/issues/01-renovate-for-pinned-versions.md) (ready for an agent)
-- [Model-clash warning only for Sessions on the same gateway](gateway-config/issues/04-clash-warning-per-gateway.md) (ready for an agent)
 
 An issue's title starts with `DONE — ` once it is closed, and its `Resolved in:` line names the commits.

@@ -1,6 +1,6 @@
 # Named gateways and models in kota config
 
-Design settled in a grilling session (2026-10-21); not implemented yet.
+Design settled in a grilling session (2026-10-21), and implemented in issues 01-04 the same day.
 
 ## Where they are defined
 
