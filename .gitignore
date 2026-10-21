@@ -9,6 +9,10 @@ coverage.*
 .vscode/
 .DS_Store
 
+# Personal coding-agent settings
+.claude/settings.local.json
+CLAUDE.local.md
+
 # Local secrets and environment
 .env
 .env.*
