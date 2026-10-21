@@ -82,6 +82,8 @@ RUN apt-get update \
 
 `kota build dir` builds it as `kota-project-<hash of the project path>`, and `prep`, `run`, `shell` and `check` of that project then use it (`check` shows the image). Projects without the file use the base image.
 
+An `ENV` line, such as `ENV APP_ENV=test`, sets that variable in all four. The file is readable in the sandbox and usually committed, so use it for settings, not secrets. Where kota sets the same variable, such as `HOME` or `KOTA_GATEWAY_KEY`, kota's value wins.
+
 The build runs as root with network access, like any `docker build`, but with an empty build context, so `COPY` and `ADD` can't read the project or its masked secrets. Download what you need in a `RUN`, or copy it from another image (`COPY --from=...`). The file is read-only in the sandbox, so the agent can't change what the next build runs, and a symlinked `kota.Dockerfile` is refused. The sandbox sets the user, capabilities and networks, so `USER` or `EXPOSE` in the Dockerfile don't change them.
 
 When the Dockerfile has changed, or `kota build` has rebuilt the base image since, sessions warn and use the old image; without an image yet, they warn and use the base image. Each warning shows the `kota build dir` that fixes it.
