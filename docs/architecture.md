@@ -79,7 +79,7 @@ flowchart TD
     auto -- "no" --> copy["With --no-history: clone HEAD<br/>into a copy, offline"]
     copy --> prepare["Prepare the session:<br/>mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
     prepare --> snap["Start the Change report:<br/>snapshot watched files, record refs"]
-    snap --> vmstart["Start the Engine VM<br/>(boots while the sandbox starts)"]
+    snap --> vmstart["Start the Engine VM and its port relays<br/>(boots while the sandbox starts)"]
     vmstart --> settle["Wait until the Docker VM sees<br/>the protected paths as the host does"]
     settle --> compose["docker compose up:<br/>forwarders, mount witness, sandbox"]
     compose --> configure["Render agent config from<br/>the gateway's /v1/models"]
@@ -88,7 +88,7 @@ flowchart TD
     probes -- "a probe failed" --> refuse(["refuse to start"])
     probes -- "all passed" --> agent["Agent or Bash runs<br/>in /workspace"]
     agent --> held["Warn about protection mounts<br/>that are gone"]
-    held --> teardown["Teardown: containers, Engine VM;<br/>read commits; unlock files,<br/>remove placeholders, session dir"]
+    held --> teardown["Teardown: containers, Engine VM<br/>and its relays; read commits; unlock files,<br/>remove placeholders, session dir"]
     refuse --> teardown
     teardown --> report["Report changed files<br/>that run things, and commits"]
     report --> back["With --no-history: bring HEAD back<br/>as a branch, remove the copy"]
@@ -109,12 +109,14 @@ flowchart TD
     ask -- "no" --> abort(["abort"])
     gate -- "no" --> vols
     ask -- "y" --> vols["Recreate dependency volumes"]
-    vols --> fetch["Fetch phase: caches writable,<br/>no project code runs"]
+    vols --> fetch["Fetch phase: caches writable,<br/>no project code runs,<br/>project-root .npmrc read-only"]
     fetch --> eimg["Download new or moved Engine images<br/>by digest, into the archive cache"]
     eimg --> install["Install phase: caches read-only,<br/>lifecycle scripts and prep.command run"]
     install --> report["Report changed files<br/>that run things, and commits"]
     report --> record(["Save the prep record"])
 ```
+
+Both phases mount the project-root `.npmrc` read-only, so private registries work; sessions never see it. A root `.npmrc` the last approved `prep` didn't read is one of the changes that asks for `y`.
 
 ## Packages
 
@@ -155,6 +157,7 @@ flowchart TD
         engineimages["engineimages<br/>a project's image archive cache:<br/>plan, fetch with crane"]
         engine["engine<br/>config, QEMU command, certs,<br/>image plan, base disk"]
         enginevm["enginevm<br/>QEMU adapter"]
+        relay["relay<br/>loopback relays to the VM's forwards,<br/>redial early resets"]
     end
 
     subgraph runtime["Runtime"]
@@ -173,15 +176,15 @@ flowchart TD
     pathpolicy --> sandbox
     nohistory --> offlinegit & mask & deps & projectimage & changereport & hostdata & interrupt
     approval --> offlinegit & interrupt
-    changereport --> offlinegit & mask
+    changereport --> offlinegit & mask & deps
     offlinegit --> docker & pathpolicy
     agent --> models & override & sandbox & instructions
     check --> docker & probe & sandbox
     probe --> sandbox
-    prepgate --> changereport & deps
+    prepgate --> changereport & deps & mask
     docker --> sandbox & interrupt
     enginevm --> engine & interrupt
-    enginesession --> engine & enginevm & check & docker
+    enginesession --> engine & enginevm & relay & check & probe & docker & sandbox
     lifecycle --> interrupt
     engineimages --> engine
     hostdata --> engine & sandbox
@@ -200,7 +203,7 @@ Everything under `kota/` in the user cache dir comes from `internal/hostdata`, w
 | Session lease records | `kota/registry/` in the user cache dir | kept (lock files) |
 | Files a session locked on the host | `kota/registry/*.locked-files` | end of session, or the next command on the project after a crash |
 | Prep confirmation record | `kota/prep/` | `clean` |
-| Session dir (agent config, engine certs, console log) | `kota/sessions/` | end of session, `clean` for leftovers |
+| Session dir (agent config, passwd and group, engine certs, console log) | `kota/sessions/` | end of session, `clean` for leftovers |
 | No-history copies | `kota/copies/` | `clean` |
 | Engine base disk, kernel, initrd | `kota/engine/base/` | replaced by `build` |
 | Engine image archives, VM pidfile | `kota/engine/projects/<hash>/` | `clean` |
