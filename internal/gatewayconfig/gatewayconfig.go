@@ -1,6 +1,7 @@
-// Package gatewayconfig picks the model Gateway for one command: a name
-// from the user's config.yaml, a URL, or the built-in default. The config
-// belongs to the user, never to a project (ADR 0002).
+// Package gatewayconfig picks the model Gateway for one command, a name
+// from the user's config.yaml, a URL, or the built-in default, and loads
+// its key. The config belongs to the user, never to a project (ADR 0002).
+// A key is never stored in kota's repo or in any file kota writes.
 package gatewayconfig
 
 import (
@@ -48,9 +49,19 @@ type Choice struct {
 	Gateway sandbox.Gateway
 	// Source says where the choice came from: one of the Source constants.
 	Source string
+	// Key is the gateway's API key, empty when none is configured. A named
+	// gateway's comes only from its keyFile, a URL's only from EnvKey or
+	// EnvKeyFile, so each key goes to one gateway.
+	Key string
+	// KeySource says where Key came from, without its value: "keyFile
+	// <path>", EnvKey, EnvKeyFile and its path, or NoKey.
+	KeySource string
+	// KeyHint tells the user how to set this gateway's key.
+	KeyHint string
 }
 
-// String is the choice as kota shows it: name, URL and source.
+// String is the choice as kota shows it: name, URL and source, never the
+// key.
 func (c Choice) String() string {
 	if c.Name == "" {
 		return fmt.Sprintf("%s (%s)", c.URL, c.Source)
@@ -66,6 +77,9 @@ type config struct {
 
 type gateway struct {
 	URL string `yaml:"url"`
+	// KeyFile is the path of a file holding the gateway's key, absolute
+	// or starting with ~/. The config never holds the key itself.
+	KeyFile string `yaml:"keyFile"`
 }
 
 // validName keeps names apart from URLs and readable in output.
@@ -74,11 +88,11 @@ var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // Resolve reads dir/config.yaml, if there is one, checks all of it, and
 // picks the gateway: flag (the --gateway value, empty when not given), then
 // Env, then the config's defaultGateway, then DefaultURL. A value with
-// "://" is a URL, anything else a gateway name. getenv is os.Getenv outside
-// tests.
+// "://" is a URL, anything else a gateway name. Only the chosen gateway's
+// key is loaded. getenv is os.Getenv outside tests.
 func Resolve(dir, flag string, getenv func(string) string) (Choice, error) {
 	path := filepath.Join(dir, File)
-	cfg, err := load(path)
+	cfg, err := load(path, getenv)
 	if err != nil {
 		return Choice{}, err
 	}
@@ -97,20 +111,33 @@ func Resolve(dir, flag string, getenv func(string) string) (Choice, error) {
 		if err != nil {
 			return Choice{}, err
 		}
-		return Choice{URL: value, Gateway: gw, Source: source}, nil
+		key, keySource, err := envKey(getenv)
+		if err != nil {
+			return Choice{}, err
+		}
+		return Choice{URL: value, Gateway: gw, Source: source, Key: key, KeySource: keySource, KeyHint: envHint}, nil
 	}
 	g, ok := cfg.Gateways[value]
 	if !ok {
 		return Choice{}, unknown(path, value, source, cfg)
 	}
-	// load checked the URL.
+	// load checked the URL and the keyFile path.
 	gw, _ := sandbox.ParseGateway(g.URL)
-	return Choice{Name: value, URL: g.URL, Gateway: gw, Source: source}, nil
+	c := Choice{Name: value, URL: g.URL, Gateway: gw, Source: source, KeySource: NoKey,
+		KeyHint: fmt.Sprintf("set keyFile for gateway %s in %s", value, path)}
+	if g.KeyFile != "" {
+		file, _ := expandKeyFile(g.KeyFile, getenv)
+		if c.Key, err = readKey(file); err != nil {
+			return Choice{}, fmt.Errorf("%s: gateway %s: %w", path, value, err)
+		}
+		c.KeySource = "keyFile " + g.KeyFile
+	}
+	return c, nil
 }
 
 // load parses and checks the config at path. A missing file is an empty
 // config.
-func load(path string) (config, error) {
+func load(path string, getenv func(string) string) (config, error) {
 	var cfg config
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -133,6 +160,11 @@ func load(path string) (config, error) {
 		}
 		if _, err := sandbox.ParseGateway(g.URL); err != nil {
 			return cfg, fmt.Errorf("%s: gateway %s: %w", path, name, err)
+		}
+		if g.KeyFile != "" {
+			if _, err := expandKeyFile(g.KeyFile, getenv); err != nil {
+				return cfg, fmt.Errorf("%s: gateway %s: %w", path, name, err)
+			}
 		}
 	}
 	if d := cfg.DefaultGateway; d != "" {

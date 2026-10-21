@@ -30,7 +30,6 @@ import (
 	"kota/internal/enginesession"
 	"kota/internal/enginevm"
 	"kota/internal/gatewayconfig"
-	"kota/internal/gatewaykey"
 	"kota/internal/hostdata"
 	"kota/internal/hostgit"
 	"kota/internal/hostlock"
@@ -105,12 +104,17 @@ flags:
 dir must be inside the allowed root ($KOTA_ALLOWED_ROOT, default ~/Projects).
 $XDG_CONFIG_HOME/kota/instructions.md (default ~/.config/kota/instructions.md),
 when present, replaces the built-in working style for every project.
-$XDG_CONFIG_HOME/kota/config.yaml defines named gateways for --gateway:
+$XDG_CONFIG_HOME/kota/config.yaml defines named gateways for --gateway, each
+with an optional file holding its API key:
   defaultGateway: local
   gateways:
     local: {url: http://host.docker.internal:8686}
-` + wrap("", 0, 76, agent.OverrideHelp()) + `A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
-the file named by $KOTA_GATEWAY_KEY_FILE.
+    work-api:
+      url: http://host.docker.internal:4000
+      keyFile: ~/.config/kota/keys/work-api
+` + wrap("", 0, 76, agent.OverrideHelp()) + `For a gateway given as a URL, its API key is read from $KOTA_GATEWAY_KEY or
+the file named by $KOTA_GATEWAY_KEY_FILE; a named gateway uses only its
+keyFile.
 `
 
 // flagHelp is one flag's entry in the usage text, its description wrapped
@@ -636,9 +640,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		if gw, err = chooseGateway(sa.gatewayURL); err != nil {
 			return nil, err
 		}
-		if apiKey, err = gatewaykey.Load(os.Getenv); err != nil {
-			return nil, err
-		}
+		apiKey = gw.Key
 	}
 	layout, err := mask.Plan(project, mask.DefaultRules)
 	if err == nil && prep {
@@ -1761,9 +1763,9 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 	data, err := ds.GatewayGet("/v1/models")
 	if errors.Is(err, docker.ErrUnauthorized) {
 		if s.gatewayKey == "" {
-			return models.Catalog{}, fmt.Errorf("%w; no key is configured: %s", err, gatewaykey.Hint)
+			return models.Catalog{}, fmt.Errorf("%w; no key is configured: %s", err, s.gatewayChoice.KeyHint)
 		}
-		return models.Catalog{}, fmt.Errorf("%w; check the key (%s)", err, gatewaykey.Hint)
+		return models.Catalog{}, fmt.Errorf("%w; check the key (%s)", err, s.gatewayChoice.KeyHint)
 	}
 	if err != nil {
 		return models.Catalog{}, err
@@ -1868,9 +1870,9 @@ func printMounts(w io.Writer, sess *session) {
 	}
 	fmt.Fprintln(w, "gateway:", sess.gatewayChoice)
 	fmt.Fprintf(w, "gateway (in sandbox): %s\n", sandbox.AgentGatewayURL())
-	key := "none"
+	key := gatewayconfig.NoKey
 	if slices.Contains(spec.Services[sandbox.AgentService].PassEnv, sandbox.GatewayKeyEnv) {
-		key = "configured (value not shown)"
+		key = sess.gatewayChoice.KeySource + " (value not shown)"
 	}
 	fmt.Fprintf(w, "gateway key: %s\n", key)
 }

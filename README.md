@@ -60,7 +60,7 @@ kota instructions                  # print the agent's working style and whether
 | Variable | What it sets | Default |
 |---|---|---|
 | `KOTA_GATEWAY` (or `--gateway NAME\|URL`) | The model gateway: a URL, or the name of one defined in `~/.config/kota/config.yaml` ([Sessions](docs/sessions.md#gateway)) | the config's `defaultGateway`, else `http://host.docker.internal:8686` |
-| `KOTA_GATEWAY_KEY` or `KOTA_GATEWAY_KEY_FILE` | The gateway's API key, if llama-swap has `apiKeys` enabled. The agent can read it, so use a key meant only for the gateway. | none |
+| `KOTA_GATEWAY_KEY` or `KOTA_GATEWAY_KEY_FILE` | The API key of a gateway given as a URL, if it needs one (a named gateway uses its `keyFile` instead; see [Sessions](docs/sessions.md#gateway-key)). The agent can read it, so use a key meant only for the gateway. | none |
 | `KOTA_ALLOWED_ROOT` | The directory projects must be inside | `~/Projects` |
 
 ### Models

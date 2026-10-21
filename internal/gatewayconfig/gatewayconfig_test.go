@@ -70,6 +70,8 @@ func TestResolve(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.want.Gateway = gw
+			// The key is TestKey's.
+			got.Key, got.KeySource, got.KeyHint = "", "", ""
 			if got != c.want {
 				t.Errorf("got %+v, want %+v", got, c.want)
 			}

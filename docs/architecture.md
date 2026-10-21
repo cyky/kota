@@ -138,8 +138,7 @@ flowchart TD
         sandbox["sandbox<br/>compose spec, names, gateway"]
         models["models<br/>catalog from gateway + models.yaml"]
         agent["agent<br/>opencode and pi: overrides,<br/>config, note, approval"]
-        gatewayconfig["gatewayconfig<br/>named gateways in config.yaml:<br/>which one a command uses"]
-        gatewaykey["gatewaykey"]
+        gatewayconfig["gatewayconfig<br/>named gateways in config.yaml:<br/>which one a command uses, its key"]
         instructions["instructions<br/>what the agent is told"]
         override["override<br/>agent overrides"]
     end

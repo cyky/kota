@@ -209,7 +209,7 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 	}
 	var out strings.Builder
 	printMounts(&out, sess)
-	if strings.Contains(out.String(), secret) || !strings.Contains(out.String(), "gateway key: configured") {
+	if strings.Contains(out.String(), secret) || !strings.Contains(out.String(), "gateway key: KOTA_GATEWAY_KEY (value not shown)\n") {
 		t.Errorf("check output = %q", out.String())
 	}
 }
@@ -260,7 +260,36 @@ func TestNamedGateway(t *testing.T) {
 		}
 	}
 
+	// A named gateway's key comes from its keyFile only; the key
+	// environment variables are for URL gateways.
 	t.Setenv(gatewayconfig.Env, "")
+	const secret = "sk-work-unit-test"
+	keyFile := filepath.Join(os.Getenv("HOME"), "work-api.key")
+	if err := os.WriteFile(keyFile, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KOTA_GATEWAY_KEY", "sk-env-unit-test")
+	write("gateways:\n  local:\n    url: http://host.docker.internal:8686\n  work-api:\n    url: http://host.docker.internal:4000\n    keyFile: ~/work-api.key\n")
+	for _, c := range []struct{ flag, key, line string }{
+		{flag: "work-api", key: secret, line: "gateway key: keyFile ~/work-api.key (value not shown)\n"},
+		{flag: "local", key: "", line: "gateway key: none\n"},
+	} {
+		sess, err := prepareTestSession(sessionArgs{agent: agent.Default, gatewayURL: c.flag, dir: project}, sandbox.ModeRun)
+		if err != nil {
+			t.Fatalf("%s: %v", c.flag, err)
+		}
+		var out strings.Builder
+		printMounts(&out, sess)
+		sess.cleanup()
+		if sess.gatewayKey != c.key {
+			t.Errorf("%s: session key %q, want %q", c.flag, sess.gatewayKey, c.key)
+		}
+		if !strings.Contains(out.String(), c.line) || strings.Contains(out.String(), "sk-") {
+			t.Errorf("%s: check output lacks %q or shows a key:\n%s", c.flag, c.line, out.String())
+		}
+	}
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+
 	write("gateways:\n  local:\n    url: http://host.docker.internal:8686\n    keyfile: x\n")
 	if _, err := prepareTestSession(sessionArgs{agent: agent.Default, dir: project}, sandbox.ModeRun); err == nil || !strings.Contains(err.Error(), "keyfile") {
 		t.Errorf("broken config: err = %v, want the unknown key", err)

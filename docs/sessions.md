@@ -58,7 +58,21 @@ Then pick one per command with `--gateway work-api`, or with `KOTA_GATEWAY=work-
 
 ## Gateway key
 
-If llama-swap has `apiKeys` enabled, give kota the key with `KOTA_GATEWAY_KEY`, or with `KOTA_GATEWAY_KEY_FILE` naming a file that holds it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. If the gateway answers 401, `run` and `check` say so. `check` shows whether a key is set, never its value.
+If the gateway needs an API key (llama-swap with `apiKeys` enabled, for example), where kota takes it from depends on how the gateway was chosen:
+
+- **A named gateway** uses only its own `keyFile`, a file that holds the key. The config holds the path, never the key, so it can go in a dotfiles repository:
+
+  ```yaml
+  gateways:
+    work-api:
+      url: http://host.docker.internal:4000
+      keyFile: ~/.config/kota/keys/work-api
+  ```
+
+  The path is absolute or starts with `~/`. `KOTA_GATEWAY_KEY` and `KOTA_GATEWAY_KEY_FILE` are ignored for a named gateway, so a key in your shell never reaches a gateway it wasn't meant for. Only the chosen gateway's file is read: a missing key file for another gateway doesn't stop a session.
+- **A gateway given as a URL**, or the built-in default, uses `KOTA_GATEWAY_KEY`, or `KOTA_GATEWAY_KEY_FILE` naming a file that holds the key.
+
+Keep key files outside your projects. Surrounding whitespace is trimmed, and the key must be printable ASCII without spaces. Without a key, nothing changes. If the gateway answers 401, `run` and `check` say so and how to set the key for that gateway. `check` shows where the key came from (`keyFile <path>`, `KOTA_GATEWAY_KEY`, `KOTA_GATEWAY_KEY_FILE <path>`, or `none`), never its value.
 
 The agent can read the key: inside the sandbox it is `$KOTA_GATEWAY_KEY`, which the agent configs refer to by name. So use a key meant only for the gateway. It is passed to `docker compose` in the environment only, never written to disk or put on a command line. `prep` never gets it, so install scripts can't use your models.
 
