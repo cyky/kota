@@ -1427,7 +1427,8 @@ func TestRunWarnsOnDifferentSessionModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { releaseProject(lease) })
-	if _, err := lease.SetModel("model-a"); err != nil {
+	t.Setenv(gatewayconfig.Env, "")
+	if _, err := lease.SetModel("model-a", "host.docker.internal:8686"); err != nil {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
@@ -1456,10 +1457,28 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"model model-b differs from model-a", other, "run (pi)", "llama-swap will swap models back and forth"} {
+	for _, want := range []string{"model model-b differs from model-a", other, "run (pi)", "on the same gateway",
+		"a gateway that loads one model at a time (such as llama-swap) will swap models back and forth"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("startup output lacks %q: %s", want, data)
 		}
+	}
+
+	// On another gateway, a different model is no clash.
+	if err := out.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := out.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdRun([]string{"--gateway", "http://host.docker.internal:9000", "--model", "model-b", "--unsafe-skip-check", project, "--", "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err = os.ReadFile(out.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "differs from") {
+		t.Errorf("warned about a session on another gateway: %s", data)
 	}
 }
 

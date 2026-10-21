@@ -17,12 +17,16 @@ import (
 	"time"
 )
 
-// Session describes a running or starting host session. Model is empty until
-// model discovery completes, and stays empty for shell, prep and check.
+// Session describes a running or starting host session. Model and Gateway
+// are empty until model discovery completes, and stay empty for shell, prep
+// and check.
 type Session struct {
 	Project string
 	Agent   string
 	Model   string
+	// Gateway is the gateway the model is served by, as host:port. A
+	// record written by an older kota has none.
+	Gateway string
 	PID     int
 	Started time.Time
 }
@@ -219,10 +223,12 @@ func (r *Registry) active() ([]Session, error) {
 	return sessions, nil
 }
 
-// SetModel records the resolved model and returns other active sessions using
-// different models. Update and comparison share the registry guard so two
-// simultaneous starts cannot both miss the clash.
-func (l *Lease) SetModel(model string) ([]Session, error) {
+// SetModel records the resolved model and its gateway, and returns other
+// active sessions using different models on the same gateway. A session
+// without a recorded gateway counts as on the same one. Update and
+// comparison share the registry guard so two simultaneous starts cannot
+// both miss the clash.
+func (l *Lease) SetModel(model, gateway string) ([]Session, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.file == nil {
@@ -233,7 +239,7 @@ func (l *Lease) SetModel(model string) ([]Session, error) {
 		return nil, err
 	}
 	defer guard.Close()
-	l.session.Model = model
+	l.session.Model, l.session.Gateway = model, gateway
 	if err := write(l.file, l.session); err != nil {
 		return nil, err
 	}
@@ -243,7 +249,8 @@ func (l *Lease) SetModel(model string) ([]Session, error) {
 	}
 	var clashes []Session
 	for _, other := range active {
-		if other.Project != l.session.Project && other.Model != "" && model != "" && other.Model != model {
+		sameGateway := other.Gateway == "" || other.Gateway == gateway
+		if other.Project != l.session.Project && sameGateway && other.Model != "" && model != "" && other.Model != model {
 			clashes = append(clashes, other)
 		}
 	}

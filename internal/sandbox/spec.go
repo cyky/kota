@@ -86,6 +86,11 @@ type Gateway struct {
 	Port int
 }
 
+// Addr is the gateway as host:port, which tells gateways apart.
+func (g Gateway) Addr() string {
+	return net.JoinHostPort(g.Host, strconv.Itoa(g.Port))
+}
+
 // ParseGateway parses a gateway URL such as http://host.docker.internal:8686.
 // Only plain http is supported: the forwarder is a TCP relay, and the gateway
 // lives on the host's loopback.

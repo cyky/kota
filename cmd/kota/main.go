@@ -1134,7 +1134,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 	}
 	st.Verify = func(ds *docker.Session) error {
 		if !sess.shell {
-			clashes, err := lease.SetModel(catalog.Default)
+			clashes, err := lease.SetModel(catalog.Default, sess.gateway.Addr())
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "WARNING: could not check for model clashes:", err)
 			} else {
@@ -1215,7 +1215,7 @@ func (s *session) startup(out io.Writer) lifecycle.Startup[*docker.Session] {
 
 func printModelClashes(w io.Writer, model string, clashes []sessionregistry.Session) {
 	for _, other := range clashes {
-		fmt.Fprintf(w, "WARNING: model %s differs from %s in %s (%s, PID %d); llama-swap will swap models back and forth.\n",
+		fmt.Fprintf(w, "WARNING: model %s differs from %s in %s (%s, PID %d) on the same gateway; a gateway that loads one model at a time (such as llama-swap) will swap models back and forth.\n",
 			model, other.Model, other.Project, other.Agent, other.PID)
 	}
 }

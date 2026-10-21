@@ -47,7 +47,7 @@ gateways:
 
 One set applies as a whole: the gateway's own models, else the config's defaults, else the built-in ones. Nothing is merged between them, so a gateway with its own models gets none of the defaults' entries, and the defaults none of the built-in ones; gateways often serve entirely different models. Each section needs `default` and an `unknown` with `context`, `output` and `tools`, as `assets/models.yaml` does, and a missing one is an error that names the section. `check` shows which set applies (`model settings:`).
 
-When a session starts with a different model than another running session, kota warns that llama-swap will swap models back and forth. It compares the models chosen at startup only; a model changed later inside the agent isn't seen. `shell`, `prep`, `check` and `clean` don't count as model users.
+When a session starts with a different model than another running session on the same gateway, kota warns that a gateway that loads one model at a time, such as llama-swap, will swap models back and forth. It is only a warning: the session starts anyway. Sessions on different gateways are never compared. It compares the models chosen at startup only; a model changed later inside the agent isn't seen. `shell`, `prep`, `check` and `clean` don't count as model users.
 
 ## Shell
 

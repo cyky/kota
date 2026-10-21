@@ -52,32 +52,60 @@ func TestAcquireBusyRelease(t *testing.T) {
 	}
 	other.Recover = func(string) error { t.Error("cleanly released lease needs no recovery"); return nil }
 	acquire(t, other, "/projects/a", "prep", "")
-	if _, err := lease.SetModel("x"); !errors.Is(err, os.ErrClosed) {
+	if _, err := lease.SetModel("x", "gw:1"); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("SetModel on closed lease = %v", err)
 	}
 }
 
 func TestDifferentProjectsAndClashes(t *testing.T) {
+	const gw = "host.docker.internal:8686"
 	r := &Registry{Dir: t.TempDir()}
 	a := acquire(t, r, "/projects/a", "run (opencode)", "model-a")
 	b := acquire(t, r, "/projects/b", "run (pi)", "model-a")
 	acquire(t, r, "/projects/shell", "shell (pi)", "")
 	acquire(t, r, "/projects/prep", "prep", "")
-	if clashes, err := b.SetModel("model-a"); err != nil || len(clashes) != 0 {
+	if _, err := a.SetModel("model-a", gw); err != nil {
+		t.Fatal(err)
+	}
+	if clashes, err := b.SetModel("model-a", gw); err != nil || len(clashes) != 0 {
 		t.Fatalf("same-model clashes = %v, %v", clashes, err)
 	}
-	clashes, err := b.SetModel("model-b")
+	clashes, err := b.SetModel("model-b", gw)
 	if err != nil || len(clashes) != 1 || clashes[0].Project != "/projects/a" || clashes[0].Model != "model-a" {
 		t.Fatalf("different-model clashes = %+v, %v", clashes, err)
 	}
-	if clashes, err := a.SetModel("model-b"); err != nil || len(clashes) != 0 {
+	if clashes, err := b.SetModel("model-b", "host.docker.internal:4000"); err != nil || len(clashes) != 0 {
+		t.Fatalf("other-gateway clashes = %v, %v", clashes, err)
+	}
+	if clashes, err := a.SetModel("model-c", gw); err != nil || len(clashes) != 0 {
+		t.Fatalf("clashes with a session on another gateway = %v, %v", clashes, err)
+	}
+	if _, err := b.SetModel("model-b", gw); err != nil {
+		t.Fatal(err)
+	}
+	if clashes, err := a.SetModel("model-b", gw); err != nil || len(clashes) != 0 {
 		t.Fatalf("updated-model clashes = %v, %v", clashes, err)
 	}
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if clashes, err := a.SetModel("model-c"); err != nil || len(clashes) != 0 {
+	if clashes, err := a.SetModel("model-c", gw); err != nil || len(clashes) != 0 {
 		t.Fatalf("released-session clashes = %v, %v", clashes, err)
+	}
+}
+
+// TestClashWithOlderRecord checks a record without a gateway, as an older
+// kota writes, is compared as if on the same gateway.
+func TestClashWithOlderRecord(t *testing.T) {
+	r := &Registry{Dir: t.TempDir()}
+	a := acquire(t, r, "/projects/a", "run (opencode)", "")
+	b := acquire(t, r, "/projects/b", "run (pi)", "")
+	if _, err := a.SetModel("model-a", ""); err != nil {
+		t.Fatal(err)
+	}
+	clashes, err := b.SetModel("model-b", "host.docker.internal:8686")
+	if err != nil || len(clashes) != 1 || clashes[0].Gateway != "" {
+		t.Fatalf("clashes with an older record = %+v, %v", clashes, err)
 	}
 }
 
@@ -122,7 +150,7 @@ func TestSimultaneousModelPublication(t *testing.T) {
 	for i, lease := range []*Lease{a, b} {
 		go func() {
 			<-start
-			clashes, err := lease.SetModel(fmt.Sprintf("model-%d", i))
+			clashes, err := lease.SetModel(fmt.Sprintf("model-%d", i), "gw:1")
 			if err != nil {
 				t.Error(err)
 			}
@@ -314,7 +342,7 @@ func TestRecoveryDoesNotHoldRegistryGuard(t *testing.T) {
 			operations <- err
 			return
 		}
-		_, modelErr := lease.SetModel("model-b")
+		_, modelErr := lease.SetModel("model-b", "gw:1")
 		_, activeErr := r.Active()
 		operations <- errors.Join(modelErr, activeErr, lease.Close())
 	}()
