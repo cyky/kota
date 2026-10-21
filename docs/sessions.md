@@ -39,6 +39,23 @@ The project must be inside the allowed root, `~/Projects` by default (`KOTA_ALLO
 
 `--ro PATH` (repeatable) mounts a reference directory read-only at `/ro/<name>`. It can point anywhere except at or around `$HOME`, the project, `~/.ssh`, `~/.config`, other credential directories or Docker socket locations. `--ro` paths aren't masked, so don't point it at secrets.
 
+## Gateway
+
+Without any setting, `run`, `shell` and `check` use llama-swap on the host at `http://host.docker.internal:8686`. To work with more than one gateway, define each under a name in `~/.config/kota/config.yaml` (`$XDG_CONFIG_HOME/kota/config.yaml` when that is set to an absolute path):
+
+```yaml
+defaultGateway: local
+gateways:
+  local:
+    url: http://host.docker.internal:8686
+  work-api:
+    url: http://host.docker.internal:4000
+```
+
+Then pick one per command with `--gateway work-api`, or with `KOTA_GATEWAY=work-api`. Both also take a URL, which is used as given. The first of these that is set wins: `--gateway`, `KOTA_GATEWAY`, the config's `defaultGateway`, then the built-in default. A name the config doesn't define is refused with the list of names it does. A gateway URL is plain `http://` with a host and an optional port, and no path.
+
+`run` and `shell` print the gateway they use when they start, and `check` shows it with where the choice came from. The config is yours, not the project's: `kota.yaml` can't choose a gateway, so a repository you clone can't send your sessions somewhere else ([ADR 0002](adr/0002-gateways-defined-in-user-config.md)). Only `run`, `shell` and `check` read the config, and they check all of it: an unknown key (with its line), a gateway without a valid `url`, or a `defaultGateway` that isn't defined stops them, even when the mistake is in a gateway you didn't pick. `build`, `prep`, `clean` and `instructions` don't read it.
+
 ## Gateway key
 
 If llama-swap has `apiKeys` enabled, give kota the key with `KOTA_GATEWAY_KEY`, or with `KOTA_GATEWAY_KEY_FILE` naming a file that holds it (keep the file outside your projects; surrounding whitespace is trimmed). Without either, nothing changes. If the gateway answers 401, `run` and `check` say so. `check` shows whether a key is set, never its value.

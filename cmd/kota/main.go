@@ -29,6 +29,7 @@ import (
 	"kota/internal/engineimages"
 	"kota/internal/enginesession"
 	"kota/internal/enginevm"
+	"kota/internal/gatewayconfig"
 	"kota/internal/gatewaykey"
 	"kota/internal/hostdata"
 	"kota/internal/hostgit"
@@ -52,7 +53,7 @@ import (
 const (
 	baseImage      = "kota-base:latest"
 	forwarderImage = "kota-forwarder:latest"
-	defaultGateway = "http://host.docker.internal:8686"
+	defaultGateway = gatewayconfig.DefaultURL
 	// engineHostAlias is the host as the engine forwarder reaches it, where
 	// QEMU's port forwards listen on 127.0.0.1.
 	engineHostAlias = "host.docker.internal"
@@ -87,8 +88,7 @@ commands:
                         override
 
 flags:
-` + flagHelp("--agent NAME", agent.AgentHelp()) + `  --gateway URL         model gateway (default $KOTA_GATEWAY or ` + defaultGateway + `)
-  --model ID            model to start with (default: models.yaml's default);
+` + flagHelp("--agent NAME", agent.AgentHelp()) + flagHelp("--gateway NAME|URL", "model gateway: a name from config.yaml or an http:// URL (default $KOTA_GATEWAY, then config.yaml's defaultGateway, then "+defaultGateway+")") + `  --model ID            model to start with (default: models.yaml's default);
                         the agent is offered every model the gateway serves
   --ro PATH             mount PATH read-only at ` + sandbox.ReadOnlyRoot + `/<name> (repeatable)
 ` + flagHelp("--auto", "run only: "+agent.AutoHelp()+"; on uncommitted changes, asks you to type y") + `  --unsafe-skip-check   run only: start without the containment probes
@@ -105,6 +105,10 @@ flags:
 dir must be inside the allowed root ($KOTA_ALLOWED_ROOT, default ~/Projects).
 $XDG_CONFIG_HOME/kota/instructions.md (default ~/.config/kota/instructions.md),
 when present, replaces the built-in working style for every project.
+$XDG_CONFIG_HOME/kota/config.yaml defines named gateways for --gateway:
+  defaultGateway: local
+  gateways:
+    local: {url: http://host.docker.internal:8686}
 ` + wrap("", 0, 76, agent.OverrideHelp()) + `A gateway API key (llama-swap apiKeys) is read from $KOTA_GATEWAY_KEY or
 the file named by $KOTA_GATEWAY_KEY_FILE.
 `
@@ -306,9 +310,12 @@ type session struct {
 	spec  sandbox.Compose
 	// fetchSpec is prep's fetch phase, which fills the shared caches before
 	// spec installs.
-	fetchSpec  sandbox.Compose
-	gateway    sandbox.Gateway
-	sessionDir string
+	fetchSpec sandbox.Compose
+	gateway   sandbox.Gateway
+	// gatewayChoice is which gateway the session uses and why; unset for
+	// prep.
+	gatewayChoice gatewayconfig.Choice
+	sessionDir    string
 	// project is the directory mounted at the workspace.
 	project string
 	// key is the project the session belongs to, which its volumes, prep,
@@ -360,6 +367,16 @@ func loadStyle() (instructions.Style, error) {
 		return instructions.Style{}, err
 	}
 	return instructions.Load(instructions.OverridePath(os.Getenv, home), builtin)
+}
+
+// chooseGateway picks the session's gateway from value (the --gateway
+// value, empty when not given), $KOTA_GATEWAY and the user's config.yaml.
+func chooseGateway(value string) (gatewayconfig.Choice, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return gatewayconfig.Choice{}, err
+	}
+	return gatewayconfig.Resolve(filepath.Join(instructions.ConfigHome(os.Getenv, home), "kota"), value, os.Getenv)
 }
 
 // loadAgent picks the agent called name and reads the user's Agent
@@ -493,8 +510,10 @@ type sessionArgs struct {
 	// set up, with why in session.engine, so check can report it.
 	engineOptional bool
 	// noHistory runs the session on a No-history copy of the project.
-	noHistory  bool
-	agent      string
+	noHistory bool
+	agent     string
+	// gatewayURL is the --gateway value: a gateway name or a URL, empty
+	// when not given.
 	gatewayURL string
 	model      string
 	dir        string
@@ -511,7 +530,7 @@ func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 func parseSessionArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
 	fset := flag.NewFlagSet(name, flag.ContinueOnError)
 	agentName := fset.String("agent", agent.Default, "agent `NAME`: "+strings.Join(agent.Names(), ", "))
-	gw := fset.String("gateway", envOr("KOTA_GATEWAY", defaultGateway), "model gateway URL")
+	gw := fset.String("gateway", "", "model gateway `NAME` from config.yaml, or URL")
 	model := fset.String("model", "", "model `ID` to start with")
 	var ro stringList
 	fset.Var(&ro, "ro", "mount `PATH` read-only (repeatable)")
@@ -611,10 +630,10 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		}
 	}
 	project := paths.Project
-	var gw sandbox.Gateway
+	var gw gatewayconfig.Choice
 	var apiKey string
 	if !prep {
-		if gw, err = sandbox.ParseGateway(sa.gatewayURL); err != nil {
+		if gw, err = chooseGateway(sa.gatewayURL); err != nil {
 			return nil, err
 		}
 		if apiKey, err = gatewaykey.Load(os.Getenv); err != nil {
@@ -652,7 +671,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	if err != nil {
 		return nil, err
 	}
-	sess := &session{shell: sa.shell, gateway: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, gatewayKey: apiKey, deps: depPlan, image: image, style: style}
+	sess := &session{shell: sa.shell, gateway: gw.Gateway, gatewayChoice: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, gatewayKey: apiKey, deps: depPlan, image: image, style: style}
 	if !prep {
 		opts, err := engineOptions()
 		if err == nil {
@@ -741,7 +760,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		UID:            os.Getuid(),
 		GID:            os.Getgid(),
 		Mode:           mode,
-		Gateway:        gw,
+		Gateway:        gw.Gateway,
 		GatewayKey:     apiKey != "",
 		AgentImage:     image.Image,
 		ForwarderImage: forwarderImage,
@@ -1096,6 +1115,7 @@ func runSession(sess *session, lease *sessionregistry.Lease, model string, auto,
 // session has one, up to where the agent or shell runs, in lifecycle's
 // order. stop tears both down; on an error, nothing is left running.
 func startSession(sess *session, lease *sessionregistry.Lease, model string, auto, skipCheck bool) (*docker.Session, func(), error) {
+	fmt.Fprintln(os.Stderr, "gateway:", sess.gatewayChoice)
 	sess.printWarnings(os.Stderr)
 	if n := len(sess.expect.Masked); n > 0 {
 		fmt.Fprintf(os.Stderr, "masked %d secret path(s); run 'kota check' to list them\n", n)
@@ -1218,7 +1238,7 @@ func cmdCheck(args []string) error {
 	}
 	defer sess.cleanup()
 
-	printMounts(os.Stdout, sess.spec)
+	printMounts(os.Stdout, sess)
 	printMasks(os.Stdout, sess.layout)
 	fmt.Fprintf(os.Stdout, "instructions: %s ('kota instructions' prints them)\n", sess.style.Source)
 	fmt.Fprintln(os.Stdout, "agent override:", overrideSource(sess.agent.Overrides()))
@@ -1831,7 +1851,8 @@ func printModels(w io.Writer, c models.Catalog, err error) {
 	fmt.Fprintln(w)
 }
 
-func printMounts(w io.Writer, spec sandbox.Compose) {
+func printMounts(w io.Writer, sess *session) {
+	spec := sess.spec
 	fmt.Fprintf(w, "image: %s\n", spec.Services[sandbox.AgentService].Image)
 	fmt.Fprintln(w, "mounts:")
 	for _, v := range spec.Services[sandbox.AgentService].Volumes {
@@ -1845,6 +1866,7 @@ func printMounts(w io.Writer, spec sandbox.Compose) {
 		}
 		fmt.Fprintf(w, "  %s  %s -> %s\n", mode, source, v.Target)
 	}
+	fmt.Fprintln(w, "gateway:", sess.gatewayChoice)
 	fmt.Fprintf(w, "gateway (in sandbox): %s\n", sandbox.AgentGatewayURL())
 	key := "none"
 	if slices.Contains(spec.Services[sandbox.AgentService].PassEnv, sandbox.GatewayKeyEnv) {
@@ -1908,11 +1930,4 @@ func newSessionDir(project string) (string, error) {
 		return "", err
 	}
 	return dirs.NewSessionDir(project)
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

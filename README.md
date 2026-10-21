@@ -59,7 +59,7 @@ kota instructions                  # print the agent's working style and whether
 
 | Variable | What it sets | Default |
 |---|---|---|
-| `KOTA_GATEWAY` (or `--gateway URL`) | The model gateway | `http://host.docker.internal:8686` |
+| `KOTA_GATEWAY` (or `--gateway NAME\|URL`) | The model gateway: a URL, or the name of one defined in `~/.config/kota/config.yaml` ([Sessions](docs/sessions.md#gateway)) | the config's `defaultGateway`, else `http://host.docker.internal:8686` |
 | `KOTA_GATEWAY_KEY` or `KOTA_GATEWAY_KEY_FILE` | The gateway's API key, if llama-swap has `apiKeys` enabled. The agent can read it, so use a key meant only for the gateway. | none |
 | `KOTA_ALLOWED_ROOT` | The directory projects must be inside | `~/Projects` |
 
@@ -69,7 +69,7 @@ The agent can use every model the gateway lists. [`assets/models.yaml`](assets/m
 
 ### Your own settings
 
-Your own working style for the agent, and agent settings such as keybindings, go in `~/.config/kota/`; see [The agents](docs/agent-setup.md). A project's own settings go in `kota.yaml`, `.kotaignore` and `kota.Dockerfile` at its root; see [Dependencies](docs/dependencies.md) and [Protecting the host](docs/protections.md).
+Your own working style for the agent, and agent settings such as keybindings, go in `~/.config/kota/`; see [The agents](docs/agent-setup.md). So do your named gateways, in `config.yaml` there; see [Sessions](docs/sessions.md#gateway). A project's own settings go in `kota.yaml`, `.kotaignore` and `kota.Dockerfile` at its root; see [Dependencies](docs/dependencies.md) and [Protecting the host](docs/protections.md).
 
 ## How it works
 

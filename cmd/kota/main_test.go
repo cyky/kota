@@ -21,6 +21,7 @@ import (
 	"kota/internal/check"
 	"kota/internal/deps"
 	"kota/internal/docker"
+	"kota/internal/gatewayconfig"
 	"kota/internal/instructions"
 	"kota/internal/mask"
 	"kota/internal/prepgate"
@@ -207,10 +208,69 @@ func TestGatewayKeyReachesSessionByNameOnly(t *testing.T) {
 		t.Error("key in the compose spec")
 	}
 	var out strings.Builder
-	printMounts(&out, sess.spec)
+	printMounts(&out, sess)
 	if strings.Contains(out.String(), secret) || !strings.Contains(out.String(), "gateway key: configured") {
 		t.Errorf("check output = %q", out.String())
 	}
+}
+
+// TestNamedGateway checks a session picks its gateway from the user's
+// config.yaml by name, check shows which and why, and a broken config
+// stops the session.
+func TestNamedGateway(t *testing.T) {
+	project := fakeHome(t, nil)
+	t.Setenv("KOTA_GATEWAY_KEY", "")
+	t.Setenv("KOTA_GATEWAY_KEY_FILE", "")
+	config := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "kota", gatewayconfig.File)
+	write := func(content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("defaultGateway: local\ngateways:\n  local:\n    url: http://host.docker.internal:8686\n  work-api:\n    url: http://host.docker.internal:4000\n")
+
+	cases := []struct {
+		flag, env string
+		want      string
+		port      int
+	}{
+		{flag: "work-api", want: "gateway: work-api http://host.docker.internal:4000 (--gateway)", port: 4000},
+		{env: "work-api", want: "gateway: work-api http://host.docker.internal:4000 (KOTA_GATEWAY)", port: 4000},
+		{want: "gateway: local http://host.docker.internal:8686 (defaultGateway)", port: 8686},
+		{flag: "http://host.docker.internal:9000", want: "gateway: http://host.docker.internal:9000 (--gateway)", port: 9000},
+	}
+	for _, c := range cases {
+		t.Setenv(gatewayconfig.Env, c.env)
+		sess, err := prepareTestSession(sessionArgs{agent: agent.Default, gatewayURL: c.flag, dir: project}, sandbox.ModeRun)
+		if err != nil {
+			t.Fatalf("flag %q env %q: %v", c.flag, c.env, err)
+		}
+		var out strings.Builder
+		printMounts(&out, sess)
+		sess.cleanup()
+		if !strings.Contains(out.String(), c.want+"\n") {
+			t.Errorf("flag %q env %q: check output lacks %q:\n%s", c.flag, c.env, c.want, out.String())
+		}
+		if sess.gateway.Port != c.port {
+			t.Errorf("flag %q env %q: port %d, want %d", c.flag, c.env, sess.gateway.Port, c.port)
+		}
+	}
+
+	t.Setenv(gatewayconfig.Env, "")
+	write("gateways:\n  local:\n    url: http://host.docker.internal:8686\n    keyfile: x\n")
+	if _, err := prepareTestSession(sessionArgs{agent: agent.Default, dir: project}, sandbox.ModeRun); err == nil || !strings.Contains(err.Error(), "keyfile") {
+		t.Errorf("broken config: err = %v, want the unknown key", err)
+	}
+	// Prep has no gateway, so it doesn't read the config.
+	sess, err := prepareTestSession(sessionArgs{dir: project}, sandbox.ModePrep)
+	if err != nil {
+		t.Fatalf("prep with a broken config: %v", err)
+	}
+	sess.cleanup()
 }
 
 // fakeHome points HOME at a temp dir with a project under ~/Projects, and

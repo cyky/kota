@@ -10,7 +10,7 @@ What runs where during a `run` or `shell` **Session** of a project with an **Eng
 flowchart LR
     subgraph host["Host (macOS)"]
         cli["kota CLI"]
-        gw["Gateway<br/>llama-swap :8686"]
+        gw["Gateway<br/>named in config.yaml, or a URL<br/>(default llama-swap :8686)"]
         project[("Project dir<br/>~/Projects/app")]
         cache[("User cache dir<br/>kota/")]
         subgraph vm["Engine VM (QEMU)"]
@@ -77,7 +77,7 @@ flowchart TD
     ask -- "no" --> abort(["abort"])
     ask -- "y" --> copy
     auto -- "no" --> copy["With --no-history: clone HEAD<br/>into a copy, offline"]
-    copy --> prepare["Prepare the session:<br/>mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
+    copy --> prepare["Prepare the session:<br/>gateway from --gateway, KOTA_GATEWAY<br/>or config.yaml; mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
     prepare --> snap["Start the Change report:<br/>snapshot watched files, record refs"]
     snap --> vmstart["Start the Engine VM and its port relays<br/>(boots while the sandbox starts)"]
     vmstart --> settle["Wait until the Docker VM sees<br/>the protected paths as the host does"]
@@ -138,6 +138,7 @@ flowchart TD
         sandbox["sandbox<br/>compose spec, names, gateway"]
         models["models<br/>catalog from gateway + models.yaml"]
         agent["agent<br/>opencode and pi: overrides,<br/>config, note, approval"]
+        gatewayconfig["gatewayconfig<br/>named gateways in config.yaml:<br/>which one a command uses"]
         gatewaykey["gatewaykey"]
         instructions["instructions<br/>what the agent is told"]
         override["override<br/>agent overrides"]
@@ -179,6 +180,7 @@ flowchart TD
     changereport --> offlinegit & mask & deps
     offlinegit --> docker & pathpolicy
     agent --> models & override & sandbox & instructions
+    gatewayconfig --> sandbox
     check --> docker & probe & sandbox
     probe --> sandbox
     prepgate --> changereport & deps & mask
