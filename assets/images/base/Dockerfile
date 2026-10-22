@@ -3,8 +3,8 @@
 # bump each one (docs/development.md). Base images are pinned by digest
 # (the multi-arch index); the tag says what it is. The `# renovate:`
 # comments tell Renovate where each version comes from.
-ARG NODE_IMAGE=node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315
-ARG GO_IMAGE=golang:1.27-trixie@sha256:47667934874913a449b96faa7ef4777fa285d9ec29126ee80ed61c45b7cccf0e
+ARG NODE_IMAGE=node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
+ARG GO_IMAGE=golang:1.27-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4
 
 FROM ${GO_IMAGE} AS go
 
@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOBIN=/out go install github.com/google/go-containerregistry/c
 FROM ${NODE_IMAGE}
 
 # renovate: datasource=npm depName=@opencode/cli
-ARG OPENCODE_VERSION=2.0.25
+ARG OPENCODE_VERSION=2.0.29
 # pi needs Node >= 22.19.
 # renovate: datasource=npm depName=@earendil-works/pi-coding-agent
 ARG PI_VERSION=1.2.0
