@@ -1,0 +1,51 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "schedule": ["before 6am on monday"],
+  "automerge": false,
+  "minimumReleaseAge": "7 days",
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "A vulnerability fix comes at once, without waiting out minimumReleaseAge or the schedule",
+    "minimumReleaseAge": null,
+    "schedule": ["at any time"]
+  },
+  "postUpdateOptions": ["gomodTidy"],
+  "prBodyNotes": [
+    "There is no CI, so check this update by hand before merging: `kota build`, `go test ./...`, `go test -tags integration ./...`, then a short `kota run` session with each agent (opencode and pi). See docs/development.md."
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Versions in Dockerfile ARGs, each under a `# renovate:` comment",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG \\w+=(?<currentValue>[^\\s@]+)(@(?<currentDigest>sha256:[a-f0-9]+))?"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Base image digests are low risk: one PR for all of them",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "base image digests"
+    },
+    {
+      "description": "A rebuilt image under the same tag has no release timestamp; without this, minimumReleaseAge would hold its digest update forever",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["digest"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    },
+    {
+      "description": "Each agent gets its own PR: a new version can change its config schema or the keys agent overrides allow",
+      "matchPackageNames": ["@opencode/cli", "@earendil-works/pi-coding-agent"],
+      "groupName": null
+    },
+    {
+      "description": "Bump the go directive in go.mod, not only when it falls out of range",
+      "matchDatasources": ["golang-version"],
+      "rangeStrategy": "bump"
+    }
+  ]
+}
