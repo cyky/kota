@@ -22,7 +22,8 @@ type Repo struct {
 	CommonDir string
 	// Mounts are the host paths git reads for the project's status: the
 	// project, plus the .git that holds it and, when .git is a file, the git
-	// dir and common dir it leads to. None lies inside another.
+	// dir and common dir it leads to, and in a subdirectory the .gitignore
+	// files above it. None lies inside another.
 	Mounts []string
 }
 
@@ -70,8 +71,34 @@ func repoAt(project, top string, info fs.FileInfo) (Repo, bool, error) {
 	default:
 		return Repo{}, false, fmt.Errorf("%s is a %s, not a directory or file", dotGit, info.Mode().Type())
 	}
-	repo.Mounts = outermost(paths)
+	ignores, err := ignoresAbove(project, top)
+	if err != nil {
+		return Repo{}, false, err
+	}
+	repo.Mounts = outermost(append(paths, ignores...))
 	return repo, true, nil
+}
+
+// ignoresAbove returns the .gitignore files in top and each directory below
+// it down to project's parent, which apply to project but aren't in it.
+func ignoresAbove(project, top string) ([]string, error) {
+	if project == top {
+		return nil, nil
+	}
+	var files []string
+	for dir := filepath.Dir(project); ; dir = filepath.Dir(dir) {
+		file := filepath.Join(dir, ".gitignore")
+		info, err := os.Lstat(file)
+		switch {
+		case err == nil && info.Mode().IsRegular():
+			files = append(files, file)
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return nil, err
+		}
+		if dir == top {
+			return files, nil
+		}
+	}
 }
 
 // pointer reads a file holding one path after prefix, as .git files and
@@ -122,7 +149,10 @@ func ReadStatus(project string, run Runner) (Status, error) {
 	if err != nil || !ok {
 		return Status{}, err
 	}
+	// Named, not discovered: in a subdirectory, the project and the .git
+	// above it are separate mounts, and discovery stops at the first.
 	out, err := Git(run, Job{ReadOnly: repo.Mounts, Dir: project},
+		"--git-dir="+filepath.Join(repo.Top, ".git"), "--work-tree="+repo.Top,
 		"status", "--porcelain", "--untracked-files=normal", "--", ".")
 	if err != nil {
 		return Status{}, fmt.Errorf("git status: %w", err)

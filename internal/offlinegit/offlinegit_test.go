@@ -180,6 +180,14 @@ func TestFindRepo(t *testing.T) {
 	module := filepath.Join(main, "lib")
 	os.Mkdir(module, 0o755)
 	os.WriteFile(filepath.Join(module, ".git"), []byte("gitdir: ../.git/modules/lib\n"), 0o644)
+	// .gitignore files above a subdirectory apply to it; a symlinked one
+	// isn't mounted.
+	deep := filepath.Join(main, "apps", "web", "app")
+	os.MkdirAll(deep, 0o755)
+	os.WriteFile(filepath.Join(main, ".gitignore"), []byte("*.log\n"), 0o644)
+	os.WriteFile(filepath.Join(main, "apps", "web", ".gitignore"), []byte("build/\n"), 0o644)
+	os.Symlink(filepath.Join(main, ".gitignore"), filepath.Join(main, "apps", ".gitignore"))
+	os.WriteFile(filepath.Join(deep, ".gitignore"), []byte("tmp/\n"), 0o644)
 
 	mainGit := filepath.Join(main, ".git")
 	tests := []struct {
@@ -192,7 +200,10 @@ func TestFindRepo(t *testing.T) {
 		{name: "repository root", project: main, ok: true,
 			want: Repo{Top: main, CommonDir: mainGit, Mounts: []string{main}}},
 		{name: "subdirectory", project: sub, ok: true,
-			want: Repo{Top: main, CommonDir: mainGit, Mounts: []string{sub, mainGit}}},
+			want: Repo{Top: main, CommonDir: mainGit, Mounts: []string{sub, mainGit, filepath.Join(main, ".gitignore")}}},
+		{name: "nested subdirectory", project: deep, ok: true,
+			want: Repo{Top: main, CommonDir: mainGit, Mounts: []string{deep, mainGit,
+				filepath.Join(main, "apps", "web", ".gitignore"), filepath.Join(main, ".gitignore")}}},
 		{name: "linked worktree", project: wt, ok: true,
 			want: Repo{Top: wt, Linked: true, CommonDir: mainGit, Mounts: []string{wt, mainGit}}},
 		{name: "worktree subdirectory", project: filepath.Join(wt, "sub"), ok: true,

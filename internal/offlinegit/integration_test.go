@@ -109,3 +109,30 @@ func TestReadStatusLinkedWorktreeInContainer(t *testing.T) {
 		t.Errorf("worktree status = %+v, %v", s, err)
 	}
 }
+
+// In a subdirectory of a repository, the project and the .git above it are
+// separate mounts, which git's discovery doesn't cross. The .gitignore files
+// above the project still apply.
+func TestReadStatusSubdirectoryInContainer(t *testing.T) {
+	if exec.Command("docker", "image", "inspect", testImage).Run() != nil {
+		t.Skip("docker or " + testImage + " not available; run 'kota build'")
+	}
+	isolateGit(t)
+	repo := cacheDir(t)
+	git(t, repo, "init", "-q")
+	git(t, repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+	os.WriteFile(filepath.Join(repo, "outside.txt"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.log\n"), 0o644)
+	sub := filepath.Join(repo, "apps", "sub")
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(repo, "apps", ".gitignore"), []byte("build/\n"), 0o644)
+	os.WriteFile(filepath.Join(sub, "new.txt"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(sub, "debug.log"), []byte("x"), 0o644)
+	os.Mkdir(filepath.Join(sub, "build"), 0o755)
+	os.WriteFile(filepath.Join(sub, "build", "out"), []byte("x"), 0o644)
+
+	s, err := ReadStatus(sub, dockerRunner(t))
+	if err != nil || !s.Git || !slices.Equal(s.Changes, []string{"?? apps/sub/"}) {
+		t.Errorf("subdirectory status = %+v, %v", s, err)
+	}
+}
