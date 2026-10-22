@@ -21,7 +21,7 @@ Working on kota itself. How it is put together is in [Architecture](architecture
 
 Everything the sandbox images run is pinned, so builds are reproducible: the base images by tag and digest, opencode, pi and crane by version (the `ARG`s in `assets/images/*/Dockerfile`), and the Go modules and `go` directive in `go.mod`. [Renovate](https://docs.renovatebot.com/) keeps them up to date with pull requests, configured in [`renovate.json`](../renovate.json):
 
-- Updates come on Monday mornings, and the dependency dashboard issue lists everything that is waiting.
+- Renovate opens a PR for each update by itself, on Monday mornings. There is no dependency dashboard issue.
 - A release must be at least 7 days old before Renovate proposes it. A fix for a known vulnerability (from GitHub's alerts or OSV) comes at once.
 - opencode and pi each get their own PR, since a new version can change their config schema or the keys that [agent overrides](agent-setup.md) allow. Base image digests come in one PR.
 - Nothing automerges: these pins decide what runs in every sandbox.
