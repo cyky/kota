@@ -81,6 +81,8 @@ type config struct {
 	} `yaml:"prep"`
 	// Engine is parsed by package engine.
 	Engine yaml.Node `yaml:"engine"`
+	// Skills is parsed by package projectskills.
+	Skills yaml.Node `yaml:"skills"`
 }
 
 // skipDirs are not searched for manifests: dependency and build output,

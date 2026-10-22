@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"kota/internal/offlinegit"
+	"kota/internal/projectskills"
 )
 
 func TestParseInspect(t *testing.T) {
@@ -49,14 +50,24 @@ func TestInspectLeavesOutConfigFiles(t *testing.T) {
 		if slices.ContainsFunc(j.Cmd, func(arg string) bool { return strings.HasSuffix(arg, inspectScript) }) {
 			return "lfs\x00", nil
 		}
-		return " M src/app.ts\n?? kota.yaml\n M .kotaignore\n?? notes.txt\n", nil
+		return " M src/app.ts\n?? kota.yaml\n M .kotaignore\n?? notes.txt\n M .agents/skills/a/SKILL.md\n?? .agents/skills/b/\n", nil
 	}
-	m, err := Inspect(project, run)
-	if err != nil {
-		t.Fatal(err)
+	// The copy takes the Project skills from the project whenever the
+	// Session loads them, read-only or writable.
+	skills := []string{" M .agents/skills/a/SKILL.md", "?? .agents/skills/b/"}
+	cases := map[projectskills.Mode][]string{
+		projectskills.Off:      append([]string{" M src/app.ts", "?? notes.txt"}, skills...),
+		projectskills.ReadOnly: {" M src/app.ts", "?? notes.txt"},
+		projectskills.Writable: {" M src/app.ts", "?? notes.txt"},
 	}
-	if want := []string{" M src/app.ts", "?? notes.txt"}; !slices.Equal(m.Changes, want) {
-		t.Errorf("changes = %q, want %q", m.Changes, want)
+	for mode, want := range cases {
+		m, err := Inspect(project, run, mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(m.Changes, want) {
+			t.Errorf("%v: changes = %q, want %q", mode, m.Changes, want)
+		}
 	}
 }
 
@@ -66,7 +77,7 @@ func TestInspectNeedsRepositoryTop(t *testing.T) {
 		return "", nil
 	}
 	plain := t.TempDir()
-	if _, err := Inspect(plain, run); err == nil || !strings.Contains(err.Error(), "isn't in one") {
+	if _, err := Inspect(plain, run, projectskills.Off); err == nil || !strings.Contains(err.Error(), "isn't in one") {
 		t.Errorf("not a repository: %v", err)
 	}
 	repo := t.TempDir()
@@ -77,7 +88,7 @@ func TestInspectNeedsRepositoryTop(t *testing.T) {
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Inspect(sub, run); err == nil || !strings.Contains(err.Error(), "inside a larger git repository") {
+	if _, err := Inspect(sub, run, projectskills.Off); err == nil || !strings.Contains(err.Error(), "inside a larger git repository") {
 		t.Errorf("subdirectory: %v", err)
 	}
 }
@@ -161,5 +172,64 @@ func TestTakeConfig(t *testing.T) {
 	}
 	if err := TakeConfig(project, copy); err == nil {
 		t.Error("symlinked .kotaignore in the project was copied")
+	}
+}
+
+// TestCloneSkills checks Clone copies the Project skills in the clone's
+// container, into the copy, only when the Session loads them, and refuses
+// a project folder it would follow a link through.
+func TestCloneSkills(t *testing.T) {
+	newProject := func(t *testing.T) string {
+		project := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return project
+	}
+	dest := filepath.Join(t.TempDir(), "copy")
+	for _, mode := range []projectskills.Mode{projectskills.Off, projectskills.ReadOnly, projectskills.Writable} {
+		project := newProject(t)
+		var jobs []offlinegit.Job
+		// As the clone would, the stub makes the copy.
+		run := func(j offlinegit.Job) (string, error) { jobs = append(jobs, j); return "", os.MkdirAll(dest, 0o755) }
+		copied, err := Clone(project, dest, run, mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if copied.Skills != mode {
+			t.Errorf("%v: copied %+v", mode, copied)
+		}
+		skillsRuns := slices.ContainsFunc(jobs, func(j offlinegit.Job) bool {
+			return slices.ContainsFunc(j.Cmd, func(a string) bool { return strings.HasSuffix(a, skillsScript) })
+		})
+		if skillsRuns != (mode != projectskills.Off) {
+			t.Errorf("%v: skills copied: %v", mode, skillsRuns)
+			continue
+		}
+		if !skillsRuns {
+			continue
+		}
+		last := jobs[len(jobs)-1]
+		want := map[projectskills.Mode]string{projectskills.ReadOnly: "read-only", projectskills.Writable: "writable"}[mode]
+		if last.Dir != dest || last.Writable != filepath.Dir(dest) || !slices.Equal(last.Cmd[len(last.Cmd)-3:], []string{project, projectskills.Dir, want}) {
+			t.Errorf("%v: skills job %+v", mode, last)
+		}
+	}
+
+	for _, link := range []string{".agents", projectskills.Dir} {
+		project := newProject(t)
+		if err := os.MkdirAll(filepath.Join(project, filepath.Dir(link)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(project, link)); err != nil {
+			t.Fatal(err)
+		}
+		run := func(offlinegit.Job) (string, error) {
+			t.Errorf("%s: cloned a project with a linked skills folder", link)
+			return "", nil
+		}
+		if _, err := Clone(project, dest, run, projectskills.ReadOnly); err == nil || !strings.Contains(err.Error(), "is a symlink") {
+			t.Errorf("%s: err = %v, want a refusal", link, err)
+		}
 	}
 }

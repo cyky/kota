@@ -126,12 +126,12 @@ var opencode = adapter{
 		content, err := renderOpencodeCLI(base, ov[opencodeCLIOverride.Name])
 		return map[string]string{opencodeCLIEnv: content}, err
 	},
-	render: func(c models.Catalog, auto bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error) {
+	render: func(c models.Catalog, auto bool, keyEnv, skills string, ov map[string]map[string]any) ([][]byte, error) {
 		base, err := assets.Agents.ReadFile(opencodeBaseConfig)
 		if err != nil {
 			return nil, err
 		}
-		cfg, err := renderOpencode(base, opencodeSettings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto, APIKeyEnv: keyEnv, Override: ov[opencodeConfigOverride.Name]})
+		cfg, err := renderOpencode(base, opencodeSettings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, Auto: auto, APIKeyEnv: keyEnv, Skills: skills, Override: ov[opencodeConfigOverride.Name]})
 		return [][]byte{cfg}, err
 	},
 }
@@ -150,6 +150,8 @@ type opencodeSettings struct {
 	// APIKeyEnv, when set, names the environment variable holding the
 	// gateway key. The config refers to it, so the key isn't written out.
 	APIKeyEnv string
+	// Skills, when set, is the in-sandbox directory of the Project skills.
+	Skills string
 	// Override is the user's Agent override of opencode.json, from
 	// opencodeConfigOverride, or nil.
 	Override map[string]any
@@ -157,9 +159,9 @@ type opencodeSettings struct {
 
 // renderOpencode returns the opencode.json content for a session: base
 // (the versioned permissions and defaults), then the user's override, then
-// the gateway provider, its models and the default and small model. With
-// Auto, edits and shell commands are allowed; other permissions keep their
-// base values.
+// the gateway provider, its models and the default and small model, and
+// the Project skills directory. With Auto, edits and shell commands are
+// allowed; other permissions keep their base values.
 func renderOpencode(base []byte, s opencodeSettings) ([]byte, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
@@ -179,6 +181,9 @@ func renderOpencode(base []byte, s opencodeSettings) ([]byte, error) {
 	delete(cfg, "small_model")
 	if s.Models.Small != "" {
 		cfg["small_model"] = providerID + "/" + s.Models.Small
+	}
+	if s.Skills != "" {
+		cfg["skills"] = []string{s.Skills}
 	}
 	if s.Auto {
 		perm, _ := cfg["permission"].(map[string]any)
@@ -220,10 +225,13 @@ func renderOpencodeCLI(base []byte, over map[string]any) (string, error) {
 // opencodeEnv returns environment variables that keep opencode
 // offline-friendly and point it at the rendered config.
 //
-// The project's opencode.json and .opencode/ are ignored: the agent can
-// write them, and they would override configPath. The global config
-// directory stays at ~/.config/opencode on the session's tmpfs, because
-// opencode writes its service state there; configPath outranks it.
+// The project's opencode.json, .opencode/, .claude/ and .agents/ are
+// ignored: the agent can write them, and they would override configPath,
+// change its permissions or load plugins. In opencode 2 the one switch
+// turns off the whole search, skills included; the Project skills are
+// listed in the config instead. The global config directory stays at
+// ~/.config/opencode on the session's tmpfs, because opencode writes its
+// service state there; configPath outranks it.
 func opencodeEnv(configPath string) map[string]string {
 	return map[string]string{
 		"OPENCODE_CONFIG":                 configPath,
@@ -231,6 +239,5 @@ func opencodeEnv(configPath string) map[string]string {
 		"OPENCODE_DISABLE_AUTOUPDATE":     "1",
 		"OPENCODE_DISABLE_MODELS_FETCH":   "1",
 		"OPENCODE_DISABLE_LSP_DOWNLOAD":   "1",
-		"OPENCODE_DISABLE_CLAUDE_CODE":    "1",
 	}
 }

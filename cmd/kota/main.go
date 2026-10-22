@@ -44,6 +44,7 @@ import (
 	"kota/internal/prepgate"
 	"kota/internal/probe"
 	"kota/internal/projectimage"
+	"kota/internal/projectskills"
 	"kota/internal/sandbox"
 	"kota/internal/sessionregistry"
 	"kota/internal/vmview"
@@ -98,6 +99,9 @@ flags:
                         older commits, remotes or git config; masked files are
                         still readable from that commit; its new commits come
                         back as the branch kota/<agent>-<time>
+  --skills-writable     run and shell: let the agent change the project's
+                        ` + projectskills.Dir + `, which skills: true in ` + projectskills.ConfigFile + `
+                        loads read-only otherwise
   --shared-caches       clean only: also reset shared caches; all sessions
                         must be idle
 
@@ -350,6 +354,12 @@ type session struct {
 	// engine is the session's Engine VM: none, off (--no-engine), can't
 	// start (only with sessionArgs.engineOptional), or on.
 	engine enginesession.State
+	// skills is whether the agent loads the Project skills, and whether it
+	// may change them.
+	skills projectskills.Mode
+	// copied is what a No-history copy took from the project, for the
+	// return; unset otherwise.
+	copied nohistory.Copied
 	// style is the working style the agent's note starts with; unset for
 	// prep.
 	style instructions.Style
@@ -517,7 +527,10 @@ type sessionArgs struct {
 	engineOptional bool
 	// noHistory runs the session on a No-history copy of the project.
 	noHistory bool
-	agent     string
+	// skillsWritable lets the agent change the Project skills, which the
+	// project must load (projectskills.Read).
+	skillsWritable bool
+	agent          string
 	// gatewayURL is the --gateway value: a gateway name or a URL, empty
 	// when not given.
 	gatewayURL string
@@ -622,11 +635,10 @@ func sessionDeps(project, key string) (deps.Plan, error) {
 // Prep has no agent, gateway or key and runs the dependency install. key is
 // the project the session belongs to: paths.Project, or the original
 // project of a No-history copy.
-func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, key string, depPlan deps.Plan) (*session, error) {
+func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, key string, depPlan deps.Plan) (sess *session, err error) {
 	prep := mode == sandbox.ModePrep
 	var ag *agent.Agent
 	var style instructions.Style
-	var err error
 	if !prep {
 		if ag, err = loadAgent(sa.agent); err != nil {
 			return nil, err
@@ -644,7 +656,26 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		}
 		apiKey = gw.Key
 	}
-	layout, err := mask.Plan(project, mask.DefaultRules)
+	// Read-only Project skills stay read-only in prep too, so an install
+	// script can't plant one either.
+	skills, readOnly, skillsWarning, err := sessionSkills(project, sa.skillsWritable)
+	if err != nil {
+		return nil, err
+	}
+	made, err := makeDirs(project, readOnly)
+	if err != nil {
+		return nil, err
+	}
+	// The session's cleanup removes them; until there is a session, this.
+	defer func() {
+		if sess == nil {
+			removeDirs(made)
+		}
+	}()
+	layout, err := mask.Plan(project, mask.DefaultRules, readOnly...)
+	if skillsWarning != "" {
+		layout.Warnings = append(layout.Warnings, skillsWarning)
+	}
 	if err == nil && prep {
 		// The install may need the registry auth in the root .npmrc. The
 		// user approved that at the prep prompt.
@@ -675,7 +706,7 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	if err != nil {
 		return nil, err
 	}
-	sess := &session{shell: sa.shell, gateway: gw.Gateway, gatewayChoice: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, gatewayKey: apiKey, deps: depPlan, image: image, style: style}
+	sess = &session{shell: sa.shell, gateway: gw.Gateway, gatewayChoice: gw, sessionDir: sessionDir, project: project, key: key, layout: layout, agent: ag, gatewayKey: apiKey, deps: depPlan, image: image, style: style, skills: skills, mountPoints: made}
 	if !prep {
 		opts, err := engineOptions()
 		if err == nil {
@@ -788,6 +819,65 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 	return sess, nil
 }
 
+// sessionSkills is how a session of project treats its Project skills, with
+// the directories to hold read-only for them. writable is
+// --skills-writable. A kota.yaml that can't be parsed doesn't stop the
+// session, as for the dependencies, so it can be fixed: the skills don't
+// load then, and their folder stays read-only in case the project loads
+// them; warning says so. Only --skills-writable is refused, since the
+// opt-in it needs can't be read.
+func sessionSkills(project string, writable bool) (mode projectskills.Mode, readOnly []string, warning string, err error) {
+	mode, err = projectskills.Read(project, writable)
+	var cfgErr *projectskills.ConfigError
+	if errors.As(err, &cfgErr) && !writable {
+		if err := projectskills.CheckPath(project); err != nil {
+			return projectskills.Off, nil, "", err
+		}
+		return projectskills.Off, []string{projectskills.Dir},
+			fmt.Sprintf("%v: project skills are off for this session, and %s is read-only", err, projectskills.Dir), nil
+	}
+	if err != nil {
+		return projectskills.Off, nil, "", err
+	}
+	if mode == projectskills.ReadOnly {
+		if err := projectskills.CheckPath(project); err != nil {
+			return projectskills.Off, nil, "", err
+		}
+		if err := projectskills.CheckLinks(project); err != nil {
+			return projectskills.Off, nil, "", err
+		}
+		readOnly = []string{projectskills.Dir}
+	}
+	return mode, readOnly, "", nil
+}
+
+// makeDirs creates the directories dirs, relative to project, that don't
+// exist yet, and returns the ones it created, outermost first. A missing
+// read-only directory is created for the session and mounted over itself,
+// rather than held by a placeholder over its first missing parent, which
+// would make all of that parent read-only. The caller checked the way to
+// each for links.
+func makeDirs(project string, dirs []string) ([]string, error) {
+	var made []string
+	for _, dir := range dirs {
+		missing := missingDirs(project, dir)
+		if err := os.MkdirAll(filepath.Join(project, filepath.FromSlash(dir)), 0o755); err != nil {
+			removeDirs(append(made, missing...))
+			return nil, err
+		}
+		made = append(made, missing...)
+	}
+	return made, nil
+}
+
+// removeDirs removes the directories made, innermost first, keeping any
+// that aren't empty.
+func removeDirs(made []string) {
+	for _, dir := range slices.Backward(made) {
+		os.Remove(dir)
+	}
+}
+
 // lockListFile is where the sessions of the project key record the files
 // they lock on the host, next to its lease record, so the next command
 // on the project unlocks them after a crash.
@@ -845,16 +935,18 @@ func gitEnv(project string) map[string]string {
 // parseOfflineArgs is parseSessionArgs for run and shell, which start the
 // project's Engine VM unless --no-engine.
 func parseOfflineArgs(name string, args []string, register func(*flag.FlagSet)) (sessionArgs, error) {
-	var noEngine, noHistory bool
+	var noEngine, noHistory, skillsWritable bool
 	sa, err := parseSessionArgs(name, args, func(f *flag.FlagSet) {
 		f.BoolVar(&noEngine, "no-engine", false, "start without the project's Engine VM")
 		f.BoolVar(&noHistory, "no-history", false, "run on a copy that keeps only the last commit, without older history")
+		f.BoolVar(&skillsWritable, "skills-writable", false, "let the agent change the project's "+projectskills.Dir)
 		if register != nil {
 			register(f)
 		}
 	})
 	sa.engine = !noEngine
 	sa.noHistory = noHistory
+	sa.skillsWritable = skillsWritable
 	return sa, err
 }
 
@@ -964,7 +1056,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		return err
 	}
 	start := time.Now()
-	paths, key, err := offlinePaths(sa, lease, ag, auto, start)
+	paths, key, copied, err := offlinePaths(sa, lease, ag, auto, start)
 	if err != nil {
 		return err
 	}
@@ -984,6 +1076,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 		discard()
 		return err
 	}
+	sess.copied = copied
 	changes, err := changereport.Start(sess.project, sess.layout, offlineGit, changeOptions(sa.noHistory))
 	if err != nil {
 		sess.cleanup()
@@ -1002,7 +1095,7 @@ func cmdOffline(sa sessionArgs, auto, skipCheck bool) error {
 	// can be removed.
 	sess.unlock()
 	ret := nohistory.Return(sess.project, sess.key, result, returnName(sa, ag.Name()), start,
-		offlineGit, filepath.Join(sess.sessionDir, "git-excludes"), sess.sessionDir)
+		offlineGit, filepath.Join(sess.sessionDir, "git-excludes"), sess.sessionDir, sess.copied)
 	sess.cleanup()
 	// The copy's working tree is discarded, so watched files changed in
 	// its commits are always flagged, and its changes are listed in full
@@ -1032,50 +1125,61 @@ func returnName(sa sessionArgs, agent string) string {
 
 // offlinePaths returns the paths a run or shell session mounts and the
 // project it belongs to, after the full-auto prompt or, with --no-history,
-// after making the No-history copy.
-func offlinePaths(sa sessionArgs, lease *lockedProject, ag *agent.Agent, auto bool, start time.Time) (pathpolicy.Paths, string, error) {
+// after making the No-history copy, with what the copy took from the
+// project.
+func offlinePaths(sa sessionArgs, lease *lockedProject, ag *agent.Agent, auto bool, start time.Time) (pathpolicy.Paths, string, nohistory.Copied, error) {
 	paths, key := lease.paths, lease.paths.Project
 	if sa.noHistory {
 		// The agent works on the copy, so the original's uncommitted
 		// changes are out of its reach, and the full-auto prompt has
-		// nothing to protect.
-		var err error
-		paths.Project, err = makeNoHistoryCopy(key, start)
-		return paths, key, err
+		// nothing to protect. The copy's kota.yaml is the original's, so
+		// the Session reads the same skills setting from it. The skills
+		// are checked here too, so a link is refused before the copy is
+		// made; links inside the folder that pass resolve the same in it.
+		skills, _, _, err := sessionSkills(key, sa.skillsWritable)
+		if err != nil {
+			return paths, key, nohistory.Copied{}, err
+		}
+		var copied nohistory.Copied
+		paths.Project, copied, err = makeNoHistoryCopy(key, start, skills)
+		return paths, key, copied, err
 	}
 	if !sa.shell {
 		if err := confirmFullAuto(key, ag.Name(), ag.FullAuto(auto), ag.FullAuto(false)); err != nil {
-			return paths, key, err
+			return paths, key, nohistory.Copied{}, err
 		}
 	}
-	return paths, key, nil
+	return paths, key, nohistory.Copied{}, nil
 }
 
 // makeNoHistoryCopy checks that project can be copied, asks about what
 // the copy leaves out, and makes the No-history copy. It returns the copy's
-// validated path. start names it, as it names the Returned branch. Call it
-// under project's lease.
-func makeNoHistoryCopy(project string, start time.Time) (string, error) {
-	missing, err := nohistory.Inspect(project, offlineGit)
+// validated path, and what it took from the project. start names it, as it
+// names the Returned branch; skills is how the Session treats the Project
+// skills. Call it under project's lease.
+func makeNoHistoryCopy(project string, start time.Time, skills projectskills.Mode) (string, nohistory.Copied, error) {
+	missing, err := nohistory.Inspect(project, offlineGit, skills)
 	if err != nil {
-		return "", err
+		return "", nohistory.Copied{}, err
 	}
 	if !missing.Empty() && !interrupt.Ask(func() bool { return nohistory.Confirm(os.Stdin, os.Stderr, missing) }) {
-		return "", errors.New("not started; commit or stash your changes first (git stash -u), or run without --no-history")
+		return "", nohistory.Copied{}, errors.New("not started; commit or stash your changes first (git stash -u), or run without --no-history")
 	}
 	dirs, err := hostdata.Default()
 	if err != nil {
-		return "", err
+		return "", nohistory.Copied{}, err
 	}
 	if err := os.MkdirAll(dirs.Copies(), 0o700); err != nil {
-		return "", err
+		return "", nohistory.Copied{}, err
 	}
 	dest := dirs.CopyDir(project, start)
 	if _, err := os.Lstat(dest); err == nil {
-		return "", fmt.Errorf("%s already exists; start again in a second", dest)
+		return "", nohistory.Copied{}, fmt.Errorf("%s already exists; start again in a second", dest)
 	}
+	var taken nohistory.Copied
 	copied, err := func() (string, error) {
-		if err := nohistory.Clone(project, dest, offlineGit); err != nil {
+		var err error
+		if taken, err = nohistory.Clone(project, dest, offlineGit, skills); err != nil {
 			return "", err
 		}
 		if err := nohistory.TakeConfig(project, dest); err != nil {
@@ -1098,10 +1202,10 @@ func makeNoHistoryCopy(project string, start time.Time) (string, error) {
 	}()
 	if err != nil {
 		os.RemoveAll(dest)
-		return "", err
+		return "", nohistory.Copied{}, err
 	}
 	fmt.Fprintf(os.Stderr, "no-history: the session runs on a copy that keeps only the last commit, its message, author and date included, at %s\n", copied)
-	return copied, nil
+	return copied, taken, nil
 }
 
 // runSession starts the sandbox, verifies it unless skipCheck, and runs the
@@ -1151,6 +1255,7 @@ func startSession(sess *session, lease *sessionregistry.Lease, model string, aut
 			fmt.Fprintln(os.Stderr, "approval:", sess.agent.Approval(auto))
 			fmt.Fprintln(os.Stderr, "agent override:", overrideSource(sess.agent.Overrides()))
 		}
+		fmt.Fprintln(os.Stderr, "project skills:", sess.skills)
 		if skipCheck {
 			fmt.Fprintln(os.Stderr, "WARNING: --unsafe-skip-check: containment probes skipped; the sandbox is NOT verified.")
 			return nil
@@ -1246,6 +1351,7 @@ func cmdCheck(args []string) error {
 	printMasks(os.Stdout, sess.layout)
 	fmt.Fprintf(os.Stdout, "instructions: %s ('kota instructions' prints them)\n", sess.style.Source)
 	fmt.Fprintln(os.Stdout, "agent override:", overrideSource(sess.agent.Overrides()))
+	fmt.Fprintln(os.Stdout, "project skills:", sess.skills)
 	sess.printWarnings(os.Stdout)
 	engineErr := printEngine(os.Stdout, sess)
 
@@ -1793,7 +1899,11 @@ func (s *session) configure(ds *docker.Session, model string, auto bool) (models
 	if s.gatewayKey != "" {
 		keyEnv = sandbox.GatewayKeyEnv
 	}
-	if err := s.prepared.Configure(catalog, auto, keyEnv); err != nil {
+	skills := ""
+	if s.skills != projectskills.Off {
+		skills = sandbox.Workspace + "/" + projectskills.Dir
+	}
+	if err := s.prepared.Configure(catalog, auto, keyEnv, skills); err != nil {
 		return models.Catalog{}, err
 	}
 	return catalog, nil

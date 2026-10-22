@@ -16,19 +16,82 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
+	"kota/internal/changereport"
 	"kota/internal/deps"
 	"kota/internal/interrupt"
 	"kota/internal/mask"
 	"kota/internal/offlinegit"
 	"kota/internal/projectimage"
+	"kota/internal/projectskills"
 )
 
 // ConfigFiles are kota's own files in a project. A Session on the copy
 // takes them from the project, not from the commit: an untracked
 // .kotaignore that masks a tracked secret must mask it in the copy too.
 var ConfigFiles = []string{mask.IgnoreFile, deps.ConfigFile, projectimage.File}
+
+// The copy also takes the Project skills from the project (Clone), when
+// the Session loads them, so it sees the skills the user sees. Read-only,
+// they are left out of git like ConfigFiles; writable, the agent's changes
+// to them are its own, and come back like any other, while the user's
+// uncommitted skills aren't.
+
+// Copied is what a No-history copy took from the project besides its
+// commit, for Return.
+type Copied struct {
+	// Skills is how the Session treats the Project skills.
+	Skills projectskills.Mode
+	// skills are the digests of the copy's Project skills as the Session got
+	// them, with Writable: a skill that differs at the end is the agent's
+	// work, the others are the user's.
+	skills map[string]string
+}
+
+// taken reports whether the copy takes every path of a git status
+// --porcelain line from the project: git status in the project need not
+// list it.
+func taken(line string, skills projectskills.Mode) bool {
+	return allPaths(line, func(p string) bool {
+		return slices.Contains(ConfigFiles, p) || skills != projectskills.Off && inSkills(p)
+	})
+}
+
+// own reports whether every path of a git status --porcelain line in the
+// copy is kota's, not the agent's: a change there isn't the Session's work.
+// skill reports whether a path in the Project skills is.
+func own(line string, skill func(p string) bool) bool {
+	return allPaths(line, func(p string) bool {
+		return slices.Contains(ConfigFiles, p) || inSkills(p) && skill(p)
+	})
+}
+
+func inSkills(p string) bool {
+	return strings.TrimSuffix(p, "/") == projectskills.Dir || strings.HasPrefix(p, projectskills.Dir+"/")
+}
+
+// allPaths reports whether f holds for each path of a git status
+// --porcelain line: both of a rename or copy ("old -> new"), unquoted as
+// git quotes unusual names.
+func allPaths(line string, f func(p string) bool) bool {
+	paths := strings.Split(line[min(3, len(line)):], " -> ")
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if strings.HasPrefix(p, `"`) {
+			u, err := strconv.Unquote(p)
+			if err != nil {
+				return false
+			}
+			p = u
+		}
+		if !f(p) {
+			return false
+		}
+	}
+	return true
+}
 
 // inspectScript fails on a repository without commits, then lists the
 // tree at HEAD, a marker no tree entry can look like, and the paths stored
@@ -56,8 +119,9 @@ func (m Missing) Empty() bool {
 }
 
 // Inspect checks that project is the top of a git repository with at least
-// one commit, and returns what a copy of it would leave out.
-func Inspect(project string, run offlinegit.Runner) (Missing, error) {
+// one commit, and returns what a copy of it would leave out. skills is how
+// the Session treats the Project skills.
+func Inspect(project string, run offlinegit.Runner, skills projectskills.Mode) (Missing, error) {
 	repo, err := repoOf(project)
 	if err != nil {
 		return Missing{}, err
@@ -75,7 +139,7 @@ func Inspect(project string, run offlinegit.Runner) (Missing, error) {
 		return Missing{}, err
 	}
 	for _, line := range status.Changes {
-		if !slices.Contains(ConfigFiles, strings.TrimSpace(line[min(3, len(line)):])) {
+		if !taken(line, skills) {
 			m.Changes = append(m.Changes, line)
 		}
 	}
@@ -162,20 +226,68 @@ g reflog expire --expire=now --all
 mkdir -p .git/info
 for f; do printf '/%s\n' "$f"; done > .git/info/exclude`
 
+// skillsScript replaces the Project skills folder $2 in the copy, the
+// current directory, with the project's $1/$2, if it has one. It runs in
+// the clone's container, so the Docker VM sees the folder as written: one
+// replaced from the host could be mounted as the VM's stale view of the
+// old one. A link at .agents or the folder, from the commit, is removed as
+// it is, so nothing is removed or written through it; cp -a copies the
+// project's links as links. With $3 read-only, git is told to ignore the
+// tracked skills' working-tree state, so the user's uncommitted skill
+// edits and deletions can't be staged or committed in the copy.
+const skillsScript = `set -e
+src=$1/$2 dir=$2 parent=${2%/*}
+for p in "$parent" "$dir"; do
+	if [ -L "$p" ] || { [ -e "$p" ] && [ ! -d "$p" ]; }; then rm -f "$p"; fi
+done
+rm -rf "$dir"
+if [ -d "$src" ]; then mkdir -p "$parent" && cp -a "$src" "$dir"; fi
+if [ "$3" = read-only ]; then g ls-files -z -- "$dir" | g update-index -z --skip-worktree --stdin; fi`
+
 // Clone clones the commit project's HEAD points at into dest, which must
 // not exist yet. dest's parent is the only writable mount. On an error,
-// the caller removes dest.
-func Clone(project, dest string, run offlinegit.Runner) error {
+// the caller removes dest. skills is how the Session treats the Project
+// skills: unless Off, the copy has the project's, uncommitted ones
+// included, and read-only, git in the copy leaves them out of commits.
+func Clone(project, dest string, run offlinegit.Runner, skills projectskills.Mode) (Copied, error) {
+	copied := Copied{Skills: skills}
 	repo, err := repoOf(project)
 	if err != nil {
-		return err
+		return copied, err
+	}
+	if skills != projectskills.Off {
+		if err := projectskills.CheckPath(project); err != nil {
+			return copied, err
+		}
 	}
 	parent := filepath.Dir(dest)
 	job := offlinegit.Job{ReadOnly: repo.Mounts, Writable: parent, Dir: parent}
-	if _, err := offlinegit.Script(run, job, cloneScript, append([]string{project, dest}, ConfigFiles...)...); err != nil {
-		return fmt.Errorf("copy the project: %w", err)
+	excluded := slices.Clone(ConfigFiles)
+	if skills == projectskills.ReadOnly {
+		excluded = append(excluded, projectskills.Dir+"/")
 	}
-	return nil
+	if _, err := offlinegit.Script(run, job, cloneScript, append([]string{project, dest}, excluded...)...); err != nil {
+		return copied, fmt.Errorf("copy the project: %w", err)
+	}
+	if skills == projectskills.Off {
+		return copied, nil
+	}
+	job.Dir = dest
+	mode := "writable"
+	if skills == projectskills.ReadOnly {
+		mode = "read-only"
+	}
+	if _, err := offlinegit.Script(run, job, skillsScript, project, projectskills.Dir, mode); err != nil {
+		return copied, fmt.Errorf("copy the project's %s: %w", projectskills.Dir, err)
+	}
+	if skills == projectskills.Writable {
+		files, err := changereport.SnapshotMatching(dest, []string{projectskills.Dir + "/"})
+		if err != nil {
+			return copied, fmt.Errorf("record the copy's %s: %w", projectskills.Dir, err)
+		}
+		copied.skills = files.Digests()
+	}
+	return copied, nil
 }
 
 // TakeConfig replaces kota's own files in the copy with the project's. A

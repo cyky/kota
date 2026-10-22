@@ -31,7 +31,7 @@ flowchart LR
     sandbox -- "gateway:8080" --> fwd -- "only the gateway port" --> gw
     sandbox -- "engine:2376,<br/>published ports 40000-40099" --> efwd -- "host 127.0.0.1<br/>kota relay, QEMU hostfwd" --> dockerd
     dockerd --- ctrs
-    project -- "bind /workspace<br/>secrets masked, .git hooks/config read-only" --> sandbox
+    project -- "bind /workspace<br/>secrets masked, .git hooks/config<br/>and Project skills read-only" --> sandbox
     vols --> sandbox
     cli -- "docker compose" --> dvm
     cli -- "starts, loads images, stops" --> vm
@@ -76,13 +76,13 @@ flowchart TD
     auto -- "yes" --> ask["List what won't be in the copy,<br/>or the changes; ask for y"]
     ask -- "no" --> abort(["abort"])
     ask -- "y" --> copy
-    auto -- "no" --> copy["With --no-history: clone HEAD<br/>into a copy, offline"]
-    copy --> prepare["Prepare the session:<br/>gateway, its key and models from<br/>--gateway, KOTA_GATEWAY or config.yaml;<br/>mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
+    auto -- "no" --> copy["With --no-history: clone HEAD<br/>into a copy, offline, with the<br/>Project skills of the working tree"]
+    copy --> prepare["Prepare the session:<br/>gateway, its key and models from<br/>--gateway, KOTA_GATEWAY or config.yaml;<br/>Project skills from kota.yaml;<br/>mask plan and protections,<br/>lock protected files on the host,<br/>image choice, session dir,<br/>Engine VM: config, archives,<br/>ports, certs, QEMU command"]
     prepare --> snap["Start the Change report:<br/>snapshot watched files, record refs"]
     snap --> vmstart["Start the Engine VM and its port relays<br/>(boots while the sandbox starts)"]
     vmstart --> settle["Wait until the Docker VM sees<br/>the protected paths as the host does"]
     settle --> compose["docker compose up:<br/>forwarders, mount witness, sandbox"]
-    compose --> configure["Render agent config from<br/>the gateway's /v1/models"]
+    compose --> configure["Render agent config from<br/>the gateway's /v1/models,<br/>with the Project skills if on"]
     configure --> ready["Wait for the Engine API,<br/>load image archives"]
     ready --> probes{"Sandbox probes,<br/>then Engine VM probes"}
     probes -- "a probe failed" --> refuse(["refuse to start"])
@@ -131,7 +131,8 @@ flowchart TD
         mask["mask<br/>secret masks, git and .envrc protections"]
         deps["deps<br/>dependency plan, kota.yaml prep"]
         projectimage["projectimage<br/>kota.Dockerfile"]
-        nohistory["nohistory<br/>No-history copy: inspect, clone,<br/>kota config from the original,<br/>Returned branch, keep or remove"]
+        projectskills["projectskills<br/>Project skills: kota.yaml opt-in,<br/>read-only or writable, links"]
+        nohistory["nohistory<br/>No-history copy: inspect, clone,<br/>kota config and Project skills<br/>from the original,<br/>Returned branch, keep or remove"]
     end
 
     subgraph spec["Sandbox definition"]
@@ -174,7 +175,8 @@ flowchart TD
     main --> policy & spec & verify & eng & runtime
     mask --> deps & projectimage & sandbox & hostgit
     pathpolicy --> sandbox
-    nohistory --> offlinegit & mask & deps & projectimage & changereport & hostdata & interrupt
+    nohistory --> offlinegit & mask & deps & projectimage & projectskills & changereport & hostdata & interrupt
+    projectskills --> deps
     approval --> offlinegit & interrupt
     changereport --> offlinegit & mask & deps
     offlinegit --> docker & pathpolicy

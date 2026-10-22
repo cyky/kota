@@ -26,6 +26,7 @@ import (
 	"kota/internal/engine"
 	"kota/internal/enginevm"
 	"kota/internal/models"
+	"kota/internal/nohistory"
 	"kota/internal/sandbox"
 )
 
@@ -316,12 +317,13 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 	// Only --no-history goes through offlinePaths: it would also ask the
 	// full-auto question, which these sessions never answer.
 	paths, key := lease.paths, lease.paths.Project
+	var copied nohistory.Copied
 	if sa.noHistory {
 		ag, err := loadAgent(sa.agent)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if paths, key, err = offlinePaths(sa, lease, ag, false, time.Now()); err != nil {
+		if paths, key, copied, err = offlinePaths(sa, lease, ag, false, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -334,6 +336,7 @@ func withSession(t *testing.T, sa sessionArgs, caches func(*sandbox.Compose), fn
 		t.Fatal(err)
 	}
 	defer sess.cleanup()
+	sess.copied = copied
 	if (sess.engine.Engine() != nil) != sa.engine {
 		t.Fatalf("Engine VM in the session: %v, want %v", sess.engine.Engine() != nil, sa.engine)
 	}

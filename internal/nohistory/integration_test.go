@@ -13,6 +13,7 @@ import (
 
 	"kota/internal/offlinegit"
 	"kota/internal/pathpolicy"
+	"kota/internal/projectskills"
 )
 
 const testImage = "kota-base:latest"
@@ -91,7 +92,7 @@ func TestCloneLeavesHistoryBehind(t *testing.T) {
 
 	copies := cacheDir(t)
 	dest := filepath.Join(copies, "app-copy")
-	if err := Clone(project, dest, dockerRunner(t)); err != nil {
+	if _, err := Clone(project, dest, dockerRunner(t), projectskills.ReadOnly); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,7 +133,8 @@ func TestCloneLeavesHistoryBehind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dest, ".git", "info", "exclude")); !strings.Contains(string(b), "/kota.yaml\n") {
+	// Read-only Project skills are taken from the project, like kota.yaml.
+	if b, _ := os.ReadFile(filepath.Join(dest, ".git", "info", "exclude")); !strings.Contains(string(b), "/kota.yaml\n") || !strings.Contains(string(b), "/.agents/skills/\n") {
 		t.Errorf("exclude = %q", b)
 	}
 
@@ -144,11 +146,175 @@ func TestCloneLeavesHistoryBehind(t *testing.T) {
 	}
 }
 
+// TestCloneTakesSkills checks the copy gets the project's Project skills as
+// they are in the working tree, uncommitted ones included, with their
+// permissions and links, and that a link committed at .agents is removed,
+// not followed.
+func TestCloneTakesSkills(t *testing.T) {
+	needDocker(t)
+	root := cacheDir(t)
+	project := filepath.Join(root, "app")
+	write := func(rel, content string, perm os.FileMode) {
+		t.Helper()
+		p := filepath.Join(project, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory next to the copy, which the committed link points at.
+	victim := filepath.Join(root, "copies", "victim")
+	if err := os.MkdirAll(filepath.Join(victim, "skills", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(victim, "skills", "keep", "SKILL.md"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write("README", "v1\n", 0o644)
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, project, "init", "-q")
+	if err := os.Symlink("../victim", filepath.Join(project, ".agents")); err != nil {
+		t.Fatal(err)
+	}
+	git(t, project, "add", ".")
+	git(t, project, "commit", "-q", "-m", "link")
+	// The working tree has real skills where the commit has the link.
+	if err := os.Remove(filepath.Join(project, ".agents")); err != nil {
+		t.Fatal(err)
+	}
+	write(".agents/skills/deploy/SKILL.md", "uncommitted\n", 0o644)
+	write(".agents/skills/deploy/run.sh", "#!/bin/sh\n", 0o755)
+	if err := os.Symlink("../deploy", filepath.Join(project, ".agents/skills/ship")); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(root, "copies", "app-copy")
+	if _, err := Clone(project, dest, dockerRunner(t), projectskills.ReadOnly); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dest, ".agents/skills/deploy/SKILL.md")); err != nil || string(b) != "uncommitted\n" {
+		t.Errorf("deploy/SKILL.md = %q, %v; want the working tree's", b, err)
+	}
+	if info, err := os.Stat(filepath.Join(dest, ".agents/skills/deploy/run.sh")); err != nil || info.Mode().Perm()&0o100 == 0 {
+		t.Errorf("run.sh: %v, %v; want it executable", info, err)
+	}
+	if target, err := os.Readlink(filepath.Join(dest, ".agents/skills/ship")); err != nil || target != "../deploy" {
+		t.Errorf("ship = %q, %v; want a link to ../deploy", target, err)
+	}
+	if info, err := os.Lstat(filepath.Join(dest, ".agents")); err != nil || !info.IsDir() {
+		t.Errorf(".agents in the copy: %v, %v; want a directory", info, err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(victim, "skills"))
+	if len(entries) != 1 || entries[0].Name() != "keep" {
+		t.Errorf("the committed link was followed: victim has %v", entries)
+	}
+
+	// Off, the copy keeps what the commit has.
+	off := filepath.Join(root, "copies", "off-copy")
+	if _, err := Clone(project, off, dockerRunner(t), projectskills.Off); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(filepath.Join(off, ".agents")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf(".agents in a copy without skills: %v, %v; want the committed link", info, err)
+	}
+}
+
+// TestCloneSkillsStayTheUsers checks the user's uncommitted skill edits,
+// deletions and new skills, which the copy takes from the working tree,
+// never become the Session's work: read-only, git in the copy can't stage
+// or commit them; writable, they aren't listed as uncommitted while the
+// agent's own changes are.
+func TestCloneSkillsStayTheUsers(t *testing.T) {
+	needDocker(t)
+	setup := func(t *testing.T) (project, dest string) {
+		root := cacheDir(t)
+		project = filepath.Join(root, "app")
+		write := func(rel, content string) {
+			t.Helper()
+			p := filepath.Join(project, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write("README", "v1\n")
+		write(".agents/skills/edited/SKILL.md", "committed\n")
+		write(".agents/skills/deleted/SKILL.md", "committed\n")
+		git(t, project, "init", "-q")
+		git(t, project, "add", ".")
+		git(t, project, "commit", "-q", "-m", "start")
+		write(".agents/skills/edited/SKILL.md", "the user's edit\n")
+		if err := os.RemoveAll(filepath.Join(project, ".agents/skills/deleted")); err != nil {
+			t.Fatal(err)
+		}
+		write(".agents/skills/new/SKILL.md", "the user's new skill\n")
+		if err := os.Mkdir(filepath.Join(root, "copies"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return project, filepath.Join(root, "copies", "app-copy")
+	}
+
+	t.Run("read-only", func(t *testing.T) {
+		project, dest := setup(t)
+		copied, err := Clone(project, dest, dockerRunner(t), projectskills.ReadOnly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(filepath.Join(dest, ".agents/skills/edited/SKILL.md")); string(b) != "the user's edit\n" {
+			t.Errorf("edited/SKILL.md = %q, want the working tree's", b)
+		}
+		if status := git(t, dest, "status", "--porcelain"); status != "" {
+			t.Errorf("git status lists the user's skills: %q", status)
+		}
+		os.WriteFile(filepath.Join(dest, "README"), []byte("v2\n"), 0o644)
+		git(t, dest, "add", "-A")
+		git(t, dest, "commit", "-q", "-am", "agent")
+		if files := git(t, dest, "show", "--name-only", "--format=", "HEAD"); files != "README" {
+			t.Errorf("the agent's commit has %q, want only README", files)
+		}
+		excludes := filepath.Join(cacheDir(t), "git-excludes")
+		os.WriteFile(excludes, nil, 0o444)
+		settle()
+		got, err := uncommittedChanges(dest, excludes, dockerRunner(t), copied)
+		if err != nil || len(got) != 0 {
+			t.Errorf("uncommitted = %q, %v; want none", got, err)
+		}
+	})
+
+	t.Run("writable", func(t *testing.T) {
+		project, dest := setup(t)
+		copied, err := Clone(project, dest, dockerRunner(t), projectskills.Writable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		excludes := filepath.Join(cacheDir(t), "git-excludes")
+		os.WriteFile(excludes, nil, 0o444)
+		settle()
+		if got, err := uncommittedChanges(dest, excludes, dockerRunner(t), copied); err != nil || len(got) != 0 {
+			t.Errorf("before the agent: uncommitted = %q, %v; want none", got, err)
+		}
+		// The agent's own skill.
+		os.MkdirAll(filepath.Join(dest, ".agents/skills/agent"), 0o755)
+		os.WriteFile(filepath.Join(dest, ".agents/skills/agent/SKILL.md"), []byte("the agent's\n"), 0o644)
+		settle()
+		got, err := uncommittedChanges(dest, excludes, dockerRunner(t), copied)
+		if err != nil || !slices.Equal(got, []string{"?? .agents/skills/agent/SKILL.md"}) {
+			t.Errorf("after the agent: uncommitted = %q, %v; want only its skill", got, err)
+		}
+	})
+}
+
 func TestInspectRefusesUnbornHead(t *testing.T) {
 	needDocker(t)
 	project := cacheDir(t)
 	git(t, project, "init", "-q")
-	if _, err := Inspect(project, dockerRunner(t)); err == nil || !strings.Contains(err.Error(), "no commits") {
+	if _, err := Inspect(project, dockerRunner(t), projectskills.Off); err == nil || !strings.Contains(err.Error(), "no commits") {
 		t.Errorf("unborn HEAD: %v", err)
 	}
 }
@@ -176,7 +342,7 @@ func TestInspectFindsWhatTheCopyLacks(t *testing.T) {
 	os.WriteFile(filepath.Join(project, "README"), []byte("v2\n"), 0o644)
 	os.WriteFile(filepath.Join(project, "kota.yaml"), []byte("engine: {}\n"), 0o644)
 
-	m, err := Inspect(project, dockerRunner(t))
+	m, err := Inspect(project, dockerRunner(t), projectskills.Off)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +370,7 @@ func returnSetup(t *testing.T) (project, dest, base, bundle string) {
 	git(t, project, "commit", "-q", "-m", "start")
 	base = git(t, project, "rev-parse", "HEAD")
 	dest = filepath.Join(cacheDir(t), "copy")
-	if err := Clone(project, dest, dockerRunner(t)); err != nil {
+	if _, err := Clone(project, dest, dockerRunner(t), projectskills.Off); err != nil {
 		t.Fatal(err)
 	}
 	out := cacheDir(t)
@@ -306,7 +472,7 @@ func TestUncommittedInCopy(t *testing.T) {
 	os.WriteFile(filepath.Join(dest, ".envrc"), nil, 0o644) // a placeholder
 	os.WriteFile(filepath.Join(dest, "kota.yaml"), []byte("{}\n"), 0o644)
 	os.WriteFile(filepath.Join(dest, "README"), []byte("changed\n"), 0o644)
-	got, err := uncommittedChanges(dest, excludes, dockerRunner(t))
+	got, err := uncommittedChanges(dest, excludes, dockerRunner(t), Copied{})
 	if err != nil {
 		t.Fatal(err)
 	}

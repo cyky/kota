@@ -23,11 +23,12 @@ import (
 
 // scriptedGateway is a model gateway that lists models.yaml's default and
 // answers each chat request with the next of replies, streamed, recording
-// the requests.
+// the requests, parsed and as sent.
 type scriptedGateway struct {
 	mu       sync.Mutex
 	replies  []string
 	requests []chatRequest
+	bodies   []string
 }
 
 // chatRequest is the part of a chat completion request the tests read.
@@ -94,6 +95,7 @@ func (g *scriptedGateway) start(t *testing.T) string {
 		json.Unmarshal(body, &req)
 		g.mu.Lock()
 		g.requests = append(g.requests, req)
+		g.bodies = append(g.bodies, string(body))
 		reply := textReply("nothing more scripted")
 		if len(g.replies) > 0 {
 			reply, g.replies = g.replies[0], g.replies[1:]

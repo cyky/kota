@@ -7,13 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
 	"kota/internal/changereport"
 	"kota/internal/hostdata"
 	"kota/internal/offlinegit"
+	"kota/internal/projectskills"
 )
 
 // Refs are the copy's refs at the start and the end of the Session, as a
@@ -42,13 +42,14 @@ type Outcome struct {
 // removes the copy unless something in it would be lost: uncommitted
 // changes, branches or tags not brought back, or commits that couldn't
 // be. commits are the copy's refs; excludes is the Session's excludes
-// file; the bundle goes in a new directory under scratch.
+// file; the bundle goes in a new directory under scratch; copied is what
+// Clone took from the project.
 //
 // Call it once the containers are gone and the copy's files are unlocked,
 // before the Session's cleanup: git reads the seeded files in the copy's
 // .git. git runs in offline containers only: in the copy only with the
 // bundle's directory writable, and in original without the copy.
-func Return(copy, original string, commits Refs, name string, start time.Time, run offlinegit.Runner, excludes, scratch string) Outcome {
+func Return(copy, original string, commits Refs, name string, start time.Time, run offlinegit.Runner, excludes, scratch string, copied Copied) Outcome {
 	o := Outcome{copy: copy}
 	before, after, ok := commits.Refs()
 	if !ok {
@@ -56,7 +57,7 @@ func Return(copy, original string, commits Refs, name string, start time.Time, r
 		o.keep = append(o.keep, o.none)
 		return o
 	}
-	uncommitted, err := uncommittedChanges(copy, excludes, run)
+	uncommitted, err := uncommittedChanges(copy, excludes, run, copied)
 	if err != nil {
 		o.keep = append(o.keep, fmt.Sprintf("could not read its status: %v", err))
 	} else if o.uncommitted = uncommitted; len(uncommitted) > 0 {
@@ -142,23 +143,67 @@ func branchName(name string, start time.Time) string {
 }
 
 // uncommittedChanges returns the copy's uncommitted changes, as git status
-// --porcelain lines, kota's own files left out. excludes is the
-// Session's excludes file, so placeholders and masks aren't listed. Read
-// it before the Session's cleanup: Docker's file sharing can show a
-// removed seeded file as still there.
-func uncommittedChanges(copy, excludes string, run offlinegit.Runner) ([]string, error) {
+// --porcelain lines, kota's own files left out: read-only Project skills,
+// and writable ones the Session didn't change, are too. excludes is the
+// Session's excludes file, so placeholders and masks aren't listed. Read it
+// before the Session's cleanup: Docker's file sharing can show a removed
+// seeded file as still there.
+func uncommittedChanges(copy, excludes string, run offlinegit.Runner, copied Copied) ([]string, error) {
+	skill, err := unchangedSkill(copy, copied)
+	if err != nil {
+		return nil, err
+	}
+	// Writable skills are told apart file by file, so an untracked folder
+	// that holds them is listed file by file too.
+	untracked := "--untracked-files=normal"
+	if copied.Skills == projectskills.Writable {
+		untracked = "--untracked-files=all"
+	}
 	out, err := offlinegit.Git(run, offlinegit.Job{ReadOnly: []string{copy, excludes}, Dir: copy},
-		"-c", "core.excludesFile="+excludes, "status", "--porcelain", "--untracked-files=normal")
+		"-c", "core.excludesFile="+excludes, "status", "--porcelain", untracked)
 	if err != nil {
 		return nil, fmt.Errorf("git status in the copy: %w", err)
 	}
 	var changes []string
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
-		if line != "" && !slices.Contains(ConfigFiles, strings.TrimSpace(line[min(3, len(line)):])) {
+		if line != "" && !own(line, skill) {
 			changes = append(changes, line)
 		}
 	}
 	return changes, nil
+}
+
+// unchangedSkill returns whether a path in the copy's Project skills is
+// kota's rather than the agent's: always when they were read-only, never
+// when the copy didn't take them, and when writable, if nothing at or under
+// the path differs from what Clone copied.
+func unchangedSkill(copy string, copied Copied) (func(p string) bool, error) {
+	switch {
+	case copied.Skills == projectskills.ReadOnly:
+		return func(string) bool { return true }, nil
+	case copied.Skills != projectskills.Writable || copied.skills == nil:
+		return func(string) bool { return false }, nil
+	}
+	files, err := changereport.SnapshotMatching(copy, []string{projectskills.Dir + "/"})
+	if err != nil {
+		return nil, fmt.Errorf("read the copy's %s: %w", projectskills.Dir, err)
+	}
+	now := files.Digests()
+	return func(p string) bool {
+		p = strings.TrimSuffix(p, "/")
+		under := func(k string) bool { return k == p || strings.HasPrefix(k, p+"/") }
+		for k, d := range now {
+			if under(k) && copied.skills[k] != d {
+				return false
+			}
+		}
+		for k := range copied.skills {
+			if _, ok := now[k]; under(k) && !ok {
+				return false
+			}
+		}
+		return true
+	}, nil
 }
 
 // exportScript writes the commits on HEAD that aren't on $2 to the bundle

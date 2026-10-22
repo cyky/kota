@@ -110,9 +110,11 @@ var skipDirs = []string{
 
 // Plan inspects project and returns its mounts: masks for paths matching
 // defaults (normally DefaultRules) followed by the project's IgnoreFile, and
-// the protections for files the host executes. It refuses projects where a
-// protected path goes through a symlink, since a mount there can't hold.
-func Plan(project string, defaults []string) (Layout, error) {
+// the protections for files the host executes. readOnly are more
+// directories to hold read-only, relative with forward slashes, such as the
+// Project skills. It refuses projects where a protected path goes through a
+// symlink, since a mount there can't hold.
+func Plan(project string, defaults []string, readOnly ...string) (Layout, error) {
 	project, err := filepath.EvalSymlinks(project)
 	if err != nil {
 		return Layout{}, err
@@ -135,6 +137,11 @@ func Plan(project string, defaults []string) (Layout, error) {
 	// decides what every later session runs on.
 	if err := p.file(projectimage.File); err != nil {
 		return Layout{}, err
+	}
+	for _, dir := range readOnly {
+		if err := p.dir(dir); err != nil {
+			return Layout{}, err
+		}
 	}
 	if err := p.git(); err != nil {
 		return Layout{}, err

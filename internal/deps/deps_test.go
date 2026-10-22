@@ -269,6 +269,10 @@ func TestConfigErrors(t *testing.T) {
 	if _, err := Detect(project(t, map[string]string{ConfigFile: "engine:\n  images: [postgres:16-alpine]\n"}), Options{}); err != nil {
 		t.Errorf("config with an engine section: %v", err)
 	}
+	// So is the skills key package projectskills'.
+	if _, err := Detect(project(t, map[string]string{ConfigFile: "skills: true\n"}), Options{}); err != nil {
+		t.Errorf("config with a skills key: %v", err)
+	}
 }
 
 func TestSymlinkedDependencyDirRefused(t *testing.T) {

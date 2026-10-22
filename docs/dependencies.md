@@ -21,6 +21,8 @@ prep:
 
 The detected fetches (see [Shared caches](#shared-caches)) still run before the command.
 
+`kota.yaml` also holds the project's [Engine VM](engine-vm.md) images and whether sessions load its [Project skills](sessions.md#project-skills) (`skills: true`). `prep` keeps read-only Project skills read-only too, so an install script can't plant one.
+
 ## Private registries
 
 `prep` reads the `.npmrc` at the project root, so its registry settings and auth tokens apply to npm, pnpm and yarn 1. It is mounted read-only as it is, in both phases: install scripts can read it, including those of registry dependencies, but nothing in `prep` can change it.

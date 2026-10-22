@@ -75,12 +75,12 @@ var pi = adapter{
 	extensions: piAgentDir + "/extensions",
 	env:        piEnv(piAgentDir, piSessionDir),
 	command:    []string{"pi"},
-	render: func(c models.Catalog, _ bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error) {
+	render: func(c models.Catalog, _ bool, keyEnv, skills string, ov map[string]map[string]any) ([][]byte, error) {
 		base, err := assets.Agents.ReadFile(piBaseSettings)
 		if err != nil {
 			return nil, err
 		}
-		s := piSettings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, APIKeyEnv: keyEnv, Override: ov[piSettingsOverride.Name]}
+		s := piSettings{GatewayURL: sandbox.AgentGatewayURL(), Models: c, APIKeyEnv: keyEnv, Skills: skills, Override: ov[piSettingsOverride.Name]}
 		settings, err := renderPiSettings(base, s)
 		if err != nil {
 			return nil, err
@@ -119,6 +119,10 @@ type piSettings struct {
 	// APIKeyEnv, when set, names the environment variable holding the
 	// gateway key. The config refers to it, so the key isn't written out.
 	APIKeyEnv string
+	// Skills, when set, is the in-sandbox directory of the Project skills.
+	// pi loads a project's .agents/skills only when it trusts the project,
+	// which would load its .pi/ too, so the directory is listed here.
+	Skills string
 	// Override is the user's Agent override of settings.json, from
 	// piSettingsOverride, or nil.
 	Override map[string]any
@@ -165,7 +169,8 @@ var piSettingsOverride = override.File{
 
 // renderPiSettings returns the settings.json content for a session: base
 // (the versioned defaults, including project trust), then the user's
-// override, then the default provider and model.
+// override, then the default provider and model, and the Project skills
+// directory.
 func renderPiSettings(base []byte, s piSettings) ([]byte, error) {
 	cfg := map[string]any{}
 	if err := json.Unmarshal(base, &cfg); err != nil {
@@ -174,6 +179,9 @@ func renderPiSettings(base []byte, s piSettings) ([]byte, error) {
 	cfg = override.Merge(cfg, s.Override)
 	cfg["defaultProvider"] = providerID
 	cfg["defaultModel"] = s.Models.Default
+	if s.Skills != "" {
+		cfg["skills"] = []string{s.Skills}
+	}
 	return json.MarshalIndent(cfg, "", "  ")
 }
 

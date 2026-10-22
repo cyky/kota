@@ -136,7 +136,7 @@ func TestReturn(t *testing.T) {
 				t.Cleanup(func() { os.Chmod(dir, 0o755) })
 			}
 			git := tc.git
-			o := Return(copy, original, tc.refs, "pi", start, git.run, filepath.Join(scratch, "git-excludes"), scratch)
+			o := Return(copy, original, tc.refs, "pi", start, git.run, filepath.Join(scratch, "git-excludes"), scratch, Copied{})
 
 			if git.exported != tc.exported || git.imported != (tc.exported && tc.git.exportErr == nil) {
 				t.Errorf("exported %v, imported %v", git.exported, git.imported)
@@ -185,7 +185,7 @@ func TestReturnReportCapsUncommitted(t *testing.T) {
 	a := strings.Repeat("a", 40)
 	same := changereport.Refs{Head: a, Tips: map[string]string{"refs/heads/main": a}}
 	git := returnGit{status: strings.Join(status, "\n") + "\n"}
-	o := Return(t.TempDir(), t.TempDir(), refs{same, same, true}, "pi", time.Now(), git.run, "x", t.TempDir())
+	o := Return(t.TempDir(), t.TempDir(), refs{same, same, true}, "pi", time.Now(), git.run, "x", t.TempDir(), Copied{})
 	var out strings.Builder
 	o.Report(&out)
 	lines := strings.Split(out.String(), "\n")

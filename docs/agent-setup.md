@@ -60,7 +60,7 @@ Refused, under their v1 or v2 names:
 - the gateway wiring and the approval model: `provider`, `model`, `small_model`, `enabled_providers`, `permission`, `tools`, `policies`, `websearch`;
 - `share`, `autoupdate`, `server` and `experimental`.
 
-`opencode debug config` in `kota shell` shows the config opencode reads.
+A project's own skills load through its `kota.yaml` instead, read-only: see [Project skills](sessions.md#project-skills). kota sets `skills` itself then. `opencode debug config` in `kota shell` shows the config opencode reads.
 
 ### pi/settings.json
 
@@ -72,6 +72,8 @@ Refused:
 - anything that runs commands: `shellPath`, `shellCommandPrefix`, `npmCommand`, `externalEditor`;
 - trust, telemetry and the network route: `defaultProjectTrust`, `enableInstallTelemetry`, `enableAnalytics`, `httpProxy`, `transport`;
 - what kota sets: `defaultProvider`, `defaultModel`, `enabledModels`, `defaultTools`, `sessionDir`.
+
+As for opencode, a project's own skills load through its `kota.yaml`, and kota sets `skills` then ([Project skills](sessions.md#project-skills)).
 
 ### pi/keybindings.json
 

@@ -11,9 +11,10 @@ The agent can't plant code that git, direnv or kota runs on the host later. Thes
 - each submodule's hooks, config and `.git` pointer file;
 - every file in the project that git config includes (`include.path`, `includeIf.*.path`), from any config level and through any chain of includes, including conditional includes whose condition doesn't hold now, since the agent could make it hold;
 - `.envrc` (direnv);
-- kota's own files: `kota.yaml`, `.kotaignore` and `kota.Dockerfile`.
+- kota's own files: `kota.yaml`, `.kotaignore` and `kota.Dockerfile`;
+- the `.agents/skills` directory, when `kota.yaml` loads the [Project skills](sessions.md#project-skills) and the session wasn't started with `--skills-writable`. A symlink inside it whose target isn't inside it, or is absolute, is refused too, and a missing one is created empty for the session rather than held by a placeholder.
 
-Each is mounted read-only over itself, and locked on the host for the session (see [Locked files on the host](#locked-files-on-the-host)). A missing one (no `.envrc`, no hooks directory, no `commondir`) gets an empty read-only placeholder for the session, so the agent can't create it either, and the placeholder is removed from the host afterwards. `.git`, and every other directory on the way to a protected path, is mounted over itself too, so it can't be renamed away and replaced. A protected path with a symlink anywhere along it is refused, because a read-only mount can't hold it in place. The probes check each of these mounts before the session.
+Each is mounted read-only over itself, and files are locked on the host for the session (see [Locked files on the host](#locked-files-on-the-host)). A missing one (no `.envrc`, no hooks directory, no `commondir`) gets an empty read-only placeholder for the session, so the agent can't create it either, and the placeholder is removed from the host afterwards. `.git`, and every other directory on the way to a protected path, is mounted over itself too, so it can't be renamed away and replaced. A protected path with a symlink anywhere along it is refused, because a read-only mount can't hold it in place. The probes check each of these mounts before the session.
 
 The shared Go module and corepack caches, which every project's sessions use, are read-only as well, so the agent can't plant code in another project's dependencies; the probes check them too, and `kota check` lists them. Only `prep`'s fetch step writes them (see [Shared caches](dependencies.md#shared-caches)).
 
@@ -85,7 +86,8 @@ Some files that run things can't be locked without breaking normal work, so kota
 - manifests and build files: `package.json`, `go.mod`, `Makefile` (and `makefile`, `GNUmakefile`), `build.rs`, `justfile` (and `Justfile`, `.justfile`), `Taskfile.yml` and `Taskfile.yaml`, `*.nix`, `flake.lock` and the `.cargo/` directory;
 - environment and tool versions: `.envrc`, mise's `mise.toml`, `.mise.toml`, `mise.local.toml` and `.mise.local.toml`, and `.tool-versions`;
 - git and hooks: `.gitattributes`, `.gitmodules`, `.pre-commit-config.yaml`, and the `.husky/` and `.githooks/` directories;
-- editors and CI: the `.vscode/`, `.idea/`, `.devcontainer/` and `.github/workflows/` directories.
+- editors and CI: the `.vscode/`, `.idea/`, `.devcontainer/` and `.github/workflows/` directories;
+- agent skills: the `.agents/skills/` directory at the project root, whatever `kota.yaml` says. Other agents you run on the host load it, and a session's agent does when the project loads its [Project skills](sessions.md#project-skills).
 
 Content is compared by hash, so restoring a timestamp doesn't hide an edit; permission changes and symlink targets count too. Under each file, the report says what changed or how to see it:
 

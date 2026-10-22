@@ -89,7 +89,7 @@ func TestOpencodeConfigWithoutSmallModel(t *testing.T) {
 	p := prepare(t, load(t, "opencode", nil), Note{})
 	c := catalog
 	c.Small = ""
-	if err := p.Configure(c, false, ""); err != nil {
+	if err := p.Configure(c, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	var cfg opencodeRendered

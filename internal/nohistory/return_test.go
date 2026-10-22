@@ -10,6 +10,7 @@ import (
 
 	"kota/internal/changereport"
 	"kota/internal/offlinegit"
+	"kota/internal/projectskills"
 )
 
 func TestBranchName(t *testing.T) {
@@ -37,22 +38,85 @@ func TestUnreturned(t *testing.T) {
 	}
 }
 
+// TestUncommittedLeavesOutConfigFiles checks kota's own files never count
+// as the Session's work, and read-only Project skills don't either, while
+// writable ones do unless the Session left them as copied.
 func TestUncommittedLeavesOutConfigFiles(t *testing.T) {
-	var job offlinegit.Job
-	run := func(j offlinegit.Job) (string, error) {
-		job = j
-		return " M src/a.go\n M kota.yaml\n?? new.txt\n", nil
+	const status = " M src/a.go\n M kota.yaml\n?? new.txt\n M .agents/skills/deploy/SKILL.md\n?? .agents/skills/new/\n?? .agents/notes.md\n" +
+		"R  .agents/skills/a -> src/a\n?? \".agents/skills/caf\\303\\251/SKILL.md\"\n"
+	skillLines := []string{" M .agents/skills/deploy/SKILL.md", "?? .agents/skills/new/"}
+	// A rename out of the skills is the agent's; a quoted skill path isn't.
+	rest := []string{"?? .agents/notes.md", "R  .agents/skills/a -> src/a"}
+	quoted := `?? ".agents/skills/caf\303\251/SKILL.md"`
+	all := slices.Concat([]string{" M src/a.go", "?? new.txt"}, skillLines, rest, []string{quoted})
+	cases := map[projectskills.Mode][]string{
+		projectskills.Off:      all,
+		projectskills.ReadOnly: slices.Concat([]string{" M src/a.go", "?? new.txt"}, rest),
+		// Without a record of what was copied, every skill line is kept.
+		projectskills.Writable: all,
 	}
-	got, err := uncommittedChanges("/copies/app", "/sessions/x/git-excludes", run)
+	for mode, want := range cases {
+		var job offlinegit.Job
+		run := func(j offlinegit.Job) (string, error) {
+			job = j
+			return status, nil
+		}
+		got, err := uncommittedChanges("/copies/app", "/sessions/x/git-excludes", run, Copied{Skills: mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%v: uncommitted\n got %q\nwant %q", mode, got, want)
+		}
+		if !slices.Equal(job.ReadOnly, []string{"/copies/app", "/sessions/x/git-excludes"}) || job.Writable != "" ||
+			!slices.Contains(job.Cmd, "core.excludesFile=/sessions/x/git-excludes") {
+			t.Errorf("job %+v", job)
+		}
+	}
+}
+
+// TestUncommittedWritableSkills checks the user's uncommitted skills,
+// copied in and left alone, aren't the Session's work, while the skills
+// the agent changed, added or deleted are.
+func TestUncommittedWritableSkills(t *testing.T) {
+	copy := t.TempDir()
+	write := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(copy, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".agents/skills/user/SKILL.md", "the user's, uncommitted\n")
+	write(".agents/skills/deploy/SKILL.md", "the user's edit\n")
+	write(".agents/skills/gone/SKILL.md", "x\n")
+	files, err := changereport.SnapshotMatching(copy, []string{projectskills.Dir + "/"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{" M src/a.go", "?? new.txt"}; !slices.Equal(got, want) {
-		t.Errorf("uncommitted = %q, want %q", got, want)
+	copied := Copied{Skills: projectskills.Writable, skills: files.Digests()}
+	// The agent's work.
+	write(".agents/skills/deploy/SKILL.md", "the agent's edit\n")
+	write(".agents/skills/added/SKILL.md", "new\n")
+	if err := os.RemoveAll(filepath.Join(copy, ".agents/skills/gone")); err != nil {
+		t.Fatal(err)
 	}
-	if !slices.Equal(job.ReadOnly, []string{"/copies/app", "/sessions/x/git-excludes"}) || job.Writable != "" ||
-		!slices.Contains(job.Cmd, "core.excludesFile=/sessions/x/git-excludes") {
-		t.Errorf("job %+v", job)
+	const status = "?? .agents/skills/user/SKILL.md\n M .agents/skills/deploy/SKILL.md\n?? .agents/skills/added/SKILL.md\n D .agents/skills/gone/SKILL.md\n"
+	var job offlinegit.Job
+	run := func(j offlinegit.Job) (string, error) { job = j; return status, nil }
+	got, err := uncommittedChanges(copy, "/sessions/x/git-excludes", run, copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{" M .agents/skills/deploy/SKILL.md", "?? .agents/skills/added/SKILL.md", " D .agents/skills/gone/SKILL.md"}
+	if !slices.Equal(got, want) {
+		t.Errorf("uncommitted\n got %q\nwant %q", got, want)
+	}
+	if !slices.Contains(job.Cmd, "--untracked-files=all") {
+		t.Errorf("untracked folders aren't listed file by file: %q", job.Cmd)
 	}
 }
 

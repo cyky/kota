@@ -56,6 +56,10 @@ _Avoid_: harness, tool, assistant
 A user's own settings for an agent (keybindings, theme and similar), kept on the host in the kota config dir in the agent's own file format, and layered over kota's bundled agent config in every **Session**. Only settings kota allows can be overridden; without an override file, the bundled config is used as is.
 _Avoid_: user config, custom config, project config
 
+**Project skills**:
+The agent skills a project keeps in `.agents/skills`, which **Agents** load in its **Sessions** only when the project's `kota.yaml` opts in.
+_Avoid_: repo skills, local skills, custom skills
+
 ## Relationships
 
 - A **Session** runs in exactly one **Sandbox**, for exactly one project
@@ -76,6 +80,7 @@ _Avoid_: user config, custom config, project config
 - Only the **No-history copy**'s `HEAD` becomes a **Returned branch**. The clone and the return run in offline containers, and the return never runs git in the copy with the original writable
 
 - An **Agent override** belongs to the user, not a project: it applies to every **Session** in every project, and nothing the agent writes in a **Session** can change it
+- A project decides whether its **Project skills** load; only the user, when starting a **Session**, can make them writable. Otherwise the agent can't change them, so one **Session** can't plant skills for the next
 
 ## Example dialogue
 

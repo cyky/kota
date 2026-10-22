@@ -53,7 +53,7 @@ When a session starts with a different model than another running session on the
 
 `kota shell [dir]` opens interactive Bash in `/workspace`, without an agent, in the same sandbox as `run`: the same image, mounts, masks, dependency volumes, gateway access and probes. The change report runs when you exit. Startup skips Bash profile and rc files.
 
-`--agent pi` selects pi's config and state volume (opencode is the default). `--model`, `--gateway`, `--ro`, `--no-engine` and `--no-history` work as for `run`; `--auto`, `--unsafe-skip-check` and a command after `--` don't. The gateway must be available, since the agent's config is rendered as for `run`.
+`--agent pi` selects pi's config and state volume (opencode is the default). `--model`, `--gateway`, `--ro`, `--no-engine`, `--no-history` and `--skills-writable` work as for `run`; `--auto`, `--unsafe-skip-check` and a command after `--` don't. The gateway must be available, since the agent's config is rendered as for `run`.
 
 ## Project and `--ro` paths
 
@@ -106,12 +106,28 @@ The agent container is attached only to an internal Docker network with no route
 
 The agent's config is versioned in this repo and rendered for each session with the gateway provider and models, then mounted read-only. Your host's agent config (`~/.config/opencode`, `~/.pi`) is never mounted, and the agent's `HOME` is an empty tmpfs thrown away after the session.
 
-The project can't change the agent's config either, since the agent could write it there for a later session:
+The project can't change the agent's config either. The agent can write anything in the project, so a config there could be one it wrote in an earlier session, after a prompt injection say, and a repository you clone can ship one too. Such a config could allow every edit and command without asking, load plugins, MCP servers or commands that run code in the agent itself, or change the provider kota sets. So:
 
-- opencode gets its config at `/etc/kota/opencode.json`, and ignores the project's `opencode.json` and `.opencode/` directory, which could change its own permissions.
-- pi gets `settings.json` and `models.json` in its config directory `~/.pi/agent`, its own tmpfs (writable because pi creates lock files there). The settings set `defaultProjectTrust` to `never`, so pi doesn't load the project's `.pi/` (settings, extensions, skills, system prompt), yours included. pi's sessions are stored in its state volume through `PI_CODING_AGENT_SESSION_DIR`, which a `sessionDir` in the project can't override.
+- opencode gets its config at `/etc/kota/opencode.json`, and runs with `OPENCODE_DISABLE_PROJECT_CONFIG`, so it ignores the project's `opencode.json`, `.opencode/`, `.claude/` and `.agents/`. In opencode 2 that one switch turns off its whole search of the project, skills included.
+- pi gets `settings.json` and `models.json` in its config directory `~/.pi/agent`, its own tmpfs (writable because pi creates lock files there). The settings set `defaultProjectTrust` to `never`, so pi doesn't load the project's `.pi/` (settings, extensions, skills, system prompt) or `.agents/skills`, yours included. pi's sessions are stored in its state volume through `PI_CODING_AGENT_SESSION_DIR`, which a `sessionDir` in the project can't override.
 
 `AGENTS.md` and other context files in the project still load. What kota tells the agents, and your own preferences for them, are in [The agents](agent-setup.md).
+
+## Project skills
+
+A project's agent skills in `.agents/skills` load when its `kota.yaml` opts in:
+
+```yaml
+skills: true
+```
+
+kota then lists `/workspace/.agents/skills` in the config it renders for opencode and pi, and nothing else from the project: project config, `.opencode/`, `.claude/`, `.pi/` and pi's extensions stay off. `run`, `shell` and `check` print `project skills:` with the setting. `skills` takes `true` or `false`; anything else stops them with the file. A `kota.yaml` that can't be parsed doesn't stop a session, as for the [dependencies](dependencies.md): the skills don't load then, `.agents/skills` stays read-only, and a warning says so.
+
+The skills are read-only in the session (and in `prep`), so the agent can't plant or change one that a later session loads, the way it could with a writable folder. It is protected like `kota.yaml` ([Protecting the host](protections.md#git-hooks-and-config)). A missing folder is created empty for the session and removed afterwards if it's still empty, so the rest of `.agents/` stays writable. A symlink on the way to it is refused, and so is a symlink inside it whose target isn't inside `.agents/skills` (a skill linked from `tools/skills/`, say), or is an absolute path: the agents follow links, a read-only mount holds the link but not its target, and a host path doesn't resolve the same in the sandbox. This applies to `check` and `prep` too, so replace such a link with a copy or a relative link inside the folder. Its files aren't locked on the host, so you can edit skills there during a session, and the session sees the edits. The agent isn't told the folder is read-only; it finds out when a write fails.
+
+To let the agent create or edit skills for one session, start it with `--skills-writable` (`run` and `shell`). Only you can: `kota.yaml` can't make the folder writable, so a repository you clone can load its skills, which is no more than its `AGENTS.md` can do, but can't let one session change what the next loads. `--skills-writable` without `skills: true` is refused, since it would do nothing. Either way, changes to `.agents/skills` are in the [change report](protections.md#changed-files-that-run-code), as are skills changed in a commit but not in the working tree.
+
+A `--no-history` session takes `.agents/skills` from your working tree, as it does `kota.yaml`, so it sees uncommitted skills too (see [Sessions without git history](no-history.md#before-the-session)).
 
 ## Agent state
 

@@ -38,8 +38,9 @@ func project(t *testing.T) string {
 		"package.json", "Makefile", "flake.nix", "flake.lock", ".envrc",
 		".github/workflows/ci.yml", ".vscode/tasks.json", ".husky/pre-commit",
 		".githooks/pre-push", ".devcontainer/devcontainer.json",
+		".agents/skills/deploy/SKILL.md",
 		"web/package.json", "nix/shell.nix", "sub/.envrc",
-		"main.go", "README.md", ".github/CODEOWNERS",
+		"main.go", "README.md", ".github/CODEOWNERS", ".agents/notes.md",
 	} {
 		write(t, root, rel, "original "+rel)
 	}
@@ -58,6 +59,7 @@ func TestSnapshotRecordsOnlyWatched(t *testing.T) {
 	}
 	slices.Sort(got)
 	want := []string{
+		".agents/skills/deploy/SKILL.md",
 		".devcontainer/devcontainer.json", ".envrc", ".githooks/pre-push",
 		".github/workflows/ci.yml", ".husky/pre-commit", ".vscode/tasks.json",
 		"Makefile", "flake.lock", "flake.nix", "nix/shell.nix",
@@ -316,7 +318,7 @@ func TestSnapshotLargeProject(t *testing.T) {
 	if d := time.Since(start); d > 2*time.Second {
 		t.Errorf("snapshot took %s", d)
 	}
-	if len(s) != 13 {
-		t.Errorf("snapshot has %d files, want 13", len(s))
+	if len(s) != 14 {
+		t.Errorf("snapshot has %d files, want 14", len(s))
 	}
 }

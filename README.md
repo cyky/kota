@@ -47,6 +47,7 @@ kota shell [dir]                   # interactive Bash in the same offline sandbo
 kota shell --ro ../specs [dir]     # shell with a read-only reference mount
 kota run --no-engine [dir]         # without the project's Engine VM (also for shell)
 kota run --no-history [dir]        # on a copy that keeps only the last commit (also for shell)
+kota run --skills-writable [dir]   # let the agent edit .agents/skills (also for shell)
 kota check [dir]                   # show mounts, the Engine VM and run the containment probes
 kota clean [dir]                   # remove project state/dependency volumes and engine data after confirmation
 kota clean --shared-caches [dir]   # also reset shared caches; requires all sessions idle
@@ -69,7 +70,7 @@ The agent can use every model the gateway lists. [`assets/models.yaml`](assets/m
 
 ### Your own settings
 
-Your own working style for the agent, and agent settings such as keybindings, go in `~/.config/kota/`; see [The agents](docs/agent-setup.md). So do your named gateways, in `config.yaml` there; see [Sessions](docs/sessions.md#gateway). A project's own settings go in `kota.yaml`, `.kotaignore` and `kota.Dockerfile` at its root; see [Dependencies](docs/dependencies.md) and [Protecting the host](docs/protections.md).
+Your own working style for the agent, and agent settings such as keybindings, go in `~/.config/kota/`; see [The agents](docs/agent-setup.md). So do your named gateways, in `config.yaml` there; see [Sessions](docs/sessions.md#gateway). A project's own settings go in `kota.yaml`, `.kotaignore` and `kota.Dockerfile` at its root; see [Dependencies](docs/dependencies.md) and [Protecting the host](docs/protections.md). `skills: true` in `kota.yaml` loads the project's agent skills from `.agents/skills`, read-only; see [Project skills](docs/sessions.md#project-skills).
 
 ## How it works
 
@@ -78,7 +79,7 @@ kota runs the agent in a container on an internal Docker network whose only way 
 ## Documentation
 
 - [The sandbox](docs/sandbox.md): the threat model, what the agent can and can't do, and the limits and risks
-- [Sessions](docs/sessions.md): `shell`, paths, the gateway key, network, approval, models, agent config and state, probes and cleanup
+- [Sessions](docs/sessions.md): `shell`, paths, the gateway key, network, approval, models, agent config, Project skills and state, probes and cleanup
 - [Protecting the host](docs/protections.md): git hook and config protection, secret masks and the change report
 - [The agents](docs/agent-setup.md): what the agent is told, your own agent settings, and pi's `ticket_done`
 - [Sessions without git history](docs/no-history.md): `--no-history`, and what it doesn't hide

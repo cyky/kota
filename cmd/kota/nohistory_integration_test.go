@@ -193,7 +193,7 @@ func noHistorySession(t *testing.T, project, gateway, script string) noHistoryRu
 		// As in cmdOffline.
 		sess.unlock()
 		ret := nohistory.Return(sess.project, sess.key, result, returnName(sa, agent.Default), run.start,
-			offlineGit, filepath.Join(sess.sessionDir, "git-excludes"), sess.sessionDir)
+			offlineGit, filepath.Join(sess.sessionDir, "git-excludes"), sess.sessionDir, sess.copied)
 		result.Report(&report)
 		ret.Report(&report)
 	})

@@ -27,13 +27,14 @@ The copy holds only what is committed. Before it is made, kota lists what won't 
 - submodules, which are empty directories in the copy;
 - files stored in Git LFS, which are pointer files in the copy.
 
-Ignored files (`.env`, local overrides) aren't listed, and aren't in the copy either.
+Ignored files (`.env`, local overrides) aren't listed, and aren't in the copy either. kota's own files aren't listed, since the copy takes them from the project (see below), and neither are changes in `.agents/skills` when the project loads its [Project skills](sessions.md#project-skills). An untracked `.agents/` whose only content is the skills is still listed as `?? .agents/`, because git shows the folder, not what is in it.
 
 ## During the session
 
 The session runs on the copy with the usual masks, protections, probes and Engine VM. Everything else belongs to the original project:
 
 - `.kotaignore`, `kota.yaml` and `kota.Dockerfile` are taken from it, even when they aren't committed, so an untracked `.kotaignore` still masks a tracked secret in the copy. They are read-only in the copy, as in a normal session.
+- With `skills: true`, `.agents/skills` is taken from it too, uncommitted skills included, so `run` and `run --no-history` see the same skills. Your uncommitted skills never become the session's work. Read-only, git in the copy ignores them: new ones are excluded, and tracked ones you edited or deleted are marked skip-worktree, so `git add -A` and `git commit -a` leave them out. With `--skills-writable` they are ordinary files in the copy, and kota records them as copied: a skill the agent adds, changes or deletes is its uncommitted work if it doesn't commit it, which keeps the copy, while the ones it left alone aren't. The agent's skill changes come back only as commits on the branch.
 - `prep` runs on the original as usual, and the session uses its dependency volumes, prep record, project image, Engine VM and git identity.
 - The project's lease is held for the whole session.
 
@@ -54,5 +55,5 @@ The copy is then deleted, unless something in it would be lost: uncommitted chan
 
 git never runs on the host against the project or the copy:
 
-- **The copy** is made by `git clone --depth 1` in a throwaway container of the base image, offline, with the project mounted read-only. It lives in `copies/` in kota's data dir (`~/Library/Caches/kota/copies/<project>-<YYYY-MM-DDTHHMMSS>` on macOS), and must pass the same path rules as a project, with that directory as its allowed root.
+- **The copy** is made by `git clone --depth 1` in a throwaway container of the base image, offline, with the project mounted read-only. The Project skills are copied into it in the same container, so the Docker VM sees them as written (a folder replaced from the host could be mounted as the VM's stale view of the old one); a link the commit holds at `.agents` or `.agents/skills` is removed, not followed. It lives in `copies/` in kota's data dir (`~/Library/Caches/kota/copies/<project>-<YYYY-MM-DDTHHMMSS>` on macOS), and must pass the same path rules as a project, with that directory as its allowed root.
 - **The return** uses two more throwaway containers, offline, because the agent controlled the copy, its git config and hooks included. The first runs `git bundle create` in the copy, mounted read-only, and can write only an empty directory for the bundle. The second fetches the bundle into your repository with only its git directory writable, without the copy, and with hooks, fsmonitor and automatic gc off. It checks the objects (`transfer.fsckObjects`), and makes the branch only if it descends from the commit the copy was made from and doesn't exist yet.

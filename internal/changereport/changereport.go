@@ -60,6 +60,10 @@ var Watched = []string{
 	".devcontainer/",
 	".husky/",
 	".githooks/",
+	// Agent skills: other agents on the host load them, and a session's
+	// agent loads them when the project opts in. Their instructions and
+	// scripts run what they say.
+	".agents/skills/",
 }
 
 // skipDirs are not searched: dependency and build output, which is large and

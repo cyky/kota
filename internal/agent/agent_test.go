@@ -79,7 +79,7 @@ func prepare(t *testing.T, a *Agent, note Note) *Prepared {
 func configure(t *testing.T, name string, overrides map[string]string, auto bool, keyEnv string) *Prepared {
 	t.Helper()
 	p := prepare(t, load(t, name, overrides), Note{})
-	if err := p.Configure(catalog, auto, keyEnv); err != nil {
+	if err := p.Configure(catalog, auto, keyEnv, ""); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -311,7 +311,55 @@ func TestPrepareRefusesExistingDir(t *testing.T) {
 }
 
 func TestConfigureBeforePrepare(t *testing.T) {
-	if err := (&Prepared{}).Configure(catalog, false, ""); err == nil {
+	if err := (&Prepared{}).Configure(catalog, false, "", ""); err == nil {
 		t.Error("Configure without Prepare succeeded")
 	}
+}
+
+// TestConfigureProjectSkills checks each agent's config lists the Project
+// skills directory when the session has one, and sets no skills otherwise,
+// while project trust stays off.
+func TestConfigureProjectSkills(t *testing.T) {
+	const dir = "/workspace/.agents/skills"
+	configs := map[string]string{"opencode": opencodeConfigPath, "pi": piAgentDir + "/settings.json"}
+	for name, target := range configs {
+		for _, skills := range []string{"", dir} {
+			t.Run(name+" "+skills, func(t *testing.T) {
+				p := prepare(t, load(t, name, nil), Note{})
+				if err := p.Configure(catalog, false, "", skills); err != nil {
+					t.Fatal(err)
+				}
+				var cfg map[string]any
+				mountedJSON(t, p, target, &cfg)
+				got, set := cfg["skills"]
+				switch {
+				case skills == "" && set:
+					t.Errorf("skills = %v without Project skills", got)
+				case skills != "" && !slices.Equal(toStrings(got), []string{dir}):
+					t.Errorf("skills = %v, want [%s]", got, dir)
+				}
+				if name == "pi" && cfg["defaultProjectTrust"] != "never" {
+					t.Errorf("defaultProjectTrust = %v, want never", cfg["defaultProjectTrust"])
+				}
+			})
+		}
+	}
+	env := load(t, "opencode", nil).ad.env
+	if env["OPENCODE_DISABLE_PROJECT_CONFIG"] != "1" {
+		t.Errorf("opencode loads the project's config: %v", env)
+	}
+}
+
+// toStrings is v as a list of strings, or nil if it isn't one.
+func toStrings(v any) []string {
+	list, _ := v.([]any)
+	var out []string
+	for _, e := range list {
+		s, ok := e.(string)
+		if !ok {
+			return nil
+		}
+		out = append(out, s)
+	}
+	return out
 }

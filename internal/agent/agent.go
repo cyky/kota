@@ -48,9 +48,10 @@ type adapter struct {
 	// loaded overrides, for an agent that takes its config inline.
 	overrideEnv func(ov map[string]map[string]any) (map[string]string, error)
 	// render returns the content of each of configs, in order. keyEnv,
-	// when set, names the variable holding the gateway key. ov holds the
+	// when set, names the variable holding the gateway key; skills, when
+	// set, is the in-sandbox directory of the Project skills. ov holds the
 	// loaded overrides by override.File.Name, without those not found.
-	render func(c models.Catalog, auto bool, keyEnv string, ov map[string]map[string]any) ([][]byte, error)
+	render func(c models.Catalog, auto bool, keyEnv, skills string, ov map[string]map[string]any) ([][]byte, error)
 	// notePath is where the agent reads kota's instructions, mounted
 	// read-only, with noteScratch around it.
 	notePath    string
@@ -219,12 +220,13 @@ func (a *Agent) Prepare(dir string, note Note) (*Prepared, error) {
 // Configure writes the agent's config for the models the gateway offers,
 // over the files Prepare created. auto approves edits and commands, for an
 // agent that asks; keyEnv, when set, names the variable holding the gateway
-// key.
-func (p *Prepared) Configure(c models.Catalog, auto bool, keyEnv string) error {
+// key; skills, when set, is the in-sandbox directory of the Project skills
+// the agent loads. Nothing else of the project's config is loaded.
+func (p *Prepared) Configure(c models.Catalog, auto bool, keyEnv, skills string) error {
 	if p.agent == nil {
 		return errors.New("agent config written before Prepare")
 	}
-	contents, err := p.agent.ad.render(c, auto, keyEnv, p.agent.overrides)
+	contents, err := p.agent.ad.render(c, auto, keyEnv, skills, p.agent.overrides)
 	if err != nil {
 		return err
 	}

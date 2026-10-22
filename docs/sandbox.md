@@ -10,7 +10,7 @@ The agent runs as a process inside a container, with a shell, and can write any 
 
 | | Inside the sandbox |
 | --- | --- |
-| The project | Read-write at `/workspace`, except secrets, git hooks and config, and kota's own files |
+| The project | Read-write at `/workspace`, except secrets, git hooks and config, kota's own files, and the Project skills when the project loads them |
 | Secrets in the project (`.env`, keys, `.npmrc`, `.ssh/`, ...) | Masked: read as empty, can't be written |
 | The project's git history | Readable, unless the session uses `--no-history` |
 | `--ro` paths | Read-only at `/ro/<name>`, not masked |
@@ -71,7 +71,9 @@ The most indirect way to escape a sandbox is to write a file that the host runs 
 
 Missing ones get a read-only placeholder for the session, so the agent can't create them either. Each directory on the way to a protected path is pinned too, so it can't be renamed away and replaced. Git still works inside the sandbox.
 
-Files that run things but must stay editable (`package.json`, `Makefile`, `.vscode/`, `.github/workflows/`, `build.rs`, `.husky/*`, ...) can't be locked without breaking normal work. kota hashes them before the session and, when it ends, lists every one that was added, changed or deleted, so you can review them before you build or open the project. For a changed `package.json` or `go.mod` it names the dependencies and scripts that changed; for other files it prints the `git` command that shows the diff. It also lists the commits the session made, and warns about commits that touch masked files or hide a change to one of these files.
+The agent's own config can't come from the project either, since the agent could write one for its next session: kota renders it, and the agents ignore the project's `opencode.json`, `.opencode/`, `.pi/` and the like. The one exception is the project's skills in `.agents/skills`, which load when `kota.yaml` opts in, and are then read-only too unless you start the session with `--skills-writable` ([Project skills](sessions.md#project-skills)).
+
+Files that run things but must stay editable (`package.json`, `Makefile`, `.vscode/`, `.github/workflows/`, `.agents/skills/`, `build.rs`, `.husky/*`, ...) can't be locked without breaking normal work. kota hashes them before the session and, when it ends, lists every one that was added, changed or deleted, so you can review them before you build or open the project. For a changed `package.json` or `go.mod` it names the dependencies and scripts that changed; for other files it prints the `git` command that shows the diff. It also lists the commits the session made, and warns about commits that touch masked files or hide a change to one of these files.
 
 Details: [Protecting the host](protections.md).
 

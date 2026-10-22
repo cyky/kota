@@ -246,6 +246,81 @@ func TestPlan(t *testing.T) {
 	}
 }
 
+// TestPlanReadOnlyDirs holds extra directories read-only, as the Project
+// skills are: a missing one, or a missing parent, gets a placeholder, and
+// the directories on the way are pinned.
+func TestPlanReadOnlyDirs(t *testing.T) {
+	isolateGit(t)
+	const skills = ".agents/skills"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  []Mount
+	}{
+		{
+			name:  "existing",
+			setup: func(t *testing.T, dir string) { write(t, filepath.Join(dir, skills, "a/SKILL.md"), "") },
+			want:  []Mount{{Path: ".agents", Dir: true, Pin: true}, {Path: skills, Dir: true}},
+		},
+		{
+			name:  "missing",
+			setup: func(t *testing.T, dir string) { write(t, filepath.Join(dir, ".agents/notes.md"), "") },
+			want:  []Mount{{Path: ".agents", Dir: true, Pin: true}, {Path: skills, Dir: true, Placeholder: true}},
+		},
+		{
+			name:  "parent missing",
+			setup: func(*testing.T, string) {},
+			want:  []Mount{{Path: ".agents", Dir: true, Placeholder: true}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := repo(t)
+			c.setup(t, dir)
+			p, err := Plan(dir, nil, skills)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := slices.DeleteFunc(slices.Clone(p.Mounts), func(m Mount) bool {
+				return !strings.HasPrefix(m.Path, ".agents")
+			})
+			if !slices.Equal(got, c.want) {
+				t.Errorf("mounts:\n got %+v\nwant %+v", got, c.want)
+			}
+		})
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := repo(t)
+		write(t, filepath.Join(dir, "elsewhere/a/SKILL.md"), "")
+		if err := os.MkdirAll(filepath.Join(dir, ".agents"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../elsewhere", filepath.Join(dir, skills)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan(dir, nil, skills); err == nil || !strings.Contains(err.Error(), "refusing to protect .agents/skills: .agents/skills is a symlink") {
+			t.Errorf("err = %v, want a symlink refusal", err)
+		}
+	})
+
+	t.Run("a file", func(t *testing.T) {
+		dir := repo(t)
+		write(t, filepath.Join(dir, skills), "")
+		if _, err := Plan(dir, nil, skills); err == nil || !strings.Contains(err.Error(), "expected a directory") {
+			t.Errorf("err = %v, want a refusal", err)
+		}
+	})
+
+	t.Run("none", func(t *testing.T) {
+		dir := repo(t)
+		write(t, filepath.Join(dir, skills, "a/SKILL.md"), "")
+		if got := mustPlan(t, dir).Paths(); slices.ContainsFunc(got, func(p string) bool { return strings.HasPrefix(p, ".agents") }) {
+			t.Errorf("mounts without read-only dirs: %q", got)
+		}
+	})
+}
+
 func TestPlanRefusesSymlinks(t *testing.T) {
 	isolateGit(t)
 	for _, rel := range []string{".envrc", ".git/hooks", ".git/config"} {
