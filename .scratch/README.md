@@ -20,6 +20,7 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 | [module-path](module-path/issues/) | The Go module path, so `go install` works from GitHub |
 | [renovate](renovate/issues/) | Renovate keeps the pinned agents and images up to date |
 | [gateway-config](gateway-config/PRD.md) | Named gateways, their keys and models in the user's kota config ([ADR 0002](../docs/adr/0002-gateways-defined-in-user-config.md)) |
+| [project-skills](project-skills/issues/) | A project's `.agents/skills`, loaded when `kota.yaml` opts in |
 
 ## Open issues
 
@@ -28,5 +29,4 @@ kota was called `localllm` until [issue 30](agent-sandbox/issues/30-rename-to-ko
 - [On Linux, replacing a protected file on the host drops its mount](stale-mounts/issues/02-host-replace-on-linux.md) (needs triage)
 - [Module path github.com/cyky/kota, so go install works](module-path/issues/01-module-path-for-go-install.md) (ready for an agent)
 - [Renovate keeps opencode, pi and the pinned images up to date](renovate/issues/01-renovate-for-pinned-versions.md) (ready for an agent)
-
 An issue's title starts with `DONE — ` once it is closed, and its `Resolved in:` line names the commits.
