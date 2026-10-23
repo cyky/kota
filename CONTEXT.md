@@ -13,7 +13,7 @@ The offline container environment a **Session** runs in: the project mounted, se
 _Avoid_: jail, VM
 
 **Gateway**:
-The OpenAI-compatible model server a **Session**'s agent talks to, the only network destination reachable from the **Sandbox**. The user defines named **Gateways** in kota's config and picks one per command. Without a config it is llama-swap on the host at `http://host.docker.internal:8686`, the setup kota is tested with.
+The OpenAI-compatible model server a **Session**'s agent talks to, the only network destination reachable from the **Sandbox**. The user defines named **Gateways** in kota's config and picks one per command. It runs on the host, or in a container on a Docker network the user names for it. Without a config it is llama-swap on the host at `http://host.docker.internal:8686`, the setup kota is tested with.
 _Avoid_: proxy, LLM server
 
 **Prep**:
@@ -64,6 +64,7 @@ _Avoid_: repo skills, local skills, custom skills
 
 - A **Session** runs in exactly one **Sandbox**, for exactly one project
 - A **Session** uses exactly one **Gateway**, chosen when it starts; a project never chooses it
+- A **Gateway** on a Docker network is reached through that network only by the **Sandbox**'s relay to it, never by the agent. Only the user's config can name the network
 - A **Gate** runs inside a **Session**, never on the host
 - **Prep** runs before **Sessions** and is the only step with network access to registries
 - **Prep** reads the project's registry auth (`.npmrc`) once the user approves it; a **Session** never can
