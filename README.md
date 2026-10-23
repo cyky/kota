@@ -10,7 +10,7 @@ Status: early, a personal project built for one setup: macOS with Rancher Deskto
 
 - Go 1.27 or later, to install kota
 - Docker with compose (tested with Rancher Desktop on macOS)
-- A model gateway on the host that speaks the OpenAI API, by default llama-swap on port 8686. See [Models](#models) if yours serves other models.
+- A model gateway that speaks the OpenAI API, by default llama-swap on the host on port 8686. It can also run in a container on a Docker network ([Sessions](docs/sessions.md#a-gateway-in-a-container)). See [Models](#models) if yours serves other models.
 - QEMU, only for projects with an [Engine VM](docs/engine-vm.md)
 
 ## Quick start
@@ -60,7 +60,7 @@ kota instructions                  # print the agent's working style and whether
 
 | Variable | What it sets | Default |
 |---|---|---|
-| `KOTA_GATEWAY` (or `--gateway NAME\|URL`) | The model gateway: a URL, or the name of one defined in `~/.config/kota/config.yaml` ([Sessions](docs/sessions.md#gateway)) | the config's `defaultGateway`, else `http://host.docker.internal:8686` |
+| `KOTA_GATEWAY` (or `--gateway NAME\|URL`) | The model gateway: a URL, or the name of one defined in `~/.config/kota/config.yaml` ([Sessions](docs/sessions.md#gateway)), which can be a gateway in a container on a Docker network ([Sessions](docs/sessions.md#a-gateway-in-a-container)) | the config's `defaultGateway`, else llama-swap on the host at `http://host.docker.internal:8686` |
 | `KOTA_GATEWAY_KEY` or `KOTA_GATEWAY_KEY_FILE` | The API key of a gateway given as a URL, if it needs one (a named gateway uses its `keyFile` instead; see [Sessions](docs/sessions.md#gateway-key)). The agent can read it, so use a key meant only for the gateway. | none |
 | `KOTA_ALLOWED_ROOT` | The directory projects must be inside | `~/Projects` |
 

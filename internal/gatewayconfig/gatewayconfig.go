@@ -66,6 +66,27 @@ type Choice struct {
 	// ModelsSource says which models apply: the gateway's own, the config
 	// defaults, or built-in.
 	ModelsSource string
+	// path is the config file a named gateway is defined in, empty for a
+	// URL.
+	path string
+}
+
+// CheckNetwork stops a session whose gateway names a Docker network that
+// doesn't exist, which compose would only report as an external network it
+// can't find. exists is docker.NetworkExists outside tests.
+func (c Choice) CheckNetwork(exists func(string) (bool, error)) error {
+	n := c.Gateway.Network
+	if n == "" {
+		return nil
+	}
+	ok, err := exists(n)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s: gateway %s: Docker network %q not found; start the gateway's containers first, or check the name with docker network ls", c.path, c.Name, n)
+	}
+	return nil
 }
 
 // ModelsBuiltin is the ModelsSource of the models built into kota.
@@ -76,6 +97,9 @@ const ModelsBuiltin = "built-in (" + models.BuiltinSource + ")"
 func (c Choice) String() string {
 	if c.Name == "" {
 		return fmt.Sprintf("%s (%s)", c.URL, c.Source)
+	}
+	if n := c.Gateway.Network; n != "" {
+		return fmt.Sprintf("%s %s on Docker network %s (%s)", c.Name, c.URL, n, c.Source)
 	}
 	return fmt.Sprintf("%s %s (%s)", c.Name, c.URL, c.Source)
 }
@@ -94,6 +118,9 @@ type gateway struct {
 	// or starting with ~/. The config never holds the key itself.
 	KeyFile string       `yaml:"keyFile"`
 	Models  *models.File `yaml:"models"`
+	// DockerNetwork is an existing Docker network the gateway runs on,
+	// which only the forwarder joins.
+	DockerNetwork string `yaml:"dockerNetwork"`
 }
 
 // validName keeps names apart from URLs and readable in output.
@@ -139,8 +166,9 @@ func Resolve(dir, flag string, getenv func(string) string) (Choice, error) {
 	}
 	// load checked the URL and the keyFile path.
 	gw, _ := sandbox.ParseGateway(g.URL)
+	gw.Network = g.DockerNetwork
 	c := Choice{Name: value, URL: g.URL, Gateway: gw, Source: source, KeySource: NoKey,
-		KeyHint: fmt.Sprintf("set keyFile for gateway %s in %s", value, path)}
+		KeyHint: fmt.Sprintf("set keyFile for gateway %s in %s", value, path), path: path}
 	c.Models, c.ModelsSource = defaultModels(cfg, path)
 	if g.Models != nil {
 		c.Models, c.ModelsSource = g.Models, fmt.Sprintf("gateway %s's own (%s)", value, path)
@@ -184,6 +212,13 @@ func load(path string, getenv func(string) string) (config, error) {
 		if g.KeyFile != "" {
 			if _, err := expandKeyFile(g.KeyFile, getenv); err != nil {
 				return cfg, fmt.Errorf("%s: gateway %s: %w", path, name, err)
+			}
+		}
+		if g.DockerNetwork != "" {
+			if err := sandbox.CheckGatewayNetwork(g.DockerNetwork); errors.Is(err, sandbox.ErrNetworkName) {
+				return cfg, fmt.Errorf("%s: gateway %s: dockerNetwork %q: %w", path, name, g.DockerNetwork, err)
+			} else if err != nil {
+				return cfg, fmt.Errorf("%s: gateway %s: dockerNetwork %q: %w; name the network the gateway's container is on", path, name, g.DockerNetwork, err)
 			}
 		}
 		if g.Models != nil {

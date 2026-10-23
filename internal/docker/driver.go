@@ -372,12 +372,14 @@ func (s *Session) MountTable() (string, error) {
 
 // NetworkGateways returns the gateway address of each non-internal network
 // of the session, i.e. the Docker VM as seen from that network. Internal
-// networks run in isolated mode and have no gateway address.
+// networks run in isolated mode and have no gateway address. An external
+// network, which kota didn't create and never marks internal, is always
+// included.
 func (s *Session) NetworkGateways() ([]string, error) {
 	var names []string
-	for name, n := range s.spec.Networks {
+	for key, n := range s.spec.Networks {
 		if !n.Internal {
-			names = append(names, s.spec.Name+"_"+name)
+			names = append(names, s.spec.NetworkName(key))
 		}
 	}
 	if len(names) == 0 {
@@ -395,6 +397,15 @@ func (s *Session) NetworkGateways() ([]string, error) {
 		}
 	}
 	return addrs, nil
+}
+
+// NetworkExists reports whether Docker has a network called name.
+func NetworkExists(name string) (bool, error) {
+	out, err := command("docker", "network", "ls", "--format", "{{.Name}}").Output()
+	if err != nil {
+		return false, fmt.Errorf("list Docker networks: %w", err)
+	}
+	return slices.Contains(strings.Fields(string(out)), name), nil
 }
 
 // VMInterfaces returns the IPv4 interface prefixes of the Docker VM itself,

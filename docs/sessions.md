@@ -76,7 +76,20 @@ gateways:
 
 Then pick one per command with `--gateway work-api`, or with `KOTA_GATEWAY=work-api`. Both also take a URL, which is used as given. The first of these that is set wins: `--gateway`, `KOTA_GATEWAY`, the config's `defaultGateway`, then the built-in default. A name the config doesn't define is refused with the list of names it does. A gateway URL is plain `http://` with a host and an optional port, and no path.
 
-`run` and `shell` print the gateway they use when they start, and `check` shows it with where the choice came from. The config is yours, not the project's: `kota.yaml` can't choose a gateway, so a repository you clone can't send your sessions somewhere else ([ADR 0002](adr/0002-gateways-defined-in-user-config.md)). Only `run`, `shell` and `check` read the config, and they check all of it: an unknown key (with its line), a gateway without a valid `url`, or a `defaultGateway` that isn't defined stops them, even when the mistake is in a gateway you didn't pick. `build`, `prep`, `clean` and `instructions` don't read it.
+`run` and `shell` print the gateway they use when they start, and `check` shows it with where the choice came from. The config is yours, not the project's: `kota.yaml` can't choose a gateway, so a repository you clone can't send your sessions somewhere else ([ADR 0002](adr/0002-gateways-defined-in-user-config.md)). Only `run`, `shell` and `check` read the config, and they check all of it: an unknown key (with its line), a gateway without a valid `url`, a refused `dockerNetwork`, or a `defaultGateway` that isn't defined stops them, even when the mistake is in a gateway you didn't pick. `build`, `prep`, `clean` and `instructions` don't read it.
+
+### A gateway in a container
+
+A gateway that runs in a container, for example in another compose project, doesn't need a port published on the host. Name the Docker network it is on, and use its container name or network alias in the URL:
+
+```yaml
+gateways:
+  team:
+    url: http://model-server:4000
+    dockerNetwork: models_internal
+```
+
+`dockerNetwork` is the network's name as `docker network ls` shows it, with its compose project prefix. Only the forwarder joins it (see [Network](#network)); the agent stays on the internal network. kota never creates or removes the network, and `run`, `shell` and `check` stop if it doesn't exist, so start the gateway's containers first. Only a named gateway can have one: there is no flag or variable for it, and `kota.yaml` can't set it. kota refuses `host` (the forwarder would share the host's network stack), `none`, `bridge` (Docker's default network has no DNS, and holds every container started without a network), any name starting with `kota-` (another session's networks) and anything that isn't a Docker network name. `run`, `shell` and `check` show the network with the gateway, for example `team http://model-server:4000 on Docker network models_internal (defaultGateway)`.
 
 ## Gateway key
 
@@ -100,7 +113,7 @@ The agent can read the key: inside the sandbox it is `$KOTA_GATEWAY_KEY`, which 
 
 ## Network
 
-The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway, which is `http://gateway:8080` inside the sandbox. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
+The agent container is attached only to an internal Docker network with no route out. A forwarder container joins that network and a normal one, and relays a single port to the gateway, which is `http://gateway:8080` inside the sandbox. For a gateway with a `dockerNetwork` ([A gateway in a container](#a-gateway-in-a-container)), the forwarder joins that network instead of the normal one, so its only other route is to that network's containers. The probes then also check that the agent can't reach the gateway container's own address. The internal network runs in isolated gateway mode, so the Docker VM itself has no address on it. The project is mounted read-write at `/workspace`, and the agent runs as your UID with all capabilities dropped.
 
 ## Agent config
 

@@ -147,6 +147,81 @@ func TestForwarderBridgesToGatewayOnly(t *testing.T) {
 	}
 }
 
+func TestForwarderJoinsGatewayNetwork(t *testing.T) {
+	in := testInputs()
+	in.Gateway = Gateway{Host: "model-server", Port: 4000, Network: "models_internal"}
+	spec := compose(in)
+	fwd := spec.Services[ForwarderService]
+
+	var joined []string
+	for name, attach := range fwd.Networks {
+		n := spec.Networks[name]
+		switch {
+		case n.Internal:
+			if !slices.Contains(attach.Aliases, GatewayHost) {
+				t.Errorf("forwarder lacks alias %q on internal network", GatewayHost)
+			}
+		case n.External:
+			joined = append(joined, n.Name)
+		default:
+			t.Errorf("forwarder is on session network %q, want only internal and the gateway's", name)
+		}
+	}
+	if !slices.Equal(joined, []string{"models_internal"}) {
+		t.Errorf("forwarder joins external networks %v, want [models_internal]", joined)
+	}
+	if got := fwd.Command[len(fwd.Command)-1]; got != "TCP:model-server:4000" {
+		t.Errorf("forwarder target = %q", got)
+	}
+	if _, ok := spec.Networks[egressNetwork]; ok {
+		t.Errorf("egress declared without a service on it")
+	}
+	if len(spec.Services[AgentService].Networks) != 1 {
+		t.Errorf("agent networks = %v, want only the internal one", spec.Services[AgentService].Networks)
+	}
+}
+
+func TestEngineForwarderKeepsEgressWithGatewayNetwork(t *testing.T) {
+	in := testInputs()
+	in.Gateway = Gateway{Host: "model-server", Port: 4000, Network: "models_internal"}
+	in.Engine = &EngineRoute{Host: "host.docker.internal", APIPort: 2376, Forwards: []PortForward{{Listen: 2376, Target: 50000}}, CertDir: "/tmp/certs"}
+	spec := compose(in)
+
+	if _, ok := spec.Services[EngineService].Networks[egressNetwork]; !ok {
+		t.Errorf("engine forwarder networks = %v, want egress", spec.Services[EngineService].Networks)
+	}
+	if _, ok := spec.Networks[egressNetwork]; !ok {
+		t.Errorf("egress not declared")
+	}
+	if _, ok := spec.Services[ForwarderService].Networks[egressNetwork]; ok {
+		t.Errorf("gateway forwarder is on egress")
+	}
+}
+
+func TestNetworkName(t *testing.T) {
+	in := testInputs()
+	in.Gateway = Gateway{Host: "model-server", Port: 4000, Network: "models_internal"}
+	spec := compose(in)
+	if got := spec.NetworkName(gatewayNetwork); got != "models_internal" {
+		t.Errorf("gateway network name = %q, want models_internal", got)
+	}
+	if got, want := spec.NetworkName(internalNetwork), spec.Name+"_"+internalNetwork; got != want {
+		t.Errorf("internal network name = %q, want %q", got, want)
+	}
+}
+
+func TestGatewayAddrTellsNetworksApart(t *testing.T) {
+	a := Gateway{Host: "model-server", Port: 4000, Network: "a"}
+	b := Gateway{Host: "model-server", Port: 4000, Network: "b"}
+	host := Gateway{Host: "model-server", Port: 4000}
+	if a.Addr() == b.Addr() || a.Addr() == host.Addr() {
+		t.Errorf("addrs %q, %q, %q not distinct", a.Addr(), b.Addr(), host.Addr())
+	}
+	if got := host.Addr(); got != "model-server:4000" {
+		t.Errorf("host gateway addr = %q", got)
+	}
+}
+
 func TestGatewayIsConfigurable(t *testing.T) {
 	in := testInputs()
 	in.Gateway = Gateway{Host: "10.0.0.5", Port: 9292}
@@ -259,9 +334,9 @@ func TestParseGateway(t *testing.T) {
 		want    Gateway
 		wantErr bool
 	}{
-		{raw: "http://host.docker.internal:8080", want: Gateway{"host.docker.internal", 8080}},
-		{raw: "http://host.docker.internal:8080/", want: Gateway{"host.docker.internal", 8080}},
-		{raw: "http://gw", want: Gateway{"gw", 80}},
+		{raw: "http://host.docker.internal:8080", want: Gateway{Host: "host.docker.internal", Port: 8080}},
+		{raw: "http://host.docker.internal:8080/", want: Gateway{Host: "host.docker.internal", Port: 8080}},
+		{raw: "http://gw", want: Gateway{Host: "gw", Port: 80}},
 		{raw: "https://gw:443", wantErr: true},
 		{raw: "http://gw:8080/v1", wantErr: true},
 		{raw: "http://gw:0", wantErr: true},

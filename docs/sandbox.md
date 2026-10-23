@@ -47,7 +47,7 @@ The agent container is attached only to an internal Docker network:
 
 - `internal: true` means the network has no route to anywhere.
 - Isolated gateway mode means the Docker VM itself has no address on that network, so its own services (for example its sshd) can't be reached either.
-- A small forwarder container (socat) sits on both the internal network and a normal one, and relays exactly one port to the **Gateway**. Inside the sandbox it is `http://gateway:8080`.
+- A small forwarder container (socat) sits on both the internal network and a normal one, and relays exactly one port to the **Gateway**. Inside the sandbox it is `http://gateway:8080`. For a **Gateway** that runs in a container, the forwarder joins that container's Docker network, named in your config, instead of the normal one.
 
 The agent can't reach the internet, DNS, the LAN, the host's other ports or the Docker VM. It can't send your code anywhere, and it can't download anything. Dependencies are installed beforehand by `kota prep`, which runs without an agent.
 

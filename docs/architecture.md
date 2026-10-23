@@ -4,7 +4,7 @@ How kota is put together, as diagrams. The pages linked from the README describe
 
 ## Runtime view
 
-What runs where during a `run` or `shell` **Session** of a project with an **Engine VM**. Projects without an `engine:` section have no VM and no engine forwarder.
+What runs where during a `run` or `shell` **Session** of a project with an **Engine VM**. Projects without an `engine:` section have no VM and no engine forwarder. The gateway container and its network exist only for a **Gateway** that runs in a container; kota doesn't start them.
 
 ```mermaid
 flowchart LR
@@ -26,9 +26,13 @@ flowchart LR
         fwd["forwarder<br/>(socat)"]
         efwd["engine forwarder<br/>(socat)"]
         vols[("volumes:<br/>state, deps, shared caches")]
+        subgraph gwnet["gateway's Docker network<br/>(dockerNetwork in config.yaml)"]
+            gwc["Gateway container"]
+        end
     end
 
     sandbox -- "gateway:8080" --> fwd -- "only the gateway port" --> gw
+    fwd -. "or, with dockerNetwork,<br/>joins its network instead" .-> gwc
     sandbox -- "engine:2376,<br/>published ports 40000-40099" --> efwd -- "host 127.0.0.1<br/>kota relay, QEMU hostfwd" --> dockerd
     dockerd --- ctrs
     project -- "bind /workspace<br/>secrets masked, .git hooks/config<br/>and Project skills read-only" --> sandbox
@@ -40,7 +44,7 @@ flowchart LR
 
 Containment, enforced from outside the agent:
 
-- **Sandbox:** attached only to an internal Docker network. Its one way out is the forwarder, which relays a single port to the **Gateway**.
+- **Sandbox:** attached only to an internal Docker network. Its one way out is the forwarder, which relays a single port to the **Gateway**. A **Gateway** in a container, on a Docker network named in `config.yaml`, is reached there instead: the forwarder joins that network in place of its normal one, and the agent never does.
 - **Engine VM:** QEMU user-mode networking with `restrict=on`. The VM can't open connections out; only the Docker API and the published-port range are forwarded in, bound to the host's `127.0.0.1`.
 - **Engine API:** needs a TLS client certificate made for this **Session**, because other containers can reach the host's loopback too.
 - **Probes** check all of this before every **Session**. A failure blocks it.

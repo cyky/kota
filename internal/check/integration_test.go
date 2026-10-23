@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"kota/assets"
 	"kota/internal/docker"
@@ -145,6 +146,85 @@ func TestContainedSandboxPassesAllProbes(t *testing.T) {
 	// the agent can't bypass the forwarder to reach the gateway.
 	if !probesPort(results, gw.Port) {
 		t.Errorf("no direct host probe of gateway port %d", gw.Port)
+	}
+}
+
+// containerGateway starts a stub gateway in a container on a new Docker
+// network, reached there as model-server:4000, and returns its gateway.
+func containerGateway(t *testing.T) sandbox.Gateway {
+	t.Helper()
+	network := fmt.Sprintf("kotatest-gateway-%d", os.Getpid())
+	if out, err := exec.Command("docker", "network", "create", network).CombinedOutput(); err != nil {
+		t.Fatalf("create network: %v: %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("docker", "network", "rm", network).Run() })
+	const server = `require("http").createServer((req, res) => {
+  if (req.url !== "/v1/models") { res.writeHead(404); res.end(); return; }
+  res.setHeader("Content-Type", "application/json");
+  res.end('{"data":[{"id":"stub-model"}]}');
+}).listen(4000);`
+	name := network + "-server"
+	out, err := exec.Command("docker", "run", "-d", "--rm", "--name", name, "--network", network, "--network-alias", "model-server",
+		"--user", "65534:65534", "--read-only", "--cap-drop", "ALL", "--entrypoint", "node", testAgentImage, "-e", server).CombinedOutput()
+	if err != nil {
+		t.Fatalf("start stub gateway: %v: %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("docker", "rm", "-f", name).Run() })
+	return sandbox.Gateway{Host: "model-server", Port: 4000, Network: network}
+}
+
+func TestGatewayOnDockerNetworkPassesAllProbes(t *testing.T) {
+	requireDocker(t)
+	gw := containerGateway(t)
+	s, _ := startKeyed(t, sandbox.Inputs{ProjectDir: projectDir(t)}, nil, gw, "")
+
+	var models []byte
+	var err error
+	// The stub may still be starting.
+	for range 20 {
+		if models, err = s.GatewayGet("/v1/models"); err == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if err != nil || !strings.Contains(string(models), "stub-model") {
+		t.Fatalf("models through the forwarder = %q, %v", models, err)
+	}
+	results, err := Run(s, gw, sandbox.Expect{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if !r.Passed() {
+			t.Errorf("probe %q failed: exit %d (missing=%v, mustSucceed=%v)", r.Name, r.ExitCode, r.Missing, r.MustSucceed)
+		}
+	}
+	if !probesPort(results, gw.Port) {
+		t.Errorf("no direct probe of gateway port %d", gw.Port)
+	}
+}
+
+func TestAgentOnGatewayNetworkIsDetected(t *testing.T) {
+	requireDocker(t)
+	gw := containerGateway(t)
+	// Put the agent on the gateway's network too, as a misconfiguration
+	// would.
+	s, _ := startKeyed(t, sandbox.Inputs{ProjectDir: projectDir(t)}, func(spec *sandbox.Compose) {
+		agent := spec.Services[sandbox.AgentService]
+		for name, n := range spec.Networks {
+			if n.External {
+				agent.Networks[name] = &sandbox.NetworkAttach{}
+			}
+		}
+		spec.Services[sandbox.AgentService] = agent
+	}, gw, "")
+
+	results, err := Run(s, gw, sandbox.Expect{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(probe.Failed(results)) == 0 {
+		t.Fatal("no probe failed although the agent reaches the gateway's network")
 	}
 }
 

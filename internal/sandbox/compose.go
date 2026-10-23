@@ -70,9 +70,22 @@ type NetworkAttach struct {
 	Aliases []string `json:"aliases,omitempty"`
 }
 
+// Network is a top-level network. An external one already exists under
+// Name, and compose neither creates nor removes it.
 type Network struct {
+	Name       string            `json:"name,omitempty"`
+	External   bool              `json:"external,omitempty"`
 	Internal   bool              `json:"internal,omitempty"`
 	DriverOpts map[string]string `json:"driver_opts,omitempty"`
+}
+
+// NetworkName is the Docker name of the network under key: an external
+// network's own Name, else the name compose gives it.
+func (c Compose) NetworkName(key string) string {
+	if n := c.Networks[key]; n.External {
+		return n.Name
+	}
+	return c.Name + "_" + key
 }
 
 // NamedVolume is a top-level volume. Name fixes the Docker volume name
@@ -116,6 +129,13 @@ func (c Compose) Literal() Compose {
 		s.Volumes = vols
 		s.Tmpfs = literalAll(s.Tmpfs)
 		out.Services[name] = s
+	}
+	if c.Networks != nil {
+		out.Networks = make(map[string]Network, len(c.Networks))
+		for k, n := range c.Networks {
+			n.Name = literal(n.Name)
+			out.Networks[k] = n
+		}
 	}
 	if c.Volumes != nil {
 		out.Volumes = make(map[string]NamedVolume, len(c.Volumes))

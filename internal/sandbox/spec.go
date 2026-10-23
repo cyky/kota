@@ -10,6 +10,7 @@ package sandbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -78,17 +79,30 @@ const (
 
 	internalNetwork = "sandbox"
 	egressNetwork   = "egress"
+	// gatewayNetwork is the compose key of the gateway's own Docker
+	// network, when it has one.
+	gatewayNetwork = "gateway"
 )
 
-// Gateway is the host-side model gateway the forwarder connects to.
+// Gateway is the model gateway the forwarder connects to.
 type Gateway struct {
 	Host string
 	Port int
+	// Network is an existing Docker network the gateway runs on, one
+	// CheckGatewayNetwork accepts. The forwarder then joins it instead of
+	// egress, and Host is resolved there. Empty means the gateway is
+	// reached over egress.
+	Network string
 }
 
-// Addr is the gateway as host:port, which tells gateways apart.
+// Addr is the gateway as host:port, prefixed with its Docker network if it
+// has one, which tells gateways apart.
 func (g Gateway) Addr() string {
-	return net.JoinHostPort(g.Host, strconv.Itoa(g.Port))
+	addr := net.JoinHostPort(g.Host, strconv.Itoa(g.Port))
+	if g.Network != "" {
+		return g.Network + "/" + addr
+	}
+	return addr
 }
 
 // ParseGateway parses a gateway URL such as http://host.docker.internal:8686.
@@ -116,6 +130,33 @@ func ParseGateway(raw string) (Gateway, error) {
 		}
 	}
 	return Gateway{Host: u.Hostname(), Port: port}, nil
+}
+
+// dockerName is a name Docker accepts for a network.
+var dockerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ErrNetworkName is CheckGatewayNetwork's error for a name Docker wouldn't
+// accept, as opposed to a network the forwarder must not join.
+var ErrNetworkName = errors.New("not a Docker network name")
+
+// CheckGatewayNetwork refuses a Gateway.Network the forwarder must not
+// join: a name Docker wouldn't accept (ErrNetworkName), Docker's built-in
+// host, none and bridge, and the networks of kota sessions, which would
+// connect the forwarder to another session's sandbox.
+func CheckGatewayNetwork(name string) error {
+	switch {
+	case !dockerName.MatchString(name):
+		return ErrNetworkName
+	case name == "host":
+		return errors.New("the forwarder would share the host's network stack")
+	case name == "none":
+		return errors.New("it has no route to the gateway")
+	case name == "bridge":
+		return errors.New("the default bridge has no DNS, and holds every container started without a network")
+	case strings.HasPrefix(name, projectPrefix):
+		return errors.New("a kota session's network")
+	}
+	return nil
 }
 
 // AgentGatewayURL is the gateway base URL as seen from inside the sandbox.
@@ -289,6 +330,10 @@ type Inputs struct {
 	EngineOff bool
 }
 
+// projectPrefix starts every ProjectName, and so the name of every kota
+// session's networks.
+const projectPrefix = "kota-"
+
 // ProjectName returns a stable compose project name for a project directory.
 func ProjectName(projectDir string) string {
 	sum := sha256.Sum256([]byte(projectDir))
@@ -298,7 +343,7 @@ func ProjectName(projectDir string) string {
 	if base == "" {
 		base = "project"
 	}
-	return fmt.Sprintf("kota-%s-%s", base, hex.EncodeToString(sum[:])[:8])
+	return fmt.Sprintf("%s%s-%s", projectPrefix, base, hex.EncodeToString(sum[:])[:8])
 }
 
 // NoHistoryState is the suffix of an agent's state volume name in
@@ -478,9 +523,25 @@ func Build(in Inputs) (Compose, Expect) {
 		fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,backlog=%d", GatewayPort, listenBacklog),
 		"TCP:" + net.JoinHostPort(in.Gateway.Host, strconv.Itoa(in.Gateway.Port)),
 	}
+	spec.Networks = map[string]Network{
+		// Isolated gateway mode leaves the bridge without an address, so
+		// the Docker VM's own services (e.g. its sshd) can't be reached
+		// from the internal network. "internal" alone only blocks routing.
+		internalNetwork: {Internal: true, DriverOpts: map[string]string{
+			"com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+		}},
+	}
+	// upstream is the network the forwarder reaches the gateway on. A
+	// gateway on its own Docker network is reached there, and the
+	// forwarder needs no other route.
+	upstream := egressNetwork
+	if in.Gateway.Network != "" {
+		upstream = gatewayNetwork
+		spec.Networks[gatewayNetwork] = Network{Name: in.Gateway.Network, External: true}
+	}
 	forwarder.Networks = map[string]*NetworkAttach{
 		internalNetwork: {Aliases: []string{GatewayHost}},
-		egressNetwork:   {},
+		upstream:        {},
 	}
 	agent.Networks = map[string]*NetworkAttach{internalNetwork: {}}
 	agent.DependsOn = []string{ForwarderService}
@@ -490,14 +551,10 @@ func Build(in Inputs) (Compose, Expect) {
 	}
 	services[AgentService] = agent
 	services[ForwarderService] = forwarder
-	spec.Networks = map[string]Network{
-		// Isolated gateway mode leaves the bridge without an address, so
-		// the Docker VM's own services (e.g. its sshd) can't be reached
-		// from the internal network. "internal" alone only blocks routing.
-		internalNetwork: {Internal: true, DriverOpts: map[string]string{
-			"com.docker.network.bridge.gateway_mode_ipv4": "isolated",
-		}},
-		egressNetwork: {},
+	for _, s := range services {
+		if _, ok := s.Networks[egressNetwork]; ok {
+			spec.Networks[egressNetwork] = Network{}
+		}
 	}
 	return spec, expected
 }

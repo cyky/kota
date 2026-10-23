@@ -654,6 +654,9 @@ func prepareSession(sa sessionArgs, mode sandbox.Mode, paths pathpolicy.Paths, k
 		if gw, err = chooseGateway(sa.gatewayURL); err != nil {
 			return nil, err
 		}
+		if err := gw.CheckNetwork(docker.NetworkExists); err != nil {
+			return nil, err
+		}
 		apiKey = gw.Key
 	}
 	// Read-only Project skills stay read-only in prep too, so an install
