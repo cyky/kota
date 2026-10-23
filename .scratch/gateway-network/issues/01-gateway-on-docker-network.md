@@ -1,7 +1,8 @@
-# 01 — A named gateway can run on an existing Docker network
+# DONE — 01 — A named gateway can run on an existing Docker network
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
+Resolved in: fb2a8ed
 
 ## What to build
 
@@ -34,13 +35,25 @@ The model list (`/v1/models`) and the gateway probe already go through the forwa
 
 ## Acceptance criteria
 
-- [ ] A named gateway with `dockerNetwork` attaches the gateway forwarder to that external network and `sandbox`, not to `egress`; the agent stays on `sandbox` only, and the engine forwarder is unchanged
-- [ ] A container hostname in such a gateway's URL works for the model list, the gateway probe and the agent
-- [ ] Without `dockerNetwork`, the compose spec is unchanged
-- [ ] `dockerNetwork` on a gateway given as a URL isn't possible; there is no flag or environment variable for it, and `kota.yaml` has no such key
-- [ ] A missing network, `host`, `none`, `bridge`, a `kota-` name or an invalid name stops `run`, `shell` and `check` with the config file, the gateway and the value
-- [ ] `NetworkGateways` finds the external network by its name and adds its gateway address unless it is internal; the containment probes pass with a gateway on a Docker network
-- [ ] `check`, `run` and `shell` show the gateway's Docker network
-- [ ] The docs listed above describe it
+- [x] A named gateway with `dockerNetwork` attaches the gateway forwarder to that external network and `sandbox`, not to `egress`; the agent stays on `sandbox` only, and the engine forwarder is unchanged
+- [x] A container hostname in such a gateway's URL works for the model list, the gateway probe and the agent
+- [x] Without `dockerNetwork`, the compose spec is unchanged
+- [x] `dockerNetwork` on a gateway given as a URL isn't possible; there is no flag or environment variable for it, and `kota.yaml` has no such key
+- [x] A missing network, `host`, `none`, `bridge`, a `kota-` name or an invalid name stops `run`, `shell` and `check` with the config file, the gateway and the value
+- [x] `NetworkGateways` finds the external network by its name and adds its gateway address unless it is internal; the containment probes pass with a gateway on a Docker network
+- [x] `check`, `run` and `shell` show the gateway's Docker network
+- [x] The docs listed above describe it
 
 ## Comments
+
+### 2026-10-23
+
+Verified: unit tests for the spec (forwarder on `sandbox` and the external network only, engine forwarder keeps `egress`, `egress` declared only when used, `Addr` tells networks apart), for the config (`dockerNetwork` parsed, each refused value, the gateway line), and integration tests against Docker: a stub gateway container on its own network serves `/v1/models` through the forwarder and every containment probe passes, including a direct probe of the gateway's port; with the agent attached to that network the probes fail. `TestContainedSandboxPassesAllProbes` still passes. The other integration tests weren't run.
+
+One difference: `NetworkGateways` adds an external network's gateway address always, not only when it isn't internal. An isolated internal network has none, and on any other it is a Docker VM address the agent must not reach, so this is stricter.
+
+Not verified: a real `kota run` or `kota check` against a `config.yaml` with `dockerNetwork`; the missing-network error in `main` has no test.
+
+### 2026-10-23 (review)
+
+Review fixes, in the same commit: the missing-network check is `Choice.CheckNetwork`, with the config path unexported and a unit test (no network, existing, missing, lookup failure); the runtime diagram in `docs/architecture.md` draws the gateway container on its own network in the Docker VM, with the forwarder's alternative route to it; the refusal rules are `sandbox.CheckGatewayNetwork`, sharing the `kota-` prefix with `ProjectName`; the hint is added once in `gatewayconfig`, and not to an invalid name; `NetworkGateways` gets each network's Docker name from `Compose.NetworkName`; and the README `KOTA_GATEWAY` row names a gateway on a Docker network and says the default is on the host.
