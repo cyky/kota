@@ -84,7 +84,7 @@ kota runs the agent in a container on an internal Docker network whose only way 
 - [The agents](docs/agent-setup.md): what the agent is told, your own agent settings, and pi's `ticket_done`
 - [Sessions without git history](docs/no-history.md): `--no-history`, and what it doesn't hide
 - [Dependencies](docs/dependencies.md): `prep`, shared caches and project images
-- [Engine VM](docs/engine-vm.md): containers for a project's tests
+- [Engine VM](docs/engine-vm.md): containers for a project's tests and the services its app needs, such as a database
 - [Architecture](docs/architecture.md): diagrams of the runtime, the command flows, the packages and where data lives
 - [Development](docs/development.md): the layout, building and running kota's tests
 - [Design notes and issues](.scratch/README.md): every feature's PRD and issues, done and open

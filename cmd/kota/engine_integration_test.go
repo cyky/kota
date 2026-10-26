@@ -441,7 +441,7 @@ cat `+opencodeInstructionsPath)
 			// testcontainers' error names only the registry it couldn't
 			// reach, so the note tells the agent to find the image in the test.
 			"UNDECLARED-ERR: generic container: create container: Error response from daemon: Get \"https://registry-1.docker.io/v2/\"",
-			"which you can't change: postgres:16-alpine.", "run 'kota prep' on the host",
+			"kota.yaml: postgres:16-alpine. You can't change this list.", "run 'kota prep' on the host",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output lacks %q", want)

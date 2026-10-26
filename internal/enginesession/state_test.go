@@ -74,9 +74,15 @@ func TestStateRouteNoteWarning(t *testing.T) {
 	note := on.Note()
 	for _, want := range []string{
 		sandbox.EngineEnv + "=" + sandbox.EngineAvailable, "DOCKER_HOST", "testcontainers",
+		// How a container the agent starts is reached, and what a wrong route looks like.
+		"host engine on a host port in 40000-40099", "-p 40000:5432", "engine:40000",
+		"one port per container", "docker port",
+		"at localhost, at a port outside 40000-40099", "bound to 127.0.0.1", "means the route, not the service",
+		"starts empty every session",
 		// The declared images, how an undeclared one fails, and the fix.
-		"which you can't change: postgres:16-alpine, redis:7.", "never downloads images",
-		"Unable to find image", "Temporary failure in name resolution", "find it in the failing test's code", "Don't retry",
+		"postgres:16-alpine, redis:7. You can't change this list.", "never downloads images",
+		"Unable to find image", "Temporary failure in name resolution", "find it in the failing test's code",
+		"the test keeps needing that image", "leave the image it uses and its container in place", "report the missing image as the cause",
 		"under engine.images in kota.yaml and run 'kota prep' on the host",
 	} {
 		if !strings.Contains(note, want) {
@@ -85,6 +91,10 @@ func TestStateRouteNoteWarning(t *testing.T) {
 	}
 	if strings.Contains(note, "not run") {
 		t.Errorf("on: note says tests can't run:\n%s", note)
+	}
+	// A kota.Dockerfile can add Compose, so the note leaves it to the agent to check.
+	if strings.Contains(note, "Compose") || strings.Contains(note, "Docker CLI only") {
+		t.Errorf("on: note rules out Compose:\n%s", note)
 	}
 
 	off := State{off: true}
