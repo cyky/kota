@@ -53,6 +53,7 @@ func EngineSuite(t EngineTargets) []Probe {
 		engineTCP("engine internet 1.1.1.1:443", "1.1.1.1", 443, false),
 		engineTCP("engine internet 8.8.8.8:53", "8.8.8.8", 53, false),
 		engineTCP("engine internet [2606:4700:4700::1111]:443", "2606:4700:4700::1111", 443, false),
+		engineTCP("engine cloud metadata "+metadataAddr+":80", metadataAddr, 80, false),
 		{Name: "engine dns example.com", Cmd: []string{"nslookup", "example.com"}, InEngine: true},
 		{Name: "engine dns example.com via 10.0.2.3", Cmd: []string{"nslookup", "example.com", "10.0.2.3"}, InEngine: true},
 		{Name: "engine dns example.com via 1.1.1.1", Cmd: []string{"nslookup", "example.com", "1.1.1.1"}, InEngine: true},

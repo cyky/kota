@@ -100,24 +100,25 @@ func projectDir(t *testing.T) string {
 	return dir
 }
 
-func startSandbox(t *testing.T, mutate func(*sandbox.Compose)) (*docker.Session, sandbox.Gateway) {
+func startSandbox(t *testing.T, mutate func(*sandbox.Compose)) (*docker.Session, sandbox.Gateway, sandbox.Expect) {
 	t.Helper()
 	return startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t)}, mutate)
 }
 
 // startInputs fills in the common inputs and starts a sandbox.
-func startInputs(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose)) (*docker.Session, sandbox.Gateway) {
+func startInputs(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose)) (*docker.Session, sandbox.Gateway, sandbox.Expect) {
 	t.Helper()
 	return startKeyed(t, in, mutate, stubGateway(t), "")
 }
 
-// startKeyed starts a sandbox against gw, passing key to the session.
-func startKeyed(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose), gw sandbox.Gateway, key string) (*docker.Session, sandbox.Gateway) {
+// startKeyed starts a sandbox against gw, passing key to the session, and
+// returns what the probes expect of it before mutate.
+func startKeyed(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose), gw sandbox.Gateway, key string) (*docker.Session, sandbox.Gateway, sandbox.Expect) {
 	t.Helper()
 	in.UID, in.GID = os.Getuid(), os.Getgid()
 	in.Gateway = gw
 	in.AgentImage, in.ForwarderImage = testAgentImage, testForwarderImage
-	spec, _ := sandbox.Build(in)
+	spec, e := sandbox.Build(in)
 	if mutate != nil {
 		mutate(&spec)
 	}
@@ -126,14 +127,14 @@ func startKeyed(t *testing.T, in sandbox.Inputs, mutate func(*sandbox.Compose), 
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	return s, gw
+	return s, gw, e
 }
 
 func TestContainedSandboxPassesAllProbes(t *testing.T) {
 	requireDocker(t)
-	s, gw := startSandbox(t, nil)
+	s, gw, e := startSandbox(t, nil)
 
-	results, err := Run(s, gw, sandbox.Expect{})
+	results, err := Run(s, gw, e)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +177,7 @@ func containerGateway(t *testing.T) sandbox.Gateway {
 func TestGatewayOnDockerNetworkPassesAllProbes(t *testing.T) {
 	requireDocker(t)
 	gw := containerGateway(t)
-	s, _ := startKeyed(t, sandbox.Inputs{ProjectDir: projectDir(t)}, nil, gw, "")
+	s, _, e := startKeyed(t, sandbox.Inputs{ProjectDir: projectDir(t)}, nil, gw, "")
 
 	var models []byte
 	var err error
@@ -190,7 +191,7 @@ func TestGatewayOnDockerNetworkPassesAllProbes(t *testing.T) {
 	if err != nil || !strings.Contains(string(models), "stub-model") {
 		t.Fatalf("models through the forwarder = %q, %v", models, err)
 	}
-	results, err := Run(s, gw, sandbox.Expect{})
+	results, err := Run(s, gw, e)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +210,7 @@ func TestAgentOnGatewayNetworkIsDetected(t *testing.T) {
 	gw := containerGateway(t)
 	// Put the agent on the gateway's network too, as a misconfiguration
 	// would.
-	s, _ := startKeyed(t, sandbox.Inputs{ProjectDir: projectDir(t)}, func(spec *sandbox.Compose) {
+	s, _, _ := startKeyed(t, sandbox.Inputs{ProjectDir: projectDir(t)}, func(spec *sandbox.Compose) {
 		agent := spec.Services[sandbox.AgentService]
 		for name, n := range spec.Networks {
 			if n.External {
@@ -231,7 +232,7 @@ func TestAgentOnGatewayNetworkIsDetected(t *testing.T) {
 func TestBrokenSandboxIsDetected(t *testing.T) {
 	requireDocker(t)
 	// Put the agent on the normal network too, as a misconfiguration would.
-	s, gw := startSandbox(t, func(spec *sandbox.Compose) {
+	s, gw, _ := startSandbox(t, func(spec *sandbox.Compose) {
 		agent := spec.Services[sandbox.AgentService]
 		for name, n := range spec.Networks {
 			if !n.Internal {
@@ -257,6 +258,52 @@ func TestBrokenSandboxIsDetected(t *testing.T) {
 	t.Errorf("expected the host.docker.internal probe among failures, got %v", names(failed))
 }
 
+// TestUnexpectedMountIsDetected adds a file at the Docker socket's path
+// and a host directory to the agent, each as a regression in the spec
+// would.
+func TestUnexpectedMountIsDetected(t *testing.T) {
+	requireDocker(t)
+	socket := filepath.Join(projectDir(t), "docker.sock")
+	if err := os.WriteFile(socket, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, extra := range []sandbox.Volume{
+		{Type: "bind", Source: socket, Target: "/run/docker.sock"},
+		{Type: "bind", Source: projectDir(t), Target: "/host", ReadOnly: true},
+	} {
+		s, gw, e := startSandbox(t, func(spec *sandbox.Compose) {
+			agent := spec.Services[sandbox.AgentService]
+			agent.Volumes = append(agent.Volumes, extra)
+			spec.Services[sandbox.AgentService] = agent
+		})
+		results, err := Run(s, gw, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if failed := names(probe.Failed(results)); !slices.Equal(failed, []string{"no unexpected mounts"}) {
+			t.Errorf("%s: failed probes = %v, want only the mounts probe", extra.Target, failed)
+		}
+	}
+}
+
+// TestRestoredCapabilitiesAreDetected runs the agent with Docker's default
+// capabilities and new privileges allowed.
+func TestRestoredCapabilitiesAreDetected(t *testing.T) {
+	requireDocker(t)
+	s, gw, e := startSandbox(t, func(spec *sandbox.Compose) {
+		agent := spec.Services[sandbox.AgentService]
+		agent.CapDrop, agent.SecurityOpt = nil, nil
+		spec.Services[sandbox.AgentService] = agent
+	})
+	results, err := Run(s, gw, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed := names(probe.Failed(results)); !slices.Equal(failed, []string{"privileges dropped"}) {
+		t.Errorf("failed probes = %v, want only the privileges probe", failed)
+	}
+}
+
 // TestSessionUserHasName checks the session's passwd and group give the host
 // UID a name: Node's os.userInfo(), which testcontainers calls, fails
 // without one.
@@ -272,7 +319,7 @@ func TestSessionUserHasName(t *testing.T) {
 		}
 		accounts = append(accounts, sandbox.Mount{Source: file, Target: target})
 	}
-	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t), ReadOnly: accounts}, nil)
+	s, gw, e := startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t), ReadOnly: accounts}, nil)
 
 	out, err := s.Capture("sh", "-c", `whoami && id -gn && node -e 'const u = require("os").userInfo(); console.log(u.username, u.uid, u.gid, u.homedir)'`)
 	if err != nil {
@@ -290,7 +337,7 @@ func TestSessionUserHasName(t *testing.T) {
 	if strings.TrimSpace(out) != want {
 		t.Errorf("user lookup = %q, want %q", out, want)
 	}
-	results, err := Run(s, gw, sandbox.Expect{ReadOnly: []string{sandbox.Passwd, sandbox.Group}})
+	results, err := Run(s, gw, e)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +371,7 @@ func TestReadOnlyMountRejectsWrites(t *testing.T) {
 	target := sandbox.ReadOnlyRoot + "/ref"
 	for _, readOnly := range []bool{true, false} {
 		ref := projectDir(t)
-		s, gw := startSandbox(t, func(spec *sandbox.Compose) {
+		s, gw, _ := startSandbox(t, func(spec *sandbox.Compose) {
 			agent := spec.Services[sandbox.AgentService]
 			agent.Volumes = append(agent.Volumes, sandbox.Volume{Type: "bind", Source: ref, Target: target, ReadOnly: readOnly})
 			spec.Services[sandbox.AgentService] = agent
@@ -392,9 +439,7 @@ func startProtected(t *testing.T, project string) (*docker.Session, sandbox.Gate
 		t.Fatal(err)
 	}
 	in := sandbox.Inputs{ProjectDir: project, Pinned: pinned, ReadOnly: readOnly, Env: gitEnv}
-	_, e := sandbox.Build(in)
-	s, gw := startInputs(t, in, nil)
-	return s, gw, e
+	return startInputs(t, in, nil)
 }
 
 func requirePass(t *testing.T, results []probe.Result) {
@@ -564,7 +609,7 @@ func TestMissingProtectionIsDetected(t *testing.T) {
 	requireDocker(t)
 	// Probe for the protections without applying them.
 	project := gitRepo(t)
-	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
+	s, gw, _ := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
 	results, err := Run(s, gw, sandbox.Expect{
 		ReadOnly: []string{"/workspace/.git/hooks", "/workspace/.git/config"},
 		Pinned:   []string{"/workspace/.git"},
@@ -639,7 +684,7 @@ func TestMissingMaskIsDetected(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, ".env"), []byte("API_KEY=secret\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
+	s, gw, _ := startInputs(t, sandbox.Inputs{ProjectDir: project}, nil)
 	results, err := Run(s, gw, sandbox.Expect{Masked: []string{"/workspace/.env"}})
 	if err != nil {
 		t.Fatal(err)
@@ -659,12 +704,11 @@ func startWithState(t *testing.T, project string) (*docker.Session, sandbox.Gate
 	}
 	const cfgTarget = "/etc/kota/opencode.json"
 	vol := sandbox.StateVolume(project, "opencode")
-	s, gw := startInputs(t, sandbox.Inputs{
+	return startInputs(t, sandbox.Inputs{
 		ProjectDir:  project,
 		ReadOnly:    []sandbox.Mount{{Source: cfg, Target: cfgTarget}},
 		StateVolume: vol,
 	}, nil)
-	return s, gw, sandbox.Expect{ReadOnly: []string{cfgTarget}, State: sandbox.StateDir}
 }
 
 // removeVolume deletes a state volume after the test, once its sessions are
@@ -729,9 +773,9 @@ func TestScratchDirWithReadOnlyConfig(t *testing.T) {
 		ro = append(ro, sandbox.Mount{Source: src, Target: agentDir + "/" + name})
 		targets = append(targets, agentDir+"/"+name)
 	}
-	s, gw := startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t), ReadOnly: ro, Scratch: []string{agentDir}}, nil)
+	s, gw, e := startInputs(t, sandbox.Inputs{ProjectDir: projectDir(t), ReadOnly: ro, Scratch: []string{agentDir}}, nil)
 
-	results, err := Run(s, gw, sandbox.Expect{ReadOnly: targets})
+	results, err := Run(s, gw, e)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -754,7 +798,7 @@ echo trusted > "$d/trust.json" && echo scratch-written`
 
 func TestGatewayGetThroughForwarder(t *testing.T) {
 	requireDocker(t)
-	s, _ := startSandbox(t, nil)
+	s, _, _ := startSandbox(t, nil)
 	data, err := s.GatewayGet("/v1/models")
 	if err != nil {
 		t.Fatal(err)
@@ -788,7 +832,7 @@ func TestGatewayKey(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			in := sandbox.Inputs{ProjectDir: projectDir(t), GatewayKey: c.configured != ""}
-			s, _ := startKeyed(t, in, nil, gw, c.configured)
+			s, _, e := startKeyed(t, in, nil, gw, c.configured)
 
 			_, err := s.GatewayGet("/v1/models")
 			if c.ok && err != nil {
@@ -801,7 +845,7 @@ func TestGatewayKey(t *testing.T) {
 				t.Errorf("error contains the key: %v", err)
 			}
 
-			results, err := Run(s, gw, sandbox.Expect{})
+			results, err := Run(s, gw, e)
 			if err != nil {
 				t.Fatal(err)
 			}

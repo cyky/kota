@@ -408,11 +408,11 @@ func NetworkExists(name string) (bool, error) {
 	return slices.Contains(strings.Fields(string(out)), name), nil
 }
 
-// VMInterfaces returns the IPv4 interface prefixes of the Docker VM itself,
-// read from a throwaway container on the host network.
+// VMInterfaces returns the IPv4 and IPv6 interface prefixes of the Docker
+// VM itself, read from a throwaway container on the host network.
 func (s *Session) VMInterfaces() ([]netip.Prefix, error) {
 	image := s.spec.Services[sandbox.ForwarderService].Image
-	out, err := command("docker", "run", "--rm", "--network", "host", "--entrypoint", "ip", image, "-4", "-o", "addr").Output()
+	out, err := command("docker", "run", "--rm", "--network", "host", "--entrypoint", "ip", image, "-o", "addr").Output()
 	if err != nil {
 		return nil, fmt.Errorf("list VM interfaces: %w", err)
 	}
@@ -420,7 +420,7 @@ func (s *Session) VMInterfaces() ([]netip.Prefix, error) {
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
 		for i := 0; i+1 < len(f); i++ {
-			if f[i] == "inet" {
+			if f[i] == "inet" || f[i] == "inet6" {
 				if p, err := netip.ParsePrefix(f[i+1]); err == nil {
 					prefixes = append(prefixes, p)
 				}

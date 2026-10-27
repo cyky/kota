@@ -27,6 +27,7 @@ func Run(s *docker.Session, gw sandbox.Gateway, e sandbox.Expect) ([]probe.Resul
 	t.Pinned = e.Pinned
 	t.Masked = e.Masked
 	t.State = e.State
+	t.Mounts = e.Mounts
 	probes := probe.Suite(t)
 	out, err := s.Capture("bash", "-c", probe.Script(probes))
 	if err != nil {
@@ -72,13 +73,18 @@ func Targets(s *docker.Session, gw sandbox.Gateway) probe.Targets {
 
 // vmAddrs returns each non-loopback VM interface address plus the first
 // address of its subnet, which is typically the host side of that link.
+// IPv6 link-local addresses are left out: they need an interface to be
+// reached by. A single-address prefix (/32, /128) has no other side to add.
 func vmAddrs(prefixes []netip.Prefix) []string {
 	var addrs []string
 	for _, p := range prefixes {
-		if p.Addr().IsLoopback() || !p.Addr().Is4() {
+		if p.Addr().IsLoopback() || p.Addr().Is6() && p.Addr().IsLinkLocalUnicast() {
 			continue
 		}
 		addrs = append(addrs, p.Addr().String())
+		if p.IsSingleIP() {
+			continue
+		}
 		if first := p.Masked().Addr().Next(); first != p.Addr() {
 			addrs = append(addrs, first.String())
 		}
@@ -111,13 +117,13 @@ func lanGateway() string {
 var EngineQEMUAddrs = []string{"10.0.2.2", "10.0.2.3"}
 
 // EngineHostAddrs are the addresses that lead to the host from inside the
-// Engine VM: QEMU's aliases, the host's own IPv4 addresses and the LAN
-// gateway.
+// Engine VM: QEMU's aliases, the host's own IPv4 and IPv6 addresses and the
+// LAN gateway. Link-local addresses are left out: QEMU doesn't route them.
 func EngineHostAddrs() []string {
 	addrs := slices.Clone(EngineQEMUAddrs)
 	if ifaces, err := net.InterfaceAddrs(); err == nil {
 		for _, a := range ifaces {
-			if p, err := netip.ParsePrefix(a.String()); err == nil && p.Addr().Is4() && !p.Addr().IsLoopback() && !p.Addr().IsLinkLocalUnicast() {
+			if p, err := netip.ParsePrefix(a.String()); err == nil && !p.Addr().IsLoopback() && !p.Addr().IsLinkLocalUnicast() {
 				addrs = append(addrs, p.Addr().String())
 			}
 		}

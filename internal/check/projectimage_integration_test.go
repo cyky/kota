@@ -82,8 +82,7 @@ func TestProjectImagePackageInRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := sandbox.Inputs{ProjectDir: project, Pinned: pinned, ReadOnly: ro}
-	_, m := sandbox.Build(in)
-	s, gw := startInputs(t, in, func(spec *sandbox.Compose) {
+	s, gw, m := startInputs(t, in, func(spec *sandbox.Compose) {
 		agent := spec.Services[sandbox.AgentService]
 		agent.Image = tag
 		spec.Services[sandbox.AgentService] = agent

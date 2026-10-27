@@ -42,6 +42,7 @@ func TestExpectMatchesAgentVolumes(t *testing.T) {
 			Mount{Source: "/Users/me/Projects/ref", Target: ReadOnlyRoot + "/ref"})
 		in.Pinned = append(in.Pinned, Mount{Source: "/tmp/empty-dir", Target: "/workspace/.ssh", Mask: true})
 		in.StateVolume = "kota-state-opencode-x"
+		in.Scratch = []string{Home + "/.pi/agent"}
 		in.Deps = []Mount{{Source: "kota-deps-x-1", Target: "/workspace/node_modules"}}
 		in.Engine = &EngineRoute{Host: "host.docker.internal", APIPort: 2376, Forwards: []PortForward{{Listen: 2376, Target: 50000}}, CertDir: "/tmp/certs"}
 		return in
@@ -99,6 +100,22 @@ func TestExpectMatchesAgentVolumes(t *testing.T) {
 				default:
 					t.Errorf("volume %+v not accounted for", v)
 				}
+			}
+			// The mounts allowed are exactly the agent's volumes and tmpfs
+			// directories.
+			agent := spec.Services[AgentService]
+			var mounts []string
+			for _, v := range agent.Volumes {
+				mounts = append(mounts, v.Target)
+			}
+			for _, tmpfs := range agent.Tmpfs {
+				dir, _, _ := strings.Cut(tmpfs, ":")
+				mounts = append(mounts, dir)
+			}
+			slices.Sort(mounts)
+			allowed := slices.Sorted(slices.Values(got.Mounts))
+			if !slices.Equal(allowed, mounts) {
+				t.Errorf("mounts = %v, want %v", allowed, mounts)
 			}
 		})
 	}

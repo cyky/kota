@@ -100,7 +100,7 @@ func startDeps(t *testing.T, project string, mode sandbox.Mode, caches func(*san
 		t.Cleanup(func() { exec.Command("docker", "volume", "rm", "-f", vol).Run() })
 		in.Deps = append(in.Deps, sandbox.Mount{Source: vol, Target: sandbox.Workspace + "/" + d.Path})
 	}
-	s, _ := startInputs(t, in, caches)
+	s, _, _ := startInputs(t, in, caches)
 	var once sync.Once
 	stop := func() { once.Do(func() { s.Close(); layout.Cleanup(project) }) }
 	t.Cleanup(stop)

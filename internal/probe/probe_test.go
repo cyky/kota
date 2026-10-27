@@ -1,10 +1,12 @@
 package probe
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -34,6 +36,9 @@ func TestSuiteCoversEscapeRoutes(t *testing.T) {
 	mustFail := []string{
 		"internet 1.1.1.1:443",
 		"internet [2606:4700:4700::1111]:443",
+		"internet dns udp 8.8.8.8:53",
+		"internet dns udp [2606:4700:4700::1111]:53",
+		"cloud metadata 169.254.169.254:80",
 		"internet dns example.com",
 		"internet dns ipv6 example.com",
 		"dns host.docker.internal",
@@ -53,7 +58,7 @@ func TestSuiteCoversEscapeRoutes(t *testing.T) {
 			t.Errorf("probe %q must fail", name)
 		}
 	}
-	for _, name := range []string{"gateway /v1/models", "workspace writable"} {
+	for _, name := range []string{"gateway /v1/models", "workspace writable", "privileges dropped", "no unexpected mounts"} {
 		if p, ok := probes[name]; !ok || !p.MustSucceed {
 			t.Errorf("probe %q missing or not must-succeed", name)
 		}
@@ -246,6 +251,148 @@ func TestPinnedProbeRuns(t *testing.T) {
 		if passed := (Result{Probe: p, ExitCode: exitCode(err)}).Passed(); passed != want[path] {
 			t.Errorf("probe %q passed = %v, want %v", p.Name, passed, want[path])
 		}
+	}
+}
+
+// runEdited runs the probe called name from probes locally, after edit has
+// changed a copy of its command, and reports whether it passed.
+func runEdited(t *testing.T, probes []Probe, name string, edit func(cmd []string)) bool {
+	t.Helper()
+	p, ok := byName(probes)[name]
+	if !ok {
+		t.Fatalf("missing probe %q", name)
+	}
+	cmd := slices.Clone(p.Cmd)
+	edit(cmd)
+	return Result{Probe: p, ExitCode: exitCode(exec.Command(cmd[0], cmd[1:]...).Run())}.Passed()
+}
+
+// runWithFile is runEdited with the probe's last argument, the file it
+// reads, replaced by file.
+func runWithFile(t *testing.T, probes []Probe, name, file string) bool {
+	t.Helper()
+	return runEdited(t, probes, name, func(cmd []string) { cmd[len(cmd)-1] = file })
+}
+
+// TestPrivilegesProbeRuns runs the privileges probe locally against status
+// files in the kernel's format.
+func TestPrivilegesProbeRuns(t *testing.T) {
+	const dropped = "Name:\tawk\nUid:\t501\t501\t501\t501\nGid:\t20\t20\t20\t20\n" +
+		"CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n" +
+		"CapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\nSeccomp:\t2\n"
+	tests := map[string]struct {
+		status string
+		want   bool
+	}{
+		"dropped":          {dropped, true},
+		"effective cap":    {strings.Replace(dropped, "CapEff:\t0000000000000000", "CapEff:\t00000000a80425fb", 1), false},
+		"bounding cap":     {strings.Replace(dropped, "CapBnd:\t0000000000000000", "CapBnd:\t00000000a80425fb", 1), false},
+		"new privs":        {strings.Replace(dropped, "NoNewPrivs:\t1", "NoNewPrivs:\t0", 1), false},
+		"no NoNewPrivs":    {strings.Replace(dropped, "NoNewPrivs:\t1\n", "", 1), false},
+		"root":             {strings.Replace(dropped, "Uid:\t501\t501\t501\t501", "Uid:\t0\t0\t0\t0", 1), false},
+		"saved root uid":   {strings.Replace(dropped, "Uid:\t501\t501\t501\t501", "Uid:\t501\t501\t0\t501", 1), false},
+		"unreadable empty": {"", false},
+	}
+	probes := Suite(testTargets())
+	for name, tt := range tests {
+		status := filepath.Join(t.TempDir(), "status")
+		if err := os.WriteFile(status, []byte(tt.status), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := runWithFile(t, probes, "privileges dropped", status); got != tt.want {
+			t.Errorf("%s: passed = %v, want %v", name, got, tt.want)
+		}
+	}
+}
+
+// TestMountsProbeRuns runs the mounts probe locally against mountinfo files
+// in the kernel's format, with the runtime's own mounts as Docker adds them.
+func TestMountsProbeRuns(t *testing.T) {
+	const runtime = "1 0 0:1 / / rw - overlay overlay rw\n" +
+		"2 1 0:2 / /proc rw - proc proc rw\n" +
+		"3 1 0:3 / /dev rw - tmpfs tmpfs rw\n" +
+		"4 3 0:4 / /dev/shm rw - tmpfs shm rw\n" +
+		"5 1 0:5 / /sys ro - sysfs sysfs ro\n" +
+		"6 5 0:6 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n" +
+		"7 1 254:1 /c/resolv.conf /etc/resolv.conf rw - ext4 /dev/vda1 rw\n" +
+		"8 1 254:1 /c/hostname /etc/hostname rw - ext4 /dev/vda1 rw\n" +
+		"9 1 254:1 /c/hosts /etc/hosts rw - ext4 /dev/vda1 rw\n" +
+		"10 2 0:7 / /proc/keys rw - tmpfs tmpfs rw\n" +
+		"14 1 254:1 /usr/bin/docker-init /sbin/docker-init ro - ext4 /dev/vda1 rw\n" +
+		"11 1 0:8 / /home/agent rw - tmpfs tmpfs rw\n" +
+		`12 1 0:9 /p /workspace/my\040dir rw - virtiofs m rw` + "\n"
+	tests := map[string]struct {
+		extra string
+		want  bool
+	}{
+		"expected only":  {"", true},
+		"docker socket":  {"13 1 0:10 /run/docker.sock /var/run/docker.sock rw - tmpfs tmpfs rw\n", false},
+		"host directory": {"13 1 0:9 /Users /host rw - virtiofs m rw\n", false},
+		"etc file":       {"13 1 254:1 /x /etc/shadow rw - ext4 /dev/vda1 rw\n", false},
+		"prefix of one":  {"13 1 0:9 /p /workspace/my rw - virtiofs m rw\n", false},
+		"devious name":   {"13 1 0:9 /p /devices rw - virtiofs m rw\n", false},
+	}
+	tt := testTargets()
+	tt.Mounts = []string{"/home/agent", "/workspace/my dir"}
+	probes := Suite(tt)
+	for name, test := range tests {
+		mountinfo := filepath.Join(t.TempDir(), "mountinfo")
+		if err := os.WriteFile(mountinfo, []byte(runtime+test.extra), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := runWithFile(t, probes, "no unexpected mounts", mountinfo); got != test.want {
+			t.Errorf("%s: passed = %v, want %v", name, got, test.want)
+		}
+	}
+}
+
+// TestUDPDNSProbeRuns runs a UDP DNS probe locally against a server on
+// loopback: it may only fail (and so pass) when no reply comes back.
+func TestUDPDNSProbeRuns(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	queries := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 512)
+		n, addr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		queries <- slices.Clone(buf[:n])
+		// A reply echoes the query's ID; the rest doesn't matter here.
+		conn.WriteToUDP(append(slices.Clone(buf[:2]), 0x81, 0x80), addr)
+	}()
+
+	probes := Suite(testTargets())
+	// The probe's server and port are swapped for a local server's.
+	run := func(port int) bool {
+		return runEdited(t, probes, "internet dns udp 8.8.8.8:53", func(cmd []string) {
+			i := slices.Index(cmd, "8.8.8.8")
+			if i < 0 || cmd[i+1] != "53" {
+				t.Fatalf("no server and port in %q", cmd)
+			}
+			cmd[i], cmd[i+1] = "127.0.0.1", strconv.Itoa(port)
+		})
+	}
+	if run(conn.LocalAddr().(*net.UDPAddr).Port) {
+		t.Error("probe passed although the server replied")
+	}
+	if q := <-queries; len(q) < 12 || string(q[:2]) != "ko" || !strings.Contains(string(q), "\x07example\x03com\x00") {
+		t.Errorf("query = %q, want a DNS query for example.com with ID ko", q)
+	}
+	silent, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { silent.Close() })
+	if !run(silent.LocalAddr().(*net.UDPAddr).Port) {
+		t.Error("probe failed although no reply came back")
 	}
 }
 

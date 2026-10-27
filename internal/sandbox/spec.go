@@ -234,6 +234,10 @@ type Expect struct {
 	// State is the agent's state directory, which must be writable. Empty
 	// skips the probe.
 	State string
+	// Mounts are every mount point kota gives the agent container: its
+	// volumes and tmpfs directories. Any other mount, besides the
+	// container runtime's own, fails the probes.
+	Mounts []string
 }
 
 // expect derives the probe expectations from the agent's volumes and the
@@ -241,6 +245,7 @@ type Expect struct {
 func expect(volumes []Volume, masks []string) Expect {
 	var e Expect
 	for _, v := range volumes {
+		e.Mounts = append(e.Mounts, v.Target)
 		switch {
 		case v.ReadOnly:
 			e.ReadOnly = append(e.ReadOnly, v.Target)
@@ -492,7 +497,8 @@ func Build(in Inputs) (Compose, Expect) {
 		agent.PassEnv = []string{GatewayKeyEnv}
 	}
 	agent.Volumes = volumes
-	for _, dir := range append([]string{Home}, in.Scratch...) {
+	tmpfs := append([]string{Home}, in.Scratch...)
+	for _, dir := range tmpfs {
 		agent.Tmpfs = append(agent.Tmpfs, fmt.Sprintf("%s:uid=%d,gid=%d,mode=0700", dir, in.UID, in.GID))
 	}
 	agent.StdinOpen = true
@@ -509,6 +515,7 @@ func Build(in Inputs) (Compose, Expect) {
 	}
 	spec := Compose{Name: ProjectName(key), Volumes: named, Services: services}
 	expected := expect(agent.Volumes, masks)
+	expected.Mounts = append(expected.Mounts, tmpfs...)
 	if prep {
 		agent.Networks = map[string]*NetworkAttach{egressNetwork: {}}
 		spec.Networks = map[string]Network{egressNetwork: {}}

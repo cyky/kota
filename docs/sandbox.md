@@ -97,7 +97,7 @@ Details: [Engine VM](engine-vm.md); why a VM: [ADR 0001](adr/0001-engine-vm-for-
 
 ### 9. Everything is checked before every session
 
-Before every `run` and `shell`, probes run in a fresh container of the same setup. They try to reach the internet over IPv4 and IPv6, external DNS, the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN, and check that read-only mounts reject writes and that the gateway and workspace work. The Engine VM has its own probes. Any failure blocks the session. `kota check` shows the mounts, masks and probe results without starting an agent.
+Before every `run` and `shell`, probes run in a fresh container of the same setup. They try to reach the internet over IPv4 and IPv6, external DNS over Docker's resolver and over UDP, the cloud metadata address, the host and Docker VM addresses (including the gateway port directly, bypassing the forwarder) and the LAN, and check that read-only mounts reject writes, that the gateway and workspace work, that the container holds no privileges, and that it has no mounts besides kota's and Docker's own. The Engine VM has its own probes. Any failure blocks the session. `kota check` shows the mounts, masks and probe results without starting an agent.
 
 Details: [Sessions](sessions.md#containment-probes).
 

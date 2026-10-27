@@ -75,7 +75,20 @@ type Targets struct {
 	// State is the agent's state directory, which must be writable so
 	// sessions persist. Empty skips the probe.
 	State string
+	// Mounts are the mount points kota gives the agent container. Any other
+	// mount, besides the container runtime's own, fails the probe.
+	Mounts []string
 }
+
+// metadataAddr is the cloud instance metadata service, which hands out the
+// machine's credentials on most clouds.
+const metadataAddr = "169.254.169.254"
+
+// runtimeMounts matches the mount points a container runtime adds: the
+// root, /proc, /sys and /dev with what is under them, the files Docker
+// writes for name resolution, and its init binary when the daemon runs
+// containers with "init": true.
+const runtimeMounts = `$5 == "/" || $5 ~ /^\/(proc|sys|dev)(\/|$)/ || $5 ~ /^\/etc\/(hosts|hostname|resolv\.conf)$/ || $5 == "/sbin/docker-init"`
 
 // Suite returns the network, workspace and mount probes for targets.
 func Suite(t Targets) []Probe {
@@ -83,6 +96,9 @@ func Suite(t Targets) []Probe {
 		tcp("internet 1.1.1.1:443", "1.1.1.1", 443),
 		tcp("internet 8.8.8.8:53", "8.8.8.8", 53),
 		tcp("internet [2606:4700:4700::1111]:443", "2606:4700:4700::1111", 443),
+		udpDNS("internet dns udp 8.8.8.8:53", "8.8.8.8"),
+		udpDNS("internet dns udp [2606:4700:4700::1111]:53", "2606:4700:4700::1111"),
+		tcp("cloud metadata "+metadataAddr+":80", metadataAddr, 80),
 		{Name: "internet dns example.com", Cmd: []string{"getent", "hosts", "example.com"}},
 		{Name: "internet dns ipv6 example.com", Cmd: []string{"getent", "ahostsv6", "example.com"}},
 		{Name: "dns host.docker.internal", Cmd: []string{"getent", "hosts", "host.docker.internal"}},
@@ -119,6 +135,27 @@ exec curl -fsS -m 3 -o /dev/null "$@" "$url"`, "sh", t.GatewayURL + "/v1/models"
 			MustSucceed: true,
 		})
 	}
+	probes = append(probes,
+		Probe{
+			// No capabilities in any set, no_new_privs, and no root UID.
+			Name: "privileges dropped",
+			Cmd: []string{"awk", `/^Cap(Inh|Prm|Eff|Bnd|Amb):/ && $2 !~ /^0+$/ { bad = 1 }
+/^Uid:/ { for (i = 2; i <= 5; i++) if ($i == 0) bad = 1 }
+/^NoNewPrivs:/ { nnp = $2 }
+END { exit bad || nnp != 1 }`, "/proc/self/status"},
+			MustSucceed: true,
+		},
+		Probe{
+			// Escaped mount points go through the environment, one per line,
+			// as the pinned probes' do.
+			Name: "no unexpected mounts",
+			Cmd: []string{"env", "KOTA_MOUNTS=" + mountList(t.Mounts), "awk", `BEGIN { n = split(ENVIRON["KOTA_MOUNTS"], m, "\n"); for (i = 1; i <= n; i++) ok[m[i]] = 1 }
+($5 in ok) || ` + runtimeMounts + ` { next }
+{ bad = 1 }
+END { exit bad }`, "/proc/self/mountinfo"},
+			MustSucceed: true,
+		},
+	)
 	for _, path := range t.ReadOnly {
 		// A missing mount exits 0, so it fails the probe rather than passing
 		// because there is nothing to write to.
@@ -163,10 +200,33 @@ func MountinfoEscape(path string) string {
 	return b.String()
 }
 
+// mountList is paths escaped as in /proc/self/mountinfo, one per line.
+func mountList(paths []string) string {
+	escaped := make([]string, len(paths))
+	for i, p := range paths {
+		escaped[i] = MountinfoEscape(p)
+	}
+	return strings.Join(escaped, "\n")
+}
+
 func tcp(name, host string, port int) Probe {
 	return Probe{
 		Name: name,
 		Cmd:  []string{"bash", "-c", `exec 3<>"/dev/tcp/$1/$2"`, "bash", host, strconv.Itoa(port)},
+	}
+}
+
+// dnsQuery is a DNS query for example.com's A record, with the ID "ko".
+const dnsQuery = `\x6b\x6f\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01`
+
+// udpDNS sends dnsQuery to server's port 53 over UDP and succeeds only on
+// a reply, whose first byte is the ID's. UDP has no connection to refuse,
+// so the reply is the proof.
+func udpDNS(name, server string) Probe {
+	return Probe{
+		Name: name,
+		Cmd: []string{"bash", "-c", `exec 3<>"/dev/udp/$1/$2" && printf "$3" >&3 && IFS= read -r -t 1 -n 1 c <&3 && [ "$c" = k ]`,
+			"bash", server, "53", dnsQuery},
 	}
 }
 

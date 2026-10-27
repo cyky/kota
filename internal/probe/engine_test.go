@@ -28,6 +28,7 @@ func TestEngineSuiteCoversEscapeRoutes(t *testing.T) {
 		"engine internet 1.1.1.1:443",
 		"engine internet 8.8.8.8:53",
 		"engine internet [2606:4700:4700::1111]:443",
+		"engine cloud metadata 169.254.169.254:80",
 		"engine dns example.com",
 		"engine dns example.com via 10.0.2.3",
 		"engine dns example.com via 1.1.1.1",
