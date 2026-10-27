@@ -49,7 +49,7 @@ The agent container is attached only to an internal Docker network:
 - Isolated gateway mode means the Docker VM itself has no address on that network, so its own services (for example its sshd) can't be reached either.
 - A small forwarder container (socat) sits on both the internal network and a normal one, and relays exactly one port to the **Gateway**. Inside the sandbox it is `http://gateway:8080`. For a **Gateway** that runs in a container, the forwarder joins that container's Docker network, named in your config, instead of the normal one.
 
-The agent can't reach the internet, DNS, the LAN, the host's other ports or the Docker VM. It can't send your code anywhere, and it can't download anything. Dependencies are installed beforehand by `kota prep`, which runs without an agent.
+The agent can't reach the internet, DNS, the LAN, the host's other ports or the Docker VM. It can't send your code anywhere, and it can't download anything, as long as the **Gateway** itself stays local: a gateway that forwards to a cloud provider is a route out, and kota can't tell where a gateway forwards (see the limits below). Dependencies are installed beforehand by `kota prep`, which runs without an agent.
 
 Details: [Sessions](sessions.md#network).
 
@@ -124,6 +124,7 @@ kota reduces risk; it isn't a guarantee. Know these before you point it at a pro
 - **`--ro` paths** are mounted as they are, without masks.
 - **The gateway key**, if you set one, is readable by the agent. Use a key meant only for the gateway.
 - **The model.** The agent can use the gateway freely, including other models it serves.
+- **A gateway that forwards to the internet.** kota trusts whatever answers at the gateway address. A gateway such as LiteLLM with even one cloud provider configured lets the agent send project code to that provider, and the probes can't see it. Point kota only at a gateway that serves local models, and keep any cloud routing on a separate instance.
 
 **What the agent can still change**
 
